@@ -565,8 +565,10 @@ mod tests {
         let path = text.split_whitespace().find(|w| w.contains("grimoire-secrets")).unwrap().trim_end_matches('.');
         assert_eq!(std::fs::read_to_string(path).unwrap(), "hunter2");
 
-        // Always allowed now: no question, and the log has both attempts.
-        vault_use(&db, &store, "r1", args(), |_| async { panic!("should not ask") }).await.unwrap();
+        // Always allowed now: no question, and the log has every attempt.
+        let again = vault_use(&db, &store, "r1", args(), |_| async { panic!("should not ask") }).await.unwrap();
+        let path = again.split_whitespace().find(|w| w.contains("grimoire-secrets")).unwrap().trim_end_matches('.');
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "hunter2");
         let outcomes: Vec<String> = vault::uses(&db, &item.id).unwrap().into_iter().map(|u| u.outcome).collect();
         assert_eq!(outcomes.len(), 3);
         assert!(outcomes.contains(&"denied".to_string()));

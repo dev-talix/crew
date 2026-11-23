@@ -559,6 +559,7 @@ pub fn run() {
             let edge = db.setting(DOCK_EDGE).ok().flatten().and_then(|e| dock::Edge::parse(&e));
             // Agents get the Grimoire tools only when this socket is up; Grimoire still works without them.
             let themes_dir = themes::dir(&dir);
+            vault::clear_hand_offs();
             let approvals = Arc::new(approvals::Approvals::default());
             permissions::install(app.handle().clone(), db.clone(), approvals.clone());
             #[cfg(target_os = "macos")]

@@ -291,6 +291,16 @@ fn secrets_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Removes pipes left by an earlier run that quit before they were read or expired. Nothing feeds
+/// them any more, so reading one would hang.
+pub fn clear_hand_offs() {
+    if let Ok(dir) = secrets_dir() {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Puts `value` in a named pipe that gives it out to one reader, then removes itself. The pipe is
 /// removed unread after `ttl`.
 pub fn hand_off(value: String, ttl: Duration) -> Result<PathBuf, String> {
