@@ -7,7 +7,7 @@ import { ThemePicker } from "./ThemeEditor";
 import { appIcon, readMode, setAppIcon, setMode, type AppIconSetting, type ModeSetting } from "./themeStore";
 import nightIcon from "./assets/icon-night.svg";
 import paperIcon from "./assets/icon-paper.svg";
-import { BarsIcon, DownloadIcon, GearIcon, PaletteIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
+import { BarsIcon, CloseIcon, DownloadIcon, GearIcon, PaletteIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
 import UpdatesPage from "./UpdatesPage";
 import UsagePage from "./UsagePage";
 import PermissionsPage from "./PermissionsPage";
@@ -317,6 +317,28 @@ export default function SettingsPage(props: { section?: SettingsSection; agents:
           <UpdatesPage version={appVersion() ?? "0.1.0"} />
         </Match>
       </Switch>
+    </div>
+  );
+}
+
+/** Settings over the app, closed with the X, Escape, or a click outside. */
+export function SettingsDialog(props: { section: SettingsSection; agents: Agent[]; onClose: () => void }) {
+  const onKey = (e: KeyboardEvent) => {
+    // A sheet opened from Settings (a vault item, the theme editor) takes Escape first.
+    if (e.key === "Escape" && !document.querySelector(".sheet-backdrop")) props.onClose();
+  };
+  onSettled(() => {
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+  return (
+    <div class="settings-backdrop" onClick={(e) => e.target === e.currentTarget && props.onClose()}>
+      <div class="settings-dialog" role="dialog" aria-modal="true" aria-label="Settings">
+        <button type="button" class="icon-button settings-close" aria-label="Close settings" title="Close (Esc)" onClick={props.onClose}>
+          <CloseIcon />
+        </button>
+        <SettingsPage agents={props.agents} section={props.section} />
+      </div>
     </div>
   );
 }

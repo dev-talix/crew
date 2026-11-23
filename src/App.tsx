@@ -7,7 +7,7 @@ import Chat from "./Chat";
 import { createChatStore } from "./chatStore";
 import HomePage from "./HomePage";
 import RoutinesPage from "./RoutinesPage";
-import SettingsPage from "./SettingsPage";
+import { SettingsDialog } from "./SettingsPage";
 import WorkflowsPage, { type SpellIntent } from "./WorkflowsPage";
 import { api, errorText, onEvent, onMountAsync, PROVIDER_NAMES, subscribe, type Agent, type Workflow } from "./api";
 import { inkFor } from "./avatar";
@@ -19,7 +19,7 @@ import { shownIcon } from "./themeStore";
 import { startUpdateChecks, updateCheck } from "./updateStore";
 import type { SettingsSection } from "./SettingsPage";
 
-type View = "home" | "routines" | "workflows" | "settings" | "new" | { agent: string };
+type View = "home" | "routines" | "workflows" | "new" | { agent: string };
 
 function NavItem(props: { label: string; icon: JSX.Element; active: boolean; onClick: () => void; shortcut?: string }) {
   return (
@@ -45,11 +45,9 @@ export default function App() {
   const [loadError, setLoadError] = createSignal("");
   const [spells, setSpells] = createSignal<Workflow[]>([]);
   const [spellIntent, setSpellIntent] = createSignal<SpellIntent | null>(null);
-  const [settingsSection, setSettingsSection] = createSignal<SettingsSection | undefined>();
-  const openSettings = (section?: SettingsSection) => {
-    setSettingsSection(section);
-    setView("settings");
-  };
+  // Settings is a dialog over whatever page is open; the value is the section it opens on.
+  const [settings, setSettings] = createSignal<SettingsSection | null>(null);
+  const openSettings = (section?: SettingsSection) => setSettings(section ?? "general");
   const agentById = (id: string) => agents().find((a) => a.id === id);
   const loadSpells = () => api.listWorkflows().then(setSpells, () => {});
   const openSpells = (intent: SpellIntent | null) => {
@@ -133,7 +131,7 @@ export default function App() {
       setView("new");
     } else if (e.key === ",") {
       e.preventDefault();
-      setView("settings");
+      setSettings((open) => (open ? null : "general"));
     } else if (/^[1-9]$/.test(e.key)) {
       const agent = agents()[Number(e.key) - 1];
       if (agent) {
@@ -244,7 +242,7 @@ export default function App() {
               </button>
             )}
           </Show>
-          <NavItem label="Settings" icon={<GearIcon />} active={is("settings")} onClick={() => openSettings()} shortcut="⌘," />
+          <NavItem label="Settings" icon={<GearIcon />} active={settings() !== null} onClick={() => openSettings()} shortcut="⌘," />
         </div>
       </aside>
 
@@ -286,9 +284,6 @@ export default function App() {
             <Match when={is("workflows")}>
               <WorkflowsPage agents={agents()} onOpenAgent={openAgent} intent={spellIntent()} onIntentDone={() => setSpellIntent(null)} />
             </Match>
-            <Match when={is("settings")}>
-              <SettingsPage agents={agents()} section={settingsSection()} />
-            </Match>
             <Match when={true}>
               <HomePage
                 agents={agents()}
@@ -302,6 +297,9 @@ export default function App() {
           </Switch>
         </Show>
       </main>
+      <Show when={settings()}>
+        {(section) => <SettingsDialog agents={agents()} section={section()} onClose={() => setSettings(null)} />}
+      </Show>
       <Approvals agents={agents()} />
     </div>
   );
