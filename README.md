@@ -136,7 +136,9 @@ system `ssh` and talks to it over the same stdio stream it uses locally. Set up 
    ssh with `BatchMode=yes`, so it can't answer prompts. Connect once in Terminal to accept the
    host key.
 3. Install Codex or Claude on that Mac and sign in there. Grimoire runs it from a login shell
-   (`$SHELL -lc`), so PATH includes what your `.zprofile` or `.profile` adds.
+   (`$SHELL -lc`), so PATH includes what your `.zprofile` or `.profile` adds. When the CLI isn't
+   there, as with one installed through nvm, Grimoire also takes PATH from an interactive shell
+   (`.zshrc`).
 
 "Check connection" in the form shows whether the Mac answers and where `codex` and `claude` are on
 it. The workspace is a path on that Mac, a full path or one under `~/`, and defaults to a new folder

@@ -87,11 +87,22 @@ fn in_login_shell(script: &str) -> String {
     format!("exec \"$SHELL\" -lc {}", quote(script))
 }
 
+/// Finds `program` when the login shell's PATH lacks it, as with a CLI installed through nvm, which
+/// loads only in interactive shells (~/.zshrc). It asks an interactive shell for its PATH, with stdin
+/// closed and its output captured so nothing it prints reaches the CLI's stream, and adds that PATH.
+fn find_cli(program: &str) -> String {
+    let ask = r#""$SHELL" -ic 'printf "\n__GRIMOIRE_PATH__=%s\n" "$PATH"' </dev/null 2>/dev/null | sed -n 's/^__GRIMOIRE_PATH__=//p' | tail -n 1"#;
+    format!(
+        "command -v {program} >/dev/null 2>&1 || {{ p=$({ask}); if [ -n \"$p\" ]; then PATH=\"$p:$PATH\"; export PATH; fi; }}; ",
+        program = quote(program)
+    )
+}
+
 /// The command the remote Mac runs for a familiar: make and enter its workspace, then become the CLI.
 /// Making the folder here too covers imported familiars and a folder someone deleted.
 pub fn launch_script(workspace: &str, program: &str, args: &[String]) -> String {
     let dir = quote_path(workspace);
-    let mut script = format!("mkdir -p -- {dir} && cd -- {dir} && exec {}", quote(program));
+    let mut script = format!("{}mkdir -p -- {dir} && cd -- {dir} && exec {}", find_cli(program), quote(program));
     for arg in args {
         script.push(' ');
         script.push_str(&quote(arg));
@@ -422,6 +433,11 @@ pub struct HostCheck {
 
 const CHECK_SCRIPT: &str = r#"printf 'codex=%s\n' "$(command -v codex)"; printf 'claude=%s\n' "$(command -v claude)""#;
 
+/// The check, finding each CLI the way a turn would.
+fn check_script() -> String {
+    format!("{}{}{CHECK_SCRIPT}", find_cli("codex"), find_cli("claude"))
+}
+
 /// Reads the CLI paths from the check script's output, skipping anything a profile printed.
 pub fn parse_check(stdout: &str) -> (Option<String>, Option<String>) {
     let find = |key: &str| {
@@ -439,7 +455,7 @@ pub fn parse_check(stdout: &str) -> (Option<String>, Option<String>) {
 pub async fn check_host(host: String) -> Result<HostCheck, String> {
     let host = clean_host(Some(&host))?.ok_or("Write the other Mac's SSH destination first.")?;
     let unanswered = |error: String| Ok(HostCheck { reachable: false, codex: None, claude: None, error: Some(error) });
-    let output = match run(&host, in_login_shell(CHECK_SCRIPT), TIMEOUT).await {
+    let output = match run(&host, in_login_shell(&check_script()), TIMEOUT).await {
         Ok(output) => output,
         Err(SshError::Offline) => {
             set_offline(&host, true);
@@ -715,7 +731,8 @@ mod tests {
             ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30", "me@studio.local", "--", "echo hi"]
         );
         let script = launch_script("~/w", "codex", &["app-server".into()]);
-        assert_eq!(script, r#"exec "$SHELL" -lc 'mkdir -p -- "$HOME"/'\''w'\'' && cd -- "$HOME"/'\''w'\'' && exec '\''codex'\'' '\''app-server'\'''"#);
+        assert!(script.starts_with(r#"exec "$SHELL" -lc 'command -v "#), "{script}");
+        assert!(script.ends_with(r#"mkdir -p -- "$HOME"/'\''w'\'' && cd -- "$HOME"/'\''w'\'' && exec '\''codex'\'' '\''app-server'\'''"#), "{script}");
     }
 
     /// Runs the remote command in a local `sh`, standing in for the remote shell and its login shell,
@@ -774,9 +791,42 @@ mod tests {
         assert_eq!(parse_check(""), (None, None));
     }
 
+    /// A CLI that only an interactive shell finds, like one from nvm, is still found, and whatever
+    /// the interactive shell prints stays out of the CLI's output.
+    #[test]
+    fn finds_a_cli_only_an_interactive_shell_has() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("grimoire-path-{}", uuid::Uuid::new_v4()));
+        let bin = root.join("nvm-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let write = |path: &std::path::Path, body: &str| {
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write(&bin.join("fakecli"), "#!/bin/sh\necho \"fakecli ran with $*\"\n");
+        // A shell that adds nvm's folder to PATH only when interactive, and greets on stdout.
+        let shell = root.join("fake-shell");
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = -ic ]; then echo 'Welcome!'; PATH={}:$PATH; export PATH; fi\nshift\nexec /bin/sh -c \"$1\"\n",
+            bin.display()
+        );
+        write(&shell, &body);
+        let script = launch_script(&root.join("ws").to_string_lossy(), "fakecli", &["go".into()]);
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .env("SHELL", &shell)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(stdout, "fakecli ran with go\n", "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn the_check_script_reports_both_clis() {
-        let output = std::process::Command::new("/bin/sh").arg("-c").arg(in_login_shell(CHECK_SCRIPT)).env("SHELL", "/bin/sh").output().unwrap();
+        let output = std::process::Command::new("/bin/sh").arg("-c").arg(in_login_shell(&check_script())).env("SHELL", "/bin/sh").output().unwrap();
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(text.contains("codex=") && text.contains("claude="), "{text}");
     }
