@@ -9,6 +9,7 @@ mod delegation;
 mod dock;
 mod drafts;
 mod exports;
+mod handoffs;
 mod helpers;
 mod inbox;
 mod ledger;
@@ -728,6 +729,7 @@ pub fn run() {
             chats::delete_chat,
             chats::search_messages,
             side::side_thread,
+            handoffs::list_handoffs,
             get_settings,
             list_models,
             dock_edge,

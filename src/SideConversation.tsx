@@ -11,10 +11,10 @@ const STATE_NOTES = { working: "working", replied: "replied", failed: "couldn't 
  * A familiar talking to another behind the scenes. The row sits in the asking familiar's chat and opens
  * the side conversation in place, live while the other familiar works.
  */
-export default function SideConversation(props: { message: Message; asker: string }) {
+export default function SideConversation(props: { message: Message; asker: string; startOpen?: boolean }) {
   const chatId = () => props.message.source ?? "";
   const partner = () => partnerName(props.message.text);
-  const [open, setOpen] = createSignal(false);
+  const [open, setOpen] = createSignal(props.startOpen ?? false);
   const [messages, setMessages] = createSignal<Message[]>([]);
   const [gone, setGone] = createSignal(false);
   const state = createMemo(() => sideState(messages()));

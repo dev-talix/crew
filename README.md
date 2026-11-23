@@ -276,6 +276,9 @@ The asking familiar's chat shows a row like "Asked Scribe" or "Messaged Scribe".
 the conversation in place, live while the other familiar works. Side conversations stay out of the
 chat list, search, and backups.
 
+Handoffs in the sidebar lists the latest 100 of these exchanges, newest first: who handed what to
+whom, when, whether it's Waiting, Accepted, Done, or Failed, and a link that opens each thread.
+
 Grimoire refuses a question or message when:
 
 - a familiar asks itself;

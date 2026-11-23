@@ -421,6 +421,12 @@ impl Runtime {
         }
     }
 
+    /// Whether a side conversation's turn holds its lane (`side::lane_key`) right now.
+    pub fn side_running(&self, key: &str) -> bool {
+        let lock = self.sides.lock().ok().and_then(|sides| sides.get(key).cloned());
+        lock.is_some_and(|lock| lock.try_lock().is_err())
+    }
+
     /// Runs a background helper's one turn in its hidden chat (see `helpers`): `task` is shown in the
     /// transcript and `prompt` goes to the CLI, on a fresh session in the familiar's own settings.
     pub async fn helper_turn(self: &Arc<Self>, chat_id: &str, task: &str, prompt: &str, startup: &crate::helpers::Startup) -> TurnOutcome {

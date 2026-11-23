@@ -95,6 +95,22 @@ export interface SideThread {
   messages: Message[];
 }
 
+export type HandoffStatus = "waiting" | "accepted" | "done" | "failed";
+
+/** One ask_familiar or message_familiar exchange, by its side conversation. */
+export interface Handoff {
+  /** The side conversation's id. */
+  id: string;
+  fromId: string;
+  toId: string;
+  kind: "ask" | "message";
+  /** The first message, trimmed. */
+  what: string;
+  createdAt: number;
+  updatedAt: number;
+  status: HandoffStatus;
+}
+
 export interface SideMessageEvent {
   chatId: string;
   message: Message;
@@ -461,6 +477,8 @@ export const api = {
   deleteChat: (chatId: string) => invoke<void>("delete_chat", { chatId }),
   searchMessages: (query: string) => invoke<SearchHit[]>("search_messages", { query, limit: 30 }),
   sideThread: (chatId: string) => invoke<SideThread>("side_thread", { chatId }),
+  /** The latest familiar to familiar handoffs, newest first. */
+  listHandoffs: () => invoke<Handoff[]>("list_handoffs"),
   lastMessages: () => invoke<Message[]>("last_messages"),
   listModels: (provider: Provider) => invoke<ModelOption[]>("list_models", { provider }),
   dockEdge: () => invoke<"left" | "right" | null>("dock_edge"),
@@ -608,7 +626,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

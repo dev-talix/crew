@@ -14,6 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
+use tauri::Emitter;
 
 /// How long a familiar waits for a reply to `ask_familiar`.
 pub const TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -215,9 +216,25 @@ where
         can_remember: false,
     };
     match approve(request).await {
-        Decision::Deny => Err(format!("The person didn't let you {verb} {}. Carry on without it.", out.target.name)),
+        Decision::Deny => {
+            record_denial(db, out, verb)?;
+            Err(format!("The person didn't let you {verb} {}. Carry on without it.", out.target.name))
+        }
         _ => Ok(()),
     }
+}
+
+/// Keeps a denied question or message in the handoffs list: its conversation, a new one or the one
+/// it followed up on, gets the request and an error row saying the person said no.
+fn record_denial(db: &Db, out: &Outgoing, kind: &str) -> Result<(), String> {
+    let chat = match &out.thread {
+        Some(chat) => chat.id.clone(),
+        None => side::create(db, &out.asker.id, &out.target.id, &out.message)?.id,
+    };
+    crate::handoffs::mark(db, &chat, kind)?;
+    db.insert_message_in(&chat, &out.target.id, "user", &out.message, "done", Some(&format!("From {}", out.asker.name)))?;
+    db.insert_message_in(&chat, &out.target.id, "error", "The person didn't allow this.", "done", None)?;
+    Ok(())
 }
 
 /// How a familiar finds its way back to a conversation.
@@ -313,11 +330,13 @@ static LIMITER: LazyLock<Limiter> = LazyLock::new(Limiter::default);
 
 /// Opens the conversation, a new one or the one being followed up, and links it from the asker's
 /// chat, or from the side conversation the asker is answering in (`lane`).
-fn open(ctx: &crate::tools::Context, lane: Option<&str>, out: &Outgoing, verb: &str) -> Result<String, String> {
+/// `kind` is "ask" or "message", for the handoffs list.
+fn open(ctx: &crate::tools::Context, lane: Option<&str>, out: &Outgoing, verb: &str, kind: &str) -> Result<String, String> {
     let chat = match &out.thread {
         Some(chat) => chat.id.clone(),
         None => side::create(&ctx.db, &out.asker.id, &out.target.id, &out.message)?.id,
     };
+    crate::handoffs::mark(&ctx.db, &chat, kind)?;
     side::link(&ctx.app, &ctx.db, lane, &out.asker.id, &format!("{verb} {}", out.target.name), &chat)?;
     Ok(chat)
 }
@@ -331,7 +350,7 @@ fn deliver(runtime: &std::sync::Arc<crate::runtime::Runtime>, asker_id: &str, ho
 pub async fn run(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, arguments: Value) -> Result<String, String> {
     let approve = |request| ctx.approvals.ask(&ctx.app, request);
     let converse = |out: Outgoing| async move {
-        let chat = open(ctx, lane, &out, "Asked")?;
+        let chat = open(ctx, lane, &out, "Asked", "ask")?;
         let home = crate::chats::current(&ctx.db, &out.asker.id)?;
         // The exchange runs as its own task, so a reply that outlasts the wait still finishes and is
         // saved. When nobody is waiting for it any more, it comes back like a message_familiar reply.
@@ -346,7 +365,10 @@ pub async fn run(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, 
         let outcome = rx.await.unwrap_or_else(|_| TurnOutcome::Failed("The conversation ended unexpectedly.".into()));
         Ok((chat, outcome))
     };
-    ask(&ctx.db, &CHAINS, caller, arguments, TIMEOUT, approve, converse).await
+    let result = ask(&ctx.db, &CHAINS, caller, arguments, TIMEOUT, approve, converse).await;
+    // A denial or a timeout changes the handoffs list without a side message.
+    let _ = ctx.app.emit(crate::handoffs::CHANGED, ());
+    result
 }
 
 /// Runs `message_familiar` for real. The reply goes to the sender's main chat as a new message,
@@ -354,7 +376,7 @@ pub async fn run(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, 
 pub async fn run_message(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, arguments: Value) -> Result<String, String> {
     let approve = |request| ctx.approvals.ask(&ctx.app, request);
     let start = |out: Outgoing| {
-        let chat = open(ctx, lane, &out, "Messaged")?;
+        let chat = open(ctx, lane, &out, "Messaged", "message")?;
         let home = crate::chats::current(&ctx.db, &out.asker.id)?;
         let (runtime, chat_id) = (ctx.runtime.clone(), chat.clone());
         tauri::async_runtime::spawn(async move {
@@ -363,7 +385,9 @@ pub async fn run_message(ctx: &crate::tools::Context, caller: &str, lane: Option
         });
         Ok(chat)
     };
-    message(&ctx.db, &LIMITER, caller, arguments, Instant::now(), approve, start).await
+    let result = message(&ctx.db, &LIMITER, caller, arguments, Instant::now(), approve, start).await;
+    let _ = ctx.app.emit(crate::handoffs::CHANGED, ());
+    result
 }
 
 /// Closes side conversations that Grimoire quit in the middle of: each gets an error row, so it no
@@ -533,6 +557,10 @@ mod tests {
         let args = || json!({ "familiar": "Scribe", "message": "Check the draft" });
         let err = ask(&db, &chains, "a", args(), TIMEOUT, approve(Decision::Deny), never_conversed).await.unwrap_err();
         assert!(err.contains("didn't let you ask Scribe"), "{err}");
+        // The denied question still shows in the handoffs list, as failed.
+        let denied = crate::handoffs::list(&db, 10, |_| false).unwrap();
+        assert_eq!(denied.len(), 1);
+        assert_eq!((denied[0].kind.as_str(), denied[0].what.as_str(), denied[0].status), ("ask", "Check the draft", crate::handoffs::Status::Failed));
         assert!(ask(&db, &chains, "a", args(), TIMEOUT, approve(Decision::Once), replies("ok")).await.is_ok());
         assert_eq!(asked.lock().unwrap()[0], ("Researcher wants to ask Scribe".into(), "Check the draft".into(), "familiar", false));
         assert!(chains.waits.lock().unwrap().is_empty());
