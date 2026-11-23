@@ -5,7 +5,9 @@ import Chat from "./Chat";
 import { createChatStore } from "./chatStore";
 import { api, onEvent, onMountAsync, subscribe, type Agent } from "./api";
 import { inkFor } from "./avatar";
-import { GrimoireIcon } from "./icons";
+import { shownIcon } from "./themeStore";
+import nightIcon from "./assets/icon-night.svg";
+import paperIcon from "./assets/icon-paper.svg";
 import { createMoods } from "./moods";
 import { runningModelName } from "./models";
 import "./dock.css";
@@ -178,7 +180,7 @@ export default function Dock() {
           <span class="dock-sep" aria-hidden="true" />
         </Show>
         <button class="dock-agent dock-home" aria-label="Open Grimoire" title="Open Grimoire" onClick={() => void openInGrimoire()}>
-          <GrimoireIcon />
+          <img class="dock-logo" src={shownIcon() === "night" ? nightIcon : paperIcon} alt="" />
         </button>
       </nav>
 

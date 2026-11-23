@@ -3,9 +3,11 @@ import { api, onEvent, type ThemeEntry, type ThemeList } from "./api";
 import { themeCss, type ThemeFile } from "./theme";
 
 export type ModeSetting = "system" | "light" | "dark";
+export type AppIconSetting = "auto" | "paper" | "night";
 
 const CSS_KEY = "grimoire-theme-css";
 const MODE_KEY = "grimoire-mode";
+const ICON_KEY = "grimoire-app-icon";
 
 const [themes, setThemes] = createSignal<ThemeList>();
 let current: ThemeList | undefined;
@@ -42,11 +44,39 @@ function read(key: string): string | null {
   }
 }
 
+// The theme CSS sets color-scheme, so this also covers themes that only have one appearance.
+const readAppearance = (): "light" | "dark" =>
+  getComputedStyle(document.documentElement).colorScheme.includes("dark") ? "dark" : "light";
+const [appearance, setAppearance] = createSignal<"light" | "dark">("dark");
+const refreshAppearance = () => setAppearance(readAppearance());
+
+/** The appearance on screen now, after the mode setting and the theme. */
+export { appearance };
+
+const readIcon = (): AppIconSetting => {
+  const stored = read(ICON_KEY);
+  return stored === "paper" || stored === "night" ? stored : "auto";
+};
+const [appIcon, setAppIconSignal] = createSignal<AppIconSetting>(readIcon());
+
+/** The app icon setting, and the icon it resolves to: night on a dark appearance when set to auto. */
+export { appIcon };
+export const shownIcon = () => {
+  const choice = appIcon();
+  return choice === "auto" ? (appearance() === "dark" ? "night" : "paper") : choice;
+};
+
+export function setAppIcon(choice: AppIconSetting) {
+  store(ICON_KEY, choice);
+  setAppIconSignal(choice);
+}
+
 function applyActive() {
   const entry = current?.themes.find((t) => t.id === current!.active);
   if (!entry || previewing) return;
   const css = themeCss(entry.theme);
   styleTag().textContent = css;
+  refreshAppearance();
   // Cached so the next launch paints in this theme before the list loads.
   store(CSS_KEY, css);
 }
@@ -54,8 +84,10 @@ function applyActive() {
 /** Shows `theme` without saving it, or goes back to the active theme with `null`. */
 export function previewTheme(theme: ThemeFile | null) {
   previewing = theme !== null;
-  if (theme) styleTag().textContent = themeCss(theme);
-  else applyActive();
+  if (theme) {
+    styleTag().textContent = themeCss(theme);
+    refreshAppearance();
+  } else applyActive();
 }
 
 export async function reloadThemes(): Promise<void> {
@@ -83,16 +115,10 @@ export function previewMode(mode: "light" | "dark" | null) {
   applyMode(mode ?? readMode());
 }
 
-/** The appearance on screen now. */
-export function shownMode(): "light" | "dark" {
-  const forced = document.documentElement.dataset.theme;
-  if (forced === "light" || forced === "dark") return forced;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
-
 function applyMode(mode: ModeSetting) {
   if (mode === "system") delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = mode;
+  refreshAppearance();
 }
 
 /** Applies the cached theme at once, then loads the real list and follows changes from any window. */
@@ -102,7 +128,9 @@ export function startThemes() {
   applyMode(readMode());
   window.addEventListener("storage", (event) => {
     if (event.key === MODE_KEY) applyMode(readMode());
+    if (event.key === ICON_KEY) setAppIconSignal(readIcon());
   });
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", refreshAppearance);
   // Theme files can change in a text editor, so look again whenever the window comes back.
   window.addEventListener("focus", () => void reloadThemes());
   void onEvent("themes_changed", () => void reloadThemes());

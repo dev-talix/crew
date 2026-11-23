@@ -409,6 +409,30 @@ fn set_theme(app: AppHandle, state: State<AppState>, id: String) -> Result<(), S
     Ok(())
 }
 
+/// Shows `icon`, "paper" or "night", in the Dock while Grimoire runs.
+#[tauri::command]
+fn set_app_icon(app: AppHandle, icon: String) -> Result<(), String> {
+    let png: &'static [u8] = match icon.as_str() {
+        "paper" => include_bytes!("../icons/app-paper.png"),
+        "night" => include_bytes!("../icons/app-night.png"),
+        _ => return Err(format!("Unknown app icon: {icon}")),
+    };
+    #[cfg(target_os = "macos")]
+    app.run_on_main_thread(move || {
+        use objc2::{AnyThread, MainThreadMarker};
+        use objc2_app_kit::{NSApplication, NSImage};
+        use objc2_foundation::NSData;
+        let Some(main) = MainThreadMarker::new() else { return };
+        if let Some(image) = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(png)) {
+            unsafe { NSApplication::sharedApplication(main).setApplicationIconImage(Some(&image)) };
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, png);
+    Ok(())
+}
+
 #[tauri::command]
 fn open_themes_folder(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     std::fs::create_dir_all(&state.themes_dir).map_err(|e| e.to_string())?;
@@ -478,7 +502,8 @@ pub fn run() {
             save_theme,
             delete_theme,
             set_theme,
-            open_themes_folder
+            open_themes_folder,
+            set_app_icon
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

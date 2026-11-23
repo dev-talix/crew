@@ -1,68 +1,99 @@
-# Grimoire
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="src/assets/icon-night.svg">
+    <img src="src/assets/icon-paper.svg" width="128" height="128" alt="Grimoire's icon: a red wax seal pressed with a familiar's face">
+  </picture>
+</p>
 
-A small desktop app for persistent AI familiars. Each familiar has a name, a workspace folder, and
-runs on Codex or Claude. Built with Tauri 2, Rust, SolidJS 2, and SQLite.
+<h1 align="center">Grimoire</h1>
 
-The code calls a familiar an agent, a spell a workflow, and a ritual a routine.
+<p align="center">
+  Persistent AI familiars for your Mac. Each one has a name, a face, a workspace folder, and runs on Codex or Claude.
+</p>
 
-## Run
+<p align="center">
+  <img src="docs/screenshots/chat.png" width="820" alt="A conversation with the Researcher familiar in the Tyrian theme">
+</p>
+
+## What it does
+
+- **Familiars** keep their conversation across restarts. Each has an animated outline avatar that
+  blinks, glances, and fidgets when idle, works while busy, smiles when it finishes, and frowns after
+  an error.
+- **Spells** chain familiars: research, then write, then review. Each step gets the last reply.
+  Click a spell in the sidebar to cast it.
+- **Rituals** send a familiar the same message on a schedule, like a morning summary.
+- **Themes** come as seven built-in inks, and you can edit or write your own as JSON.
+- **Familiars make things too.** Ask one for "a spell that…" or "a theme that feels like a rainy
+  library" and it saves it through Grimoire's own tools, credited to it.
+- **The dock** pins your familiars to the edge of the screen, so you can chat without opening
+  the main window.
+- **Voice** dictation in the composer uses macOS speech recognition.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/themes.png" alt="The theme picker in Settings, in the light Lapis theme"></td>
+    <td width="50%"><img src="docs/screenshots/theme-editor.png" alt="The theme editor with color pickers and a live preview"></td>
+  </tr>
+  <tr>
+    <td>Seven inks, each with a dark and a light version.</td>
+    <td>Edit any color and watch the whole app change as you go.</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/familiar-theme.png" alt="A theme called Rainy library, made by the Researcher familiar"></td>
+    <td width="50%"><img src="docs/screenshots/cast-spell.png" alt="Casting the Topic brief spell"></td>
+  </tr>
+  <tr>
+    <td>A theme a familiar made, with its own CSS.</td>
+    <td>Casting a spell from the sidebar.</td>
+  </tr>
+</table>
+
+## Run it
+
+You need [Bun](https://bun.sh), Rust, and `codex` or `claude` installed and signed in. Grimoire reads
+`PATH` from your login shell, so it finds them when you open it from Finder too.
 
 ```sh
 bun install
 bunx tauri dev                    # development
-bunx tauri build --bundles app    # release build: src-tauri/target/release/bundle/macos/Grimoire.app
+bunx tauri build --bundles app    # src-tauri/target/release/bundle/macos/Grimoire.app
 ```
 
-Needs `codex` and/or `claude` installed and signed in. Grimoire reads `PATH` from your login shell, so
-it finds them when you open it from Finder too.
+Shortcuts: ⌘N summons a familiar, ⌘, opens Settings, and ⌘1 to ⌘9 open a familiar.
 
-## Familiars and avatars
+## Familiars
 
-Each familiar has an outline avatar you build in the avatar studio: one of six shapes (orbit, spark,
-cloud, drop, ears, classic), three eye styles, and any color. Avatars blink, glance, wink, and fidget
-when idle, scan while working, smile when a turn finishes, and look worried after an error. Each shape
-has its own moves, like the orbit's moon or the cloud's drizzle. Motion stops when macOS Reduce Motion
-is on. The avatar's color tints that familiar's chat. Open a familiar's settings (the gear in the chat
-header) to change its avatar, name, model, effort, or access, or to delete it.
+Build a familiar's avatar in the avatar studio: one of six shapes (orbit, spark, cloud, drop, ears,
+classic), three eye styles, and any color. Each shape has its own moves, like the orbit's moon or
+the cloud's drizzle, and all motion stops when macOS Reduce Motion is on. The avatar's color tints
+that familiar's chat.
 
-The model chip in the composer shows the model the familiar is running and lets you switch it.
+The gear in the chat header changes a familiar's avatar, name, model, effort, or access, or deletes
+it. The model chip in the composer shows the model it is running and switches it.
 
-## Home, rituals, and spells
+**Access.** "Workspace only" keeps Codex in its `workspace-write` sandbox and runs Claude in
+`acceptEdits` mode, so it can edit files but shell commands are refused. "Full access" uses Codex
+`danger-full-access` and Claude `bypassPermissions`. Neither asks for approval during a turn.
 
-- **Home** lists every familiar with its latest message and the next scheduled rituals.
-- **Rituals** send a prompt to a familiar on a schedule: every few hours, daily at a time, or on chosen
-  weekdays. One timer sleeps until the next due run; a run missed while Grimoire was closed fires once
-  at the next launch. Messages from a ritual are labeled with its name.
-- **Spells** chain familiars. Each step sends instructions to one familiar and waits for its reply;
-  `{{input}}` is the starting text and `{{previous}}` is the last reply (appended automatically
-  when a step does not use it). The sidebar lists them; click one to cast it.
-- **Familiars make spells and themes too.** Every familiar gets Grimoire tools: `list_familiars`,
-  `list_spells`, `create_spell`, `list_themes`, `create_theme`, and `set_theme`. Ask one to "make a
-  spell that…" or "make a theme that feels like a rainy library" and it saves it; Grimoire shows
-  which familiar made it. Familiars cannot cast, edit, or delete spells.
-- **Voice**: the microphone button in the composer dictates with macOS speech recognition.
+## Spells and rituals
 
-## Settings
+A spell is a list of steps, each sent to one familiar, which waits for the reply before the next.
+In a step, `{{input}}` is the text you cast it with and `{{previous}}` is the last reply; the last
+reply is added at the end when a step doesn't use it.
 
-- **Accounts** shows whether `codex` and `claude` are installed and signed in.
-- **Claude billing**: with "Claude subscription" (default), Grimoire removes `ANTHROPIC_API_KEY`,
-  `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` from the `claude` process so it uses your
-  claude.ai Pro or Max sign-in. "API key" leaves them in place.
-- **Dock**: pin your familiars to the left or right edge of the screen. Click one to chat in a
-  panel without opening the main window.
-- **Appearance**: the mode (system, light, or dark) and the theme. See [Themes](#themes).
-
-Shortcuts: ⌘N summon a familiar, ⌘, settings, ⌘1 to ⌘9 open a familiar.
+A ritual sends a prompt every few hours, daily at a time, or on chosen weekdays. One timer sleeps
+until the next run, and a run missed while Grimoire was closed fires once at the next launch.
 
 ## Themes
 
-Grimoire ships seven themes named for old inks and pigments: Tyrian (the default), Iron gall,
-Verdigris, Dragon's blood, Orpiment, Lapis, and Moonstone. Each has a dark and a light version.
+Pick a theme in Settings. The seven built-ins are named for old inks and pigments: Tyrian (the
+default), Iron gall, Verdigris, Dragon's blood, Orpiment, Lapis, and Moonstone. Mode (system, light,
+or dark) is a separate setting.
 
-Your own themes are JSON files in `~/Library/Application Support/dev.talix.grimoire/themes`. Settings
-opens that folder, and Grimoire reloads it whenever its window comes back to the front, so you can edit
-a theme in any text editor. "Make a copy to edit" in Settings opens the same file in an editor with
-color pickers and a live preview.
+Your own themes are JSON files in `~/Library/Application Support/dev.talix.grimoire/themes`.
+Settings opens the folder, and Grimoire reloads it whenever its window comes back to the front, so
+any text editor works. "Make a copy to edit" opens the same file in the built-in editor.
 
 ```json
 {
@@ -73,44 +104,66 @@ color pickers and a live preview.
     "dark": { "canvas": "#14181c" },
     "light": { "canvas": "#f3f5f6", "accent": "#2f6d8f" }
   },
-  "css": "[data-slot=\"sidebar\"] { border-right-width: 2px; }"
+  "css": "[data-slot=\"sidebar\"] { border-right: 2px solid var(--accent); }"
 }
 ```
 
-- `colors` applies to both appearances and `variants.dark` or `variants.light` override it. Each
+- `colors` applies to both appearances, and `variants.dark` or `variants.light` override it. Each
   appearance needs `canvas` (the background) and `accent`; Grimoire derives the rest. A theme with
   only one appearance always shows in it.
 - Optional roles: `sidebar`, `surface`, `raised`, `text`, `textMuted`, `textFaint`, `border`,
-  `accentForeground`, `userBubble`, `success`, `warning`, `danger`, and `dangerSurface`. Colors are hex.
-- `css` runs after Grimoire's own styles. Use the stable hooks rather than class names, which can
-  change: `[data-slot]` is set on `sidebar`, `sidebar-row`, `page`, `chat`, `chat-header`, `message`
-  (with `data-role` of `user`, `assistant`, or `tools`), `composer`, and `dock`. The variables
-  `--font-ui` and `--font-display` set the two typefaces. Remote files don't load: the app's content
-  security policy blocks them.
-- A file that doesn't load shows its error under the theme list in Settings.
+  `accentForeground`, `userBubble`, `success`, `warning`, `danger`, and `dangerSurface`, all in hex.
+- `css` runs after Grimoire's own styles. Target the stable hooks, not class names: `[data-slot]` is
+  set on `sidebar`, `sidebar-row`, `page`, `chat`, `chat-header`, `message` (with `data-role` of
+  `user`, `assistant`, or `tools`), `composer`, and `dock`. `--font-ui` and `--font-display` set the
+  two typefaces. Remote files don't load, because the app's content security policy blocks them.
+- A file that fails to load shows its error under the theme list.
+
+## App icons
+
+Grimoire has two icons, a red wax seal on paper and the same seal on dark ink. Settings switches
+between them or matches the app's appearance. The Dock shows your choice while Grimoire is open;
+Finder and a closed Dock icon show the paper one, which is the bundle icon.
+
+The icons are drawn in `scripts/icons.mjs`. To change them:
+
+```sh
+bun scripts/icons.mjs     # writes src/assets/icon-paper.svg and icon-night.svg
+bunx @resvg/resvg-js-cli --fit-width 1024 src/assets/icon-paper.svg app-icon.png
+bunx @resvg/resvg-js-cli --fit-width 512 src/assets/icon-paper.svg src-tauri/icons/app-paper.png
+bunx @resvg/resvg-js-cli --fit-width 512 src/assets/icon-night.svg src-tauri/icons/app-night.png
+bunx tauri icon app-icon.png    # then delete the android and ios folders it adds
+```
 
 ## How it works
 
-- **Processes.** Nothing starts at launch. Codex familiars share one `codex app-server` process (JSON-RPC
-  over stdio), started on the first Codex message and stopped after 10 idle minutes. Each Claude
-  familiar gets one `claude -p --input-format stream-json` process, started on its first message and
-  stopped after 5 idle minutes. Closing Grimoire stops them all.
-- **Sessions.** The Codex thread ID or Claude session ID is saved per familiar, so a restart resumes the
-  same conversation. "New chat" drops it.
-- **Access.** Workspace only: Codex runs in its `workspace-write` sandbox; Claude runs in
-  `acceptEdits` mode, so it can edit files but shell commands are refused. Full access: Codex
-  `danger-full-access`, Claude `bypassPermissions`. Neither asks for approval during a turn.
+<details>
+<summary>Processes, sessions, storage, and the familiar tools</summary>
+
+- **Processes.** Nothing starts at launch. Codex familiars share one `codex app-server` process
+  (JSON-RPC over stdio), started on the first Codex message and stopped after 10 idle minutes. Each
+  Claude familiar gets one `claude -p --input-format stream-json` process, started on its first
+  message and stopped after 5 idle minutes. Closing Grimoire stops them all.
+- **Sessions.** The Codex thread ID or Claude session ID is saved per familiar, so a restart resumes
+  the same conversation. "New chat" drops it.
 - **Streaming.** Text goes to the window at most every 50 ms and to SQLite every 750 ms and at the
-  end of each turn. Markdown renders only once a message is finished.
-- **Queue.** A message sent while the familiar works waits and runs next. Stop interrupts the turn
+  end of each turn. Markdown renders once a message is finished.
+- **Queue.** A message sent while a familiar works waits and runs next. Stop interrupts the turn
   (Claude through its interrupt request, Codex through `turn/interrupt`) and cancels the queue.
-- **Familiar tools.** Grimoire passes each familiar an MCP server named `grimoire` (`--mcp-config` for
-  Claude, thread config for Codex). The CLI starts `grimoire mcp <socket> <agent-id>`, which relays tool
-  calls to the app over `grimoire.sock` in Grimoire's data folder (owner-only). The tools work in both
-  access modes because they only touch Grimoire's own data.
-- **Storage.** `~/Library/Application Support/dev.talix.grimoire/grimoire.db`, with user themes in
-  `themes/` beside it. Default workspaces are under `~/Grimoire`. Deleting a familiar keeps its
+- **Familiar tools.** Grimoire gives each familiar an MCP server named `grimoire` (`--mcp-config`
+  for Claude, thread config for Codex) with `list_familiars`, `list_spells`, `create_spell`,
+  `list_themes`, `create_theme`, and `set_theme`. The CLI starts `grimoire mcp <socket> <agent-id>`,
+  which relays calls to the app over `grimoire.sock` in its data folder (owner-only). Familiars can't
+  cast, edit, or delete spells.
+- **Claude billing.** With "Claude subscription" (the default), Grimoire removes
+  `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` from the `claude` process
+  so it uses your claude.ai Pro or Max sign-in. "API key" leaves them in place.
+- **Storage.** `~/Library/Application Support/dev.talix.grimoire/grimoire.db`, with your themes in
+  `themes/` beside it. Default workspaces go under `~/Grimoire`. Deleting a familiar keeps its
   workspace folder.
+- **Names.** The code calls a familiar an agent, a spell a workflow, and a ritual a routine.
+
+</details>
 
 ## Checks
 

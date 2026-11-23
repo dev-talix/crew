@@ -164,10 +164,3 @@ export const ExpandIcon = () => (
   </Icon>
 );
 
-export const GrimoireIcon = () => (
-  <Icon>
-    <circle cx="5.5" cy="7" r="2.2" />
-    <circle cx="10.5" cy="7" r="2.2" />
-    <path d="M3.5 11.5h9" />
-  </Icon>
-);

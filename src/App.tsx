@@ -1,4 +1,4 @@
-import { createSignal, createStore, For, Match, onSettled, Show, Switch } from "solid-js";
+import { createEffect, createSignal, createStore, For, Match, onSettled, Show, Switch } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import AgentForm from "./AgentForm";
 import BotAvatar from "./BotAvatar";
@@ -14,6 +14,7 @@ import { runningModelName } from "./models";
 import { createMoods } from "./moods";
 import { ClockIcon, GearIcon, HomeIcon, PlusIcon } from "./icons";
 import { Sheet } from "./ui";
+import { shownIcon } from "./themeStore";
 
 type View = "home" | "routines" | "workflows" | "settings" | "new" | { agent: string };
 
@@ -53,6 +54,10 @@ export default function App() {
     return typeof v === "object" ? v.agent : null;
   };
   const chat = createChatStore(selected);
+  // The Dock icon follows the app icon setting, including the appearance when it is set to match.
+  createEffect(shownIcon, (icon) => {
+    api.setAppIcon(icon).catch(() => {});
+  });
   const moods = createMoods();
   const moodOf = (id: string) => moods.mood(id, !!busy[id]);
   const current = () => agents().find((a) => a.id === selected());

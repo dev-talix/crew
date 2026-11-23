@@ -92,3 +92,44 @@
 .settings-error {
   margin-top: 8px;
 }
+
+.icon-choices {
+  display: flex;
+  gap: 12px;
+}
+
+.icon-choice {
+  flex-direction: column;
+  gap: 6px;
+  width: 132px;
+  padding: 12px 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 12.5px;
+}
+
+.icon-choice:hover {
+  border-color: var(--faint);
+}
+
+.icon-choice.selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.icon-choice-art {
+  display: flex;
+  justify-content: center;
+  height: 64px;
+}
+
+.icon-choice-art img {
+  width: 64px;
+  height: 64px;
+}
+
+/* Two icons side by side for "Match appearance", overlapping so the tile stays the same width. */
+.icon-choice-art img + img {
+  margin-left: -26px;
+}

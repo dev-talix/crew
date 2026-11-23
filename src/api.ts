@@ -190,6 +190,7 @@ export const api = {
   deleteTheme: (id: string) => invoke<void>("delete_theme", { id }),
   setTheme: (id: string) => invoke<void>("set_theme", { id }),
   openThemesFolder: () => invoke<void>("open_themes_folder"),
+  setAppIcon: (icon: "paper" | "night") => invoke<void>("set_app_icon", { icon }),
 };
 
 /**

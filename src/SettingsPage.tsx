@@ -3,12 +3,19 @@ import { createSignal, For, Show } from "solid-js";
 import { api, createFetch, errorText, PROVIDER_NAMES, type DockEdge, type Provider, type ProviderStatus, type Settings } from "./api";
 import { Page, Segmented } from "./ui";
 import { ThemePicker } from "./ThemeEditor";
-import { readMode, setMode, type ModeSetting } from "./themeStore";
+import { appIcon, readMode, setAppIcon, setMode, type AppIconSetting, type ModeSetting } from "./themeStore";
+import nightIcon from "./assets/icon-night.svg";
+import paperIcon from "./assets/icon-paper.svg";
 import "./settings.css";
 
 type Billing = Settings["claudeBilling"];
 
 const PROVIDERS: Provider[] = ["codex", "claude"];
+const APP_ICONS: { value: AppIconSetting; label: string; art: string[] }[] = [
+  { value: "auto", label: "Match appearance", art: [paperIcon, nightIcon] },
+  { value: "paper", label: "Paper", art: [paperIcon] },
+  { value: "night", label: "Night", art: [nightIcon] },
+];
 
 function accountState(status: ProviderStatus | undefined): "loading" | "ok" | "unknown" | "off" {
   if (!status) return "loading";
@@ -206,6 +213,27 @@ export default function SettingsPage() {
           </div>
         </div>
         <ThemePicker mode={mode()} agents={agents() ?? []} />
+
+        <h2 class="section-title">App icon</h2>
+        <div class="icon-choices" role="radiogroup" aria-label="App icon">
+          <For each={APP_ICONS}>
+            {(option) => (
+              <button
+                type="button"
+                role="radio"
+                aria-checked={appIcon() === option.value ? "true" : "false"}
+                class={["icon-choice", { selected: appIcon() === option.value }]}
+                onClick={() => setAppIcon(option.value)}
+              >
+                <span class="icon-choice-art">
+                  <For each={option.art}>{(src) => <img src={src} alt="" />}</For>
+                </span>
+                <span>{option.label}</span>
+              </button>
+            )}
+          </For>
+        </div>
+        <p class="hint settings-footnote">The Dock shows your choice while Grimoire is open. Finder and a closed Dock icon keep the paper one.</p>
 
         <h2 class="section-title">About</h2>
         <div class="list">
