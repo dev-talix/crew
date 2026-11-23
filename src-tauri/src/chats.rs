@@ -366,6 +366,10 @@ struct ChatsChanged<'a> {
 
 fn changed(app: &AppHandle, agent_id: &str, switched: bool) {
     let _ = app.emit("chats_changed", ChatsChanged { agent_id, switched });
+    if switched {
+        // Linked Macs show the current chat, so they reload it.
+        crate::link::record("chat", || serde_json::json!({ "agentId": agent_id }));
+    }
 }
 
 /// Switches the familiar's current chat, dropping the live CLI session so the next turn resumes the new one.

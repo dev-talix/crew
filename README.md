@@ -173,13 +173,19 @@ code on the other. A code is 8 characters, works once, lasts 10 minutes, and die
 tries. Unlinking on either Mac removes the link from both, or from the other one the next time it
 connects.
 
-Grimoire listens on port 47620 on this Mac's Tailscale addresses only (100.64.0.0/10 and
-fd7a:115c:a1e0::/48), refuses connections from anywhere else, and checks for those addresses every
-minute until Tailscale connects. Tailscale encrypts the traffic. Each pair of Macs shares a token
-each way, kept in the Keychain. A linked Mac can only list familiars, read and send chat messages,
-stop turns, and summon familiars that run on the home Mac itself. It can't reach the vault,
-approvals, settings, memory, or Grimoire's tools. Attachments don't cross yet. When a linked Mac is
-offline, its familiars stay listed as of the last time it answered.
+Grimoire asks the Tailscale CLI (`tailscale status --json`) for this Mac's addresses and its peers,
+listens on port 47620 on those addresses only, and drops connections from any address Tailscale
+doesn't list as a peer. It also sends a token or pairing code only to an address Tailscale lists.
+It checks again every minute and moves to new addresses when they change. Without the CLI, it falls
+back to tailnet-range addresses (100.64.0.0/10 and fd7a:115c:a1e0::/48) on Tailscale's own tunnel
+interfaces, never Wi-Fi or Ethernet, since ISPs and hotspots use 100.64.0.0/10 too. Tailscale
+encrypts the traffic. Each pair of Macs shares a token each way, kept in the Keychain. A linked Mac
+can only list familiars, read and send chat messages, stop turns, and summon familiars that run on
+the home Mac itself with workspace access. It can't reach the vault, approvals, settings, memory, or
+Grimoire's tools. Attachments don't cross yet. When a linked Mac is offline, its familiars stay
+listed as of the last time it answered. When it reconnects, it catches up on what it missed, or
+reloads open chats if it missed too much or the other Mac restarted. Switching chats on the home Mac
+reloads that familiar's chat on linked Macs.
 
 ## Attachments
 
