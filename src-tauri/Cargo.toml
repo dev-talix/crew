@@ -40,7 +40,7 @@ strip = true
 # Already in the build through Tauri; used directly to swap the Dock icon at runtime.
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSBundle", "NSData", "NSSet", "NSString"] }
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder", "NSRunningApplication"] }
 security-framework = "3"
 # Notifications with Allow and Deny buttons, which tauri-plugin-notification only offers on mobile.
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }

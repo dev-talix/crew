@@ -191,7 +191,9 @@ impl Notifier {
 /// Hidden, minimized, or behind another app's window.
 pub fn in_background(app: &AppHandle) -> bool {
     let Some(main) = app.get_webview_window("main") else { return true };
-    let up = main.is_visible().unwrap_or(false) && !main.is_minimized().unwrap_or(false) && main.is_focused().unwrap_or(false);
+    // The window keeps reporting focus after Grimoire opens in the background, so the app has to be
+    // frontmost too.
+    let up = mac::active() && main.is_visible().unwrap_or(false) && !main.is_minimized().unwrap_or(false) && main.is_focused().unwrap_or(false);
     !up
 }
 
@@ -422,6 +424,10 @@ mod mac {
         UNUserNotificationCenter::currentNotificationCenter().addNotificationRequest_withCompletionHandler(&request, None);
     }
 
+    pub fn active() -> bool {
+        objc2_app_kit::NSRunningApplication::currentApplication().isActive()
+    }
+
     pub fn withdraw(identifier: &str) {
         if APP.get().is_none() {
             return;
@@ -438,6 +444,9 @@ mod mac {
     pub fn install(_app: &tauri::AppHandle) {}
     pub fn post(_note: super::Note) {}
     pub fn withdraw(_identifier: &str) {}
+    pub fn active() -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
