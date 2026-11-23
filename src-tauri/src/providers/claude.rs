@@ -110,7 +110,7 @@ fn args(agent: &Agent, lane: Option<&Lane>) -> Vec<String> {
     if let Some(effort) = agent.effort.as_deref().filter(|e| !e.is_empty()) {
         args.extend(["--effort".into(), effort.into()]);
     }
-    if let Some(memory) = crate::memory::session_prompt(agent) {
+    if let Some(memory) = crate::briefing::session_prompt(agent) {
         // Claude records the system prompt when a chat starts and reuses it on resume, so a changed
         // memory reaches the familiar in its next new chat.
         args.extend(["--append-system-prompt".into(), memory]);

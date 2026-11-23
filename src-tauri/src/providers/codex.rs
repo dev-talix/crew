@@ -114,7 +114,7 @@ fn thread_params(agent: &Agent, tools_key: &str) -> Value {
         });
         params["config"] = json!({ "mcp_servers": { (crate::tools::SERVER_NAME): server } });
     }
-    if let Some(memory) = crate::memory::session_prompt(agent) {
+    if let Some(memory) = crate::briefing::session_prompt(agent) {
         params["developerInstructions"] = json!(memory);
     }
     params

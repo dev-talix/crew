@@ -1,6 +1,7 @@
 mod approvals;
 mod chats;
 mod attachments;
+mod briefing;
 mod budgets;
 mod covens;
 mod db;
