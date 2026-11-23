@@ -73,6 +73,11 @@
   transition: opacity 160ms ease, stroke-width 160ms ease;
 }
 
+/* A check sending work back, like a reviewer returning a draft. */
+.spell-link.check .spell-line {
+  stroke-dasharray: 5 4;
+}
+
 .spell-link.lit .spell-line {
   opacity: 1;
   stroke-width: 2.5;

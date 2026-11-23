@@ -1,5 +1,6 @@
 // Geometry for the summoning circle on Home, kept apart from the component so it can be tested.
 import type { Workflow } from "./api";
+import { handoffs, type Handoff } from "./spells";
 
 export const NODE_RING = 33; // where familiars sit, in percent of the circle's width
 export const OUTER_RING = 47;
@@ -19,23 +20,27 @@ export interface Link {
   to: string;
   /** Which of several links between the same two familiars this is, for spacing the curves. */
   lane: number;
+  /** "check" when only a check sends work this way, like a reviewer sending a draft back. */
+  kind: Handoff["kind"];
 }
 
-/** One link per spell step that hands work from one familiar to a different one. */
+/**
+ * One link per pair of different familiars a spell hands work between: from each group of steps to the
+ * next, which fans out to and joins from steps that run alongside each other, and along each check.
+ */
 export function spellLinks(spells: Workflow[], agentIds: string[]): Link[] {
   const lanes = new Map<string, number>();
   const links: Link[] = [];
   for (const spell of spells) {
     const seen = new Set<string>();
-    for (let i = 1; i < spell.steps.length; i++) {
-      const [from, to] = [spell.steps[i - 1].agentId, spell.steps[i].agentId];
+    for (const { from, to, kind } of handoffs(spell.steps)) {
       if (from === to || !agentIds.includes(from) || !agentIds.includes(to)) continue;
       const pair = [from, to].sort().join(":");
       if (seen.has(pair)) continue;
       seen.add(pair);
       const lane = lanes.get(pair) ?? 0;
       lanes.set(pair, lane + 1);
-      links.push({ spell, from, to, lane });
+      links.push({ spell, from, to, lane, kind });
     }
   }
   return links;

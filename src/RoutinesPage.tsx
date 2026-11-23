@@ -4,7 +4,8 @@ import { AgentSelect, EmptyState, Page, Segmented, Sheet, Toggle } from "./ui";
 import { RitualArt, RITUAL_TEMPLATES, type RitualTemplate } from "./EmptyArt";
 import { PlusIcon } from "./icons";
 import { inkFor } from "./avatar";
-import { api, describeSchedule, errorText, onEvent, relativeTime, type Agent, type Routine, type Schedule } from "./api";
+import { api, describeSchedule, errorText, onEvent, relativeTime, type Agent, type Routine, type Schedule, type Workflow } from "./api";
+import { ritualAgents, ritualDoes } from "./spells";
 import "./routines.css";
 
 const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -15,6 +16,7 @@ const MIN_MINUTES = 5;
 const MAX_MINUTES = 7 * 24 * 60;
 
 type Repeat = "interval" | "daily";
+type Target = "familiar" | "spell";
 type Unit = "minutes" | "hours";
 
 function agentStyle(agent: Agent) {
@@ -28,6 +30,7 @@ function runsText(schedule: Schedule): string {
 
 export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id: string) => void }) {
   const [routines, setRoutines] = createSignal<Routine[]>([]);
+  const [spells, setSpells] = createSignal<Workflow[]>([]);
   const [loaded, setLoaded] = createSignal(false);
   const [error, setError] = createSignal("");
   const [editing, setEditing] = createSignal<Routine | "new" | { template: RitualTemplate } | null>(null);
@@ -35,7 +38,9 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
 
   const load = async () => {
     try {
-      setRoutines(await api.listRoutines());
+      const [list, spellList] = await Promise.all([api.listRoutines(), api.listWorkflows()]);
+      setRoutines(list);
+      setSpells(spellList);
       setError("");
     } catch (err) {
       setError(errorText(err));
@@ -46,10 +51,13 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
 
   onSettled(() => void load());
   const unlisten = onEvent("routines_changed", () => void load());
+  // Deleting a spell deletes the rituals that cast it.
+  const unlistenSpells = onEvent("workflows_changed", () => void load());
   const tick = window.setInterval(() => setNow(Date.now()), 60_000);
   onCleanup(() => {
     clearInterval(tick);
     void unlisten.then((stop) => stop());
+    void unlistenSpells.then((stop) => stop());
   });
 
   const groups = createMemo(() =>
@@ -57,6 +65,12 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
       .map((agent) => ({ agent, routines: routines().filter((r) => r.agentId === agent.id) }))
       .filter((group) => group.routines.length > 0),
   );
+  const spellGroups = createMemo(() =>
+    spells()
+      .map((spell) => ({ spell, routines: routines().filter((r) => r.workflowId === spell.id) }))
+      .filter((group) => group.routines.length > 0),
+  );
+  const agentById = (id: string) => props.agents.find((a) => a.id === id);
 
   const upsert = (saved: Routine) =>
     setRoutines((list) => (list.some((r) => r.id === saved.id) ? list.map((r) => (r.id === saved.id ? saved : r)) : [...list, saved]));
@@ -65,8 +79,8 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
     setError("");
     upsert({ ...routine, enabled });
     try {
-      const { id, agentId, name, prompt, schedule } = routine;
-      upsert(await api.saveRoutine({ id, agentId, name, prompt, schedule, enabled }));
+      const { id, agentId, workflowId, name, prompt, schedule } = routine;
+      upsert(await api.saveRoutine({ id, agentId, workflowId, name, prompt, schedule, enabled }));
     } catch (err) {
       upsert(routine);
       setError(errorText(err));
@@ -96,7 +110,7 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
           </p>
         </Show>
 
-        <Show when={loaded() && groups().length === 0}>
+        <Show when={loaded() && groups().length === 0 && spellGroups().length === 0}>
           <EmptyState
             art={<RitualArt agents={props.agents} />}
             title="No rituals yet"
@@ -138,6 +152,37 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
                   {(routine) => (
                     <RoutineRow
                       routine={routine}
+                      does={ritualDoes(routine, spells())}
+                      now={now()}
+                      onEdit={() => setEditing(routine)}
+                      onToggle={(enabled) => void setEnabled(routine, enabled)}
+                      onError={setError}
+                    />
+                  )}
+                </For>
+              </div>
+            </section>
+          )}
+        </For>
+
+        <For each={spellGroups()}>
+          {(group) => (
+            <section class="routine-group">
+              <div class="routine-group-head routine-spell-head">
+                <span class="routine-spell-faces" aria-hidden="true">
+                  <For each={ritualAgents(group.routines[0], spells())}>
+                    {(id) => <Show when={agentById(id)}>{(a) => <BotAvatar avatar={a().avatar} size={22} />}</Show>}
+                  </For>
+                </span>
+                <span>{group.spell.name}</span>
+                <span class="routine-spell-tag">Spell</span>
+              </div>
+              <div class="list">
+                <For each={group.routines}>
+                  {(routine) => (
+                    <RoutineRow
+                      routine={routine}
+                      does={ritualDoes(routine, spells())}
                       now={now()}
                       onEdit={() => setEditing(routine)}
                       onToggle={(enabled) => void setEnabled(routine, enabled)}
@@ -157,6 +202,7 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
             routine={typeof current() === "object" && "id" in (current() as object) ? (current() as Routine) : undefined}
             template={typeof current() === "object" && "template" in (current() as object) ? (current() as { template: RitualTemplate }).template : undefined}
             agents={props.agents}
+            spells={spells()}
             onClose={() => setEditing(null)}
             onSaved={(saved) => {
               upsert(saved);
@@ -175,6 +221,8 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
 
 function RoutineRow(props: {
   routine: Routine;
+  /** What the ritual does on each run. */
+  does: string;
   now: number;
   onEdit: () => void;
   onToggle: (enabled: boolean) => void;
@@ -211,6 +259,7 @@ function RoutineRow(props: {
       <button type="button" class="list-main routine-open" aria-label={`Edit ${props.routine.name}`} onClick={props.onEdit}>
         <span class="list-title">{props.routine.name}</span>
         <span class="list-sub">{describeSchedule(props.routine.schedule)}</span>
+        <span class="list-sub routine-does">{props.does}</span>
       </button>
       <span class="routine-next">{nextRun()}</span>
       <div class="list-actions">
@@ -232,6 +281,7 @@ function RoutineEditor(props: {
   /** Prefills a new ritual. */
   template?: RitualTemplate;
   agents: Agent[];
+  spells: Workflow[];
   onClose: () => void;
   onSaved: (routine: Routine) => void;
   onDeleted: (id: string) => void;
@@ -241,7 +291,9 @@ function RoutineEditor(props: {
   const initialMinutes = initial?.kind === "interval" ? initial.minutes : 180;
   const initialUnit: Unit = initialMinutes % 60 === 0 ? "hours" : "minutes";
 
+  const [target, setTarget] = createSignal<Target>(props.routine?.workflowId ? "spell" : "familiar");
   const [agentId, setAgentId] = createSignal(props.routine?.agentId ?? props.agents[0]?.id ?? "");
+  const [spellId, setSpellId] = createSignal(props.routine?.workflowId ?? props.spells[0]?.id ?? "");
   const [name, setName] = createSignal(seed?.name ?? "");
   const [prompt, setPrompt] = createSignal(seed?.prompt ?? "");
   const [repeat, setRepeat] = createSignal<Repeat>(initial?.kind ?? "daily");
@@ -258,7 +310,12 @@ function RoutineEditor(props: {
   let confirmTimer: number | undefined;
   onCleanup(() => clearTimeout(confirmTimer));
 
-  const agent = () => props.agents.find((a) => a.id === agentId());
+  const spell = () => props.spells.find((s) => s.id === spellId());
+  // A spell ritual takes the color of the familiar its spell starts with.
+  const agent = () => {
+    const id = target() === "spell" ? spell()?.steps[0]?.agentId : agentId();
+    return props.agents.find((a) => a.id === id);
+  };
 
   const minutes = () => {
     const value = Number(amount());
@@ -283,7 +340,8 @@ function RoutineEditor(props: {
 
   const sameDays = (list: number[]) => days().join() === list.join();
 
-  const canSave = () => !saving() && !!agent() && !!name().trim() && !!prompt().trim() && schedule() !== null;
+  const targetReady = () => (target() === "spell" ? !!spell() : !!agent() && !!prompt().trim());
+  const canSave = () => !saving() && targetReady() && !!name().trim() && schedule() !== null;
 
   const submit = async (e: SubmitEvent) => {
     e.preventDefault();
@@ -294,7 +352,8 @@ function RoutineEditor(props: {
     try {
       const saved = await api.saveRoutine({
         id: props.routine?.id,
-        agentId: agentId(),
+        agentId: target() === "familiar" ? agentId() : null,
+        workflowId: target() === "spell" ? spellId() : null,
         name: name().trim(),
         prompt: prompt().trim(),
         schedule: s,
@@ -332,10 +391,45 @@ function RoutineEditor(props: {
         <h1>{title}</h1>
 
         <div class="form-grid">
-          <div class="field">
-            <span>Familiar</span>
-            <AgentSelect label="Familiar" agents={props.agents} value={agentId()} onChange={setAgentId} />
+          <div class="field wide">
+            <span>Each run</span>
+            <Segmented
+              label="Each run"
+              value={target()}
+              options={[
+                { value: "familiar", label: "Message a familiar" },
+                { value: "spell", label: "Cast a spell" },
+              ]}
+              onChange={setTarget}
+            />
           </div>
+
+          <Show
+            when={target() === "spell"}
+            fallback={
+              <div class="field">
+                <span>Familiar</span>
+                <AgentSelect label="Familiar" agents={props.agents} value={agentId()} onChange={setAgentId} />
+              </div>
+            }
+          >
+            <div class="field">
+              <span>Spell</span>
+              <Show when={props.spells.length} fallback={<p class="hint routine-no-spells">No spells yet. Make one on the Spells page.</p>}>
+                <div class="agent-select">
+                  <Show when={agent()}>{(a) => <BotAvatar avatar={a().avatar} size={22} />}</Show>
+                  <select aria-label="Spell" value={spellId()} onChange={(e) => setSpellId(e.currentTarget.value)}>
+                    <Show when={!spell()}>
+                      <option value="" disabled>
+                        Choose a spell
+                      </option>
+                    </Show>
+                    <For each={props.spells}>{(s) => <option value={s.id}>{s.name}</option>}</For>
+                  </select>
+                </div>
+              </Show>
+            </div>
+          </Show>
 
           <label class="field">
             <span>Name</span>
@@ -350,15 +444,23 @@ function RoutineEditor(props: {
           </label>
 
           <label class="field wide">
-            <span>Instructions</span>
+            <span>{target() === "spell" ? "Starting text" : "Instructions"}</span>
             <textarea
               value={prompt()}
               onInput={(e) => setPrompt(e.currentTarget.value)}
-              placeholder="Summarize what changed in the repo since yesterday and list anything that needs my attention."
-              rows={4}
-              required
+              placeholder={
+                target() === "spell"
+                  ? "Optional"
+                  : "Summarize what changed in the repo since yesterday and list anything that needs my attention."
+              }
+              rows={target() === "spell" ? 3 : 4}
+              required={target() === "familiar"}
             />
-            <p class="hint">Grimoire sends this message to the familiar on each run.</p>
+            <p class="hint">
+              {target() === "spell"
+                ? "Grimoire casts the spell on each run, with this as its {{input}}. A run is skipped while the spell is still being cast."
+                : "Grimoire sends this message to the familiar on each run."}
+            </p>
           </label>
 
           <div class="field wide">

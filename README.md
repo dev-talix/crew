@@ -21,9 +21,10 @@
   blinks, glances, and fidgets when idle, works while busy, smiles when it finishes, and frowns after
   an error.
 - **Spells** chain familiars: research, then write, then review. Each step gets the last reply.
-  Click a spell in the sidebar to cast it.
+  Steps can run together, and a check can send work back, like an editor returning a draft. Click a
+  spell in the sidebar to cast it, and open any past cast to see each step.
 - **Memory** carries notes from one chat to the next, for each familiar and each coven.
-- **Rituals** send a familiar the same message on a schedule, like a morning summary.
+- **Rituals** send a familiar the same message, or cast a spell, on a schedule, like a morning summary.
 - **Covens** group familiars. Home's summoning circle shows everyone or one coven at a time, with
   lines for the spells between familiars and gold arcs for their rituals.
 - **Themes** come as seven built-in inks, and you can edit or write your own as JSON.
@@ -145,8 +146,28 @@ A spell is a list of steps, each sent to one familiar, which waits for the reply
 In a step, `{{input}}` is the text you cast it with and `{{previous}}` is the last reply; the last
 reply is added at the end when a step doesn't use it.
 
-A ritual sends a prompt every few hours, daily at a time, or on chosen weekdays. One timer sleeps
-until the next run, and a run missed while Grimoire was closed fires once at the next launch.
+- **Steps that run together.** Tick "With step N" and a step starts at the same time as the one
+  above it. The next step waits for all of them and gets every reply, each under its familiar's name.
+- **Checks.** The loop button adds a check: if the reply contains, or doesn't contain, a phrase
+  (case doesn't matter), the spell goes to the step you pick, like "doesn't contain APPROVED, go to
+  step 2" to send a draft back to the writer. Otherwise it carries on. Each check sends the spell
+  somewhere at most 3 times; a 4th match stops the cast with a message saying so.
+- **History.** Every cast is saved with its starting text, start and end, and each step's familiar,
+  the prompt as sent, and the reply. Each spell lists its last 5 casts. Click one to see every step,
+  live while it runs, and "Cast again" with the same starting text. A cast cut short by quitting
+  Grimoire shows as stopped.
+
+On the Spells page, steps that run together share an outline and a loop mark shows each check. On
+Home, those steps link to the steps before and after them, and a check that sends work to a familiar
+not already linked shows as a dashed line.
+
+A ritual runs every few hours, daily at a time, or on chosen weekdays. It either sends a familiar a
+message or casts a spell, with optional starting text. A ritual that casts a spell skips a run while
+that spell is still going, and deleting the spell deletes its rituals. One timer sleeps until the
+next run, and a run missed while Grimoire was closed fires once at the next launch.
+
+`create_spell` takes the same options: `parallel: true` on a step, and
+`check: { when: "contains" | "lacks", phrase, goToStep }` with steps counted from 1.
 
 ## Familiars asking familiars
 

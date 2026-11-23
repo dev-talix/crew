@@ -3,11 +3,23 @@ import type { JSX } from "@solidjs/web";
 import BotAvatar from "./BotAvatar";
 import { AgentSelect, EmptyState, Page, Sheet } from "./ui";
 import { SpellArt, SPELL_TEMPLATES, type SpellTemplate } from "./EmptyArt";
-import { api, errorText, onEvent, onMountAsync, type Agent, type Workflow, type WorkflowProgress } from "./api";
+import SpellRun, { STATE_LABELS } from "./SpellRun";
+import {
+  api,
+  errorText,
+  onEvent,
+  onMountAsync,
+  relativeTime,
+  type Agent,
+  type StepCheck,
+  type Workflow,
+  type WorkflowProgress,
+  type WorkflowRun,
+} from "./api";
+import { describeCheck, fromDrafts, progressLabel, stepGroups, toDrafts, type DraftStep } from "./spells";
 import "./workflows.css";
 
 type Run = Omit<WorkflowProgress, "workflowId">;
-type DraftStep = { key: number; agentId: string; prompt: string };
 
 function Icon(props: { children: JSX.Element }) {
   return (
@@ -45,11 +57,30 @@ const RemoveIcon = () => (
   </Icon>
 );
 
+/** A loop arrow, for a check that sends the spell to another step. */
+const CheckIcon = () => (
+  <Icon>
+    <path d="M12.5 6.5A4.5 4.5 0 1 0 12 10.5M12.5 3v3.5H9" />
+  </Icon>
+);
+
 function runLabel(run: Run): string {
   if (run.state === "done") return "Finished";
-  if (run.state === "running") return run.step > 0 ? `Step ${run.step} of ${run.total}` : "Casting";
-  return `${run.state === "stopped" ? "Stopped" : "Failed"} at step ${run.step} of ${run.total}`;
+  if (run.state === "running") return run.steps.length ? progressLabel(run.steps, run.total) : "Casting";
+  const at = progressLabel(run.steps.length ? run.steps : [run.step], run.total);
+  return `${run.state === "stopped" ? "Stopped" : "Failed"} at ${at.charAt(0).toLowerCase()}${at.slice(1)}`;
 }
+
+const freshRun = (workflow: Workflow): Run => ({
+  runId: "",
+  step: 0,
+  total: workflow.steps.length,
+  agentId: null,
+  steps: [],
+  agents: [],
+  state: "running",
+  error: null,
+});
 
 /** What the sidebar asked for when it opened this page: cast one spell, or start a new one. */
 export type SpellIntent = { cast: string } | { create: true };
@@ -62,38 +93,53 @@ export default function WorkflowsPage(props: {
 }) {
   const [workflows, setWorkflows] = createSignal<Workflow[]>([]);
   const [runs, setRuns] = createStore<Record<string, Run | undefined>>({});
+  const [history, setHistory] = createSignal<WorkflowRun[]>([]);
   const [loaded, setLoaded] = createSignal(false);
   const [error, setError] = createSignal("");
   const [editing, setEditing] = createSignal<Workflow | "new" | { template: SpellTemplate } | null>(null);
   const [starting, setStarting] = createSignal<Workflow | null>(null);
+  const [viewing, setViewing] = createSignal<{ runId: string; workflowId: string } | null>(null);
+  const [now, setNow] = createSignal(Date.now());
   const agentById = createMemo(() => new Map(props.agents.map((a) => [a.id, a])));
   const noAgents = () => props.agents.length === 0;
-
 
   const setRun = (id: string, run: Run | undefined) =>
     setRuns((runs) => {
       runs[id] = run;
     });
 
+  const loadHistory = () => api.recentWorkflowRuns().then(setHistory, (e) => setError(errorText(e)));
+
   onMountAsync(async (keep) => {
     try {
-      keep(await onEvent<WorkflowProgress>("workflow_progress", ({ workflowId, ...run }) => setRun(workflowId, run)));
+      keep(
+        await onEvent<WorkflowProgress>("workflow_progress", ({ workflowId, ...run }) => {
+          setRun(workflowId, run);
+          void loadHistory();
+        }),
+      );
       keep(await onEvent("workflows_changed", () => api.listWorkflows().then(setWorkflows, (e) => setError(errorText(e)))));
       const [list, running] = await Promise.all([api.listWorkflows(), api.runningWorkflows()]);
       setWorkflows(list);
       for (const id of running) {
         if (runs[id]?.state === "running") continue;
-        const total = list.find((w) => w.id === id)?.steps.length ?? 0;
-        setRun(id, { step: 0, total, agentId: null, state: "running", error: null });
+        const workflow = list.find((w) => w.id === id);
+        if (workflow) setRun(id, freshRun(workflow));
       }
+      await loadHistory();
     } catch (e) {
       setError(errorText(e));
     } finally {
       setLoaded(true);
     }
   });
+  onSettled(() => {
+    const tick = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(tick);
+  });
 
   const isRunning = (id: string) => runs[id]?.state === "running";
+  const castsOf = (id: string) => history().filter((r) => r.workflowId === id);
 
   // Acts on the sidebar's request once the spells have loaded, and again for each new request.
   createEffect(
@@ -120,10 +166,12 @@ export default function WorkflowsPage(props: {
   const run = async (workflow: Workflow, input: string) => {
     const previous = runs[workflow.id] && { ...runs[workflow.id]! };
     // Mark it running before the call. The first progress event can arrive before invoke resolves.
-    setRun(workflow.id, { step: 0, total: workflow.steps.length, agentId: null, state: "running", error: null });
+    setRun(workflow.id, freshRun(workflow));
     try {
-      await api.runWorkflow(workflow.id, input);
+      const runId = await api.runWorkflow(workflow.id, input);
       setStarting(null);
+      void loadHistory();
+      return runId;
     } catch (e) {
       setRun(workflow.id, previous);
       throw e;
@@ -139,6 +187,7 @@ export default function WorkflowsPage(props: {
 
   const deleted = (id: string) => {
     setWorkflows((list) => list.filter((w) => w.id !== id));
+    setHistory((list) => list.filter((r) => r.workflowId !== id));
     setEditing(null);
   };
 
@@ -152,6 +201,8 @@ export default function WorkflowsPage(props: {
       </button>
     </>
   );
+
+  const viewedSpell = () => workflows().find((w) => w.id === viewing()?.workflowId);
 
   return (
     <>
@@ -203,49 +254,7 @@ export default function WorkflowsPage(props: {
                           {(id) => <div class="list-sub">Made by {agentById().get(id())?.name ?? "a deleted familiar"}</div>}
                         </Show>
                         <div class="wf-meta">
-                          <ol class="wf-chain" aria-label="Steps">
-                            <For each={workflow.steps}>
-                              {(step, index) => {
-                                const agent = () => agentById().get(step.agentId);
-                                const position = () => {
-                                  const r = progress();
-                                  if (!r || r.state !== "running" || r.step === 0) return "idle";
-                                  const n = index() + 1;
-                                  return n < r.step ? "done" : n === r.step ? "current" : "pending";
-                                };
-                                return (
-                                  <li class={{ pending: position() === "pending" }}>
-                                    <Show when={index() > 0}>
-                                      <span class="wf-connector" aria-hidden="true" />
-                                    </Show>
-                                    <Show
-                                      when={agent()}
-                                      fallback={
-                                        <span
-                                          class="wf-missing"
-                                          role="img"
-                                          aria-label={`Step ${index() + 1} has no familiar`}
-                                          title="Familiar deleted"
-                                        />
-                                      }
-                                    >
-                                      {(a) => (
-                                        <button
-                                          class="wf-chain-agent"
-                                          title={`Step ${index() + 1}, open ${a().name}`}
-                                          aria-label={`Open ${a().name}, step ${index() + 1}`}
-                                          style={{ "--agent": a().avatar.color }}
-                                          onClick={() => props.onOpenAgent(a().id)}
-                                        >
-                                          <BotAvatar avatar={a().avatar} size={22} working={position() === "current"} />
-                                        </button>
-                                      )}
-                                    </Show>
-                                  </li>
-                                );
-                              }}
-                            </For>
-                          </ol>
+                          <StepChain workflow={workflow} agents={agentById()} progress={progress()} onOpenAgent={props.onOpenAgent} />
                           <span class={["wf-status", { live: running() }]} aria-live="polite">
                             <Show when={progress()}>{(r) => <>{runLabel(r())}</>}</Show>
                           </span>
@@ -254,6 +263,24 @@ export default function WorkflowsPage(props: {
                           <p class="wf-error" title={progress()?.error ?? ""}>
                             {progress()?.error}
                           </p>
+                        </Show>
+                        <Show when={castsOf(workflow.id).length}>
+                          <div class="wf-casts" role="group" aria-label={`Recent casts of ${workflow.name}`}>
+                            <span class="wf-casts-label">Recent casts</span>
+                            <For each={castsOf(workflow.id)}>
+                              {(cast) => (
+                                <button
+                                  type="button"
+                                  class={["wf-cast", cast.state]}
+                                  title={cast.input ? `Started with: ${cast.input.slice(0, 120)}` : "No starting text"}
+                                  onClick={() => setViewing({ runId: cast.id, workflowId: cast.workflowId })}
+                                >
+                                  <span class="wf-cast-dot" aria-hidden="true" />
+                                  {cast.state === "running" ? "Casting now" : `${STATE_LABELS[cast.state]} ${relativeTime(cast.startedAt, now())}`}
+                                </button>
+                              )}
+                            </For>
+                          </div>
                         </Show>
                       </div>
                       <div class="list-actions">
@@ -304,7 +331,27 @@ export default function WorkflowsPage(props: {
       <Show when={starting()}>
         {(workflow) => (
           <Sheet label={`Cast ${workflow().name}`} onClose={() => setStarting(null)}>
-            <RunForm workflow={workflow()} onRun={(input) => run(workflow(), input)} onCancel={() => setStarting(null)} />
+            <RunForm workflow={workflow()} onRun={(input) => run(workflow(), input).then(() => undefined)} onCancel={() => setStarting(null)} />
+          </Sheet>
+        )}
+      </Show>
+
+      <Show when={viewing()}>
+        {(viewed) => (
+          <Sheet label={`${viewedSpell()?.name ?? "Spell"} cast`} wide onClose={() => setViewing(null)}>
+            <SpellRun
+              runId={viewed().runId}
+              workflow={viewedSpell()}
+              agents={props.agents}
+              busy={!!viewedSpell() && isRunning(viewedSpell()!.id)}
+              onCastAgain={async (input) => {
+                const spell = viewedSpell()!;
+                const runId = await run(spell, input);
+                setViewing({ runId, workflowId: spell.id });
+                return runId;
+              }}
+              onClose={() => setViewing(null)}
+            />
           </Sheet>
         )}
       </Show>
@@ -312,13 +359,80 @@ export default function WorkflowsPage(props: {
   );
 }
 
+/** The spell's steps in order: steps that run together share a pill, and a loop mark shows each check. */
+function StepChain(props: { workflow: Workflow; agents: Map<string, Agent>; progress?: Run; onOpenAgent: (id: string) => void }) {
+  const groups = () => stepGroups(props.workflow.steps);
+  const position = (index: number) => {
+    const r = props.progress;
+    if (!r || r.state !== "running" || !r.steps.length) return "idle";
+    const n = index + 1;
+    return r.steps.includes(n) ? "current" : n < Math.min(...r.steps) ? "done" : "pending";
+  };
+  return (
+    <ol class="wf-chain" aria-label="Steps">
+      <For each={groups()}>
+        {(group, g) => (
+          <li>
+            <Show when={g() > 0}>
+              <span class="wf-connector" aria-hidden="true" />
+            </Show>
+            <span
+              class={["wf-group", { together: group.length > 1 }]}
+              title={group.length > 1 ? `Steps ${group.map((i) => i + 1).join(", ")} run together` : undefined}
+            >
+              <For each={group}>
+                {(index) => {
+                  const step = props.workflow.steps[index];
+                  const agent = () => props.agents.get(step.agentId);
+                  return (
+                    <Show
+                      when={agent()}
+                      fallback={
+                        <span class="wf-missing" role="img" aria-label={`Step ${index + 1} has no familiar`} title="Familiar deleted" />
+                      }
+                    >
+                      {(a) => (
+                        <button
+                          class={["wf-chain-agent", { pending: position(index) === "pending" }]}
+                          title={`Step ${index + 1}, open ${a().name}`}
+                          aria-label={`Open ${a().name}, step ${index + 1}`}
+                          style={{ "--agent": a().avatar.color }}
+                          onClick={() => props.onOpenAgent(a().id)}
+                        >
+                          <BotAvatar avatar={a().avatar} size={22} working={position(index) === "current"} />
+                        </button>
+                      )}
+                    </Show>
+                  );
+                }}
+              </For>
+            </span>
+            <For each={group.filter((i) => props.workflow.steps[i].check)}>
+              {(index) => {
+                const check = props.workflow.steps[index].check!;
+                return (
+                  <span class="wf-check-mark" role="img" aria-label={describeCheck(check, index)} title={describeCheck(check, index)}>
+                    <CheckIcon />
+                    {check.goTo + 1}
+                  </span>
+                );
+              }}
+            </For>
+          </li>
+        )}
+      </For>
+    </ol>
+  );
+}
+
 function RunForm(props: { workflow: Workflow; onRun: (input: string) => Promise<void>; onCancel: () => void }) {
   const [input, setInput] = createSignal("");
   const [error, setError] = createSignal("");
   const [busy, setBusy] = createSignal(false);
-  // Step 1's {{previous}} is also filled with the starting text.
+  // The first steps' {{previous}} is also filled with the starting text.
   const inputUnused = () =>
-    !props.workflow.steps.some((s) => s.prompt.includes("{{input}}")) && !props.workflow.steps[0]?.prompt.includes("{{previous}}");
+    !props.workflow.steps.some((s) => s.prompt.includes("{{input}}")) &&
+    !(stepGroups(props.workflow.steps)[0] ?? []).some((i) => props.workflow.steps[i].prompt.includes("{{previous}}"));
   let field!: HTMLTextAreaElement;
   onSettled(() => field.focus());
 
@@ -393,7 +507,7 @@ function WorkflowEditor(props: {
   const [name, setName] = createSignal(props.workflow?.name ?? props.template?.name ?? "");
   const fromTemplate = props.template?.steps.map((prompt, i) => ({ agentId: props.agents[i % props.agents.length]?.id ?? "", prompt }));
   const [steps, setSteps] = createStore<DraftStep[]>(
-    (props.workflow?.steps ?? fromTemplate ?? [{ agentId: defaultAgent(), prompt: "" }]).map((s) => ({ ...s, key: nextKey++ })),
+    toDrafts(props.workflow?.steps ?? fromTemplate ?? [{ agentId: defaultAgent(), prompt: "" }], () => nextKey++),
   );
   const [error, setError] = createSignal("");
   const [saving, setSaving] = createSignal(false);
@@ -411,6 +525,10 @@ function WorkflowEditor(props: {
   const setStep = (index: number, patch: Partial<DraftStep>) =>
     setSteps((draft) => {
       Object.assign(draft[index], patch);
+    });
+  const setCheck = (index: number, patch: Partial<NonNullable<DraftStep["check"]>>) =>
+    setSteps((draft) => {
+      Object.assign(draft[index].check!, patch);
     });
 
   const move = (index: number, by: -1 | 1) => {
@@ -433,21 +551,38 @@ function WorkflowEditor(props: {
     const key = nextKey++;
     const agentId = defaultAgent(steps[steps.length - 1]?.agentId);
     setSteps((draft) => {
-      draft.push({ key, agentId, prompt: "" });
+      draft.push({ key, agentId, prompt: "", parallel: false, check: null });
     });
     focusIn(key, "select");
+  };
+
+  const toggleCheck = (index: number) => {
+    const step = steps[index];
+    if (step.check) {
+      setStep(index, { check: null });
+      return;
+    }
+    // Most checks send work back, so start with the step before this one's group.
+    const groupStart = (i: number) => {
+      while (i > 0 && steps[i].parallel) i--;
+      return i;
+    };
+    const back = index > 0 ? groupStart(groupStart(index) - 1) : 0;
+    setStep(index, { check: { when: "lacks", phrase: "", target: steps[back].key } });
+    focusIn(step.key, ".wf-check input");
   };
 
   const submit = async (e: SubmitEvent) => {
     e.preventDefault();
     setError("");
+    const list = fromDrafts(steps);
+    if (typeof list === "string") {
+      setError(list);
+      return;
+    }
     setSaving(true);
     try {
-      const workflow = await api.saveWorkflow({
-        id: props.workflow?.id,
-        name: name().trim(),
-        steps: steps.map((s) => ({ agentId: s.agentId, prompt: s.prompt })),
-      });
+      const workflow = await api.saveWorkflow({ id: props.workflow?.id, name: name().trim(), steps: list });
       props.onSaved(workflow);
     } catch (err) {
       setError(errorText(err));
@@ -472,6 +607,11 @@ function WorkflowEditor(props: {
     }
   };
 
+  const agentName = (id: string) => props.agents.find((a) => a.id === id)?.name ?? "no familiar";
+  // A check can go to the first step of a group, not to one that runs alongside another.
+  const canGoTo = (index: number) => index === 0 || !steps[index].parallel;
+  const targetShown = (key: number | null) => steps.some((s, i) => s.key === key && canGoTo(i));
+
   return (
     <form class="wf-form" onSubmit={submit}>
       <h1>{props.workflow ? "Edit spell" : "New spell"}</h1>
@@ -491,14 +631,15 @@ function WorkflowEditor(props: {
         <span id="wf-steps-label">Steps</span>
         <p class="hint">
           Use <code>{"{{input}}"}</code> for the starting text and <code>{"{{previous}}"}</code> for the last reply. Without{" "}
-          <code>{"{{previous}}"}</code>, the last reply is added at the end.
+          <code>{"{{previous}}"}</code>, the last reply is added at the end. Steps that run together start at once, and the next step
+          gets all their replies. A check sends the spell to another step when the reply has, or lacks, a phrase, at most 3 times.
         </p>
         <ol class="wf-steps" ref={list} aria-labelledby="wf-steps-label">
           <For each={steps}>
             {(step, index) => {
               const n = () => index() + 1;
               return (
-                <li class="wf-step" data-step={step.key}>
+                <li class={["wf-step", { alongside: step.parallel && index() > 0 }]} data-step={step.key}>
                   <span class="wf-step-num" aria-hidden="true">
                     {n()}
                   </span>
@@ -510,7 +651,28 @@ function WorkflowEditor(props: {
                         label={`Step ${n()} familiar`}
                         onChange={(id) => setStep(index(), { agentId: id })}
                       />
+                      <Show when={index() > 0}>
+                        <label class="wf-flag" title="Start this step together with the one before it">
+                          <input
+                            type="checkbox"
+                            checked={step.parallel}
+                            onChange={(e) => setStep(index(), { parallel: e.currentTarget.checked })}
+                          />
+                          With step {index()}
+                        </label>
+                      </Show>
                       <span class="spacer" />
+                      <button
+                        type="button"
+                        class={["icon-button", { on: !!step.check }]}
+                        data-action="check"
+                        aria-label={step.check ? `Remove step ${n()}'s check` : `Add a check to step ${n()}`}
+                        aria-pressed={step.check ? "true" : "false"}
+                        title={step.check ? "Remove check" : "Add a check"}
+                        onClick={() => toggleCheck(index())}
+                      >
+                        <CheckIcon />
+                      </button>
                       <button
                         type="button"
                         class="icon-button"
@@ -552,6 +714,48 @@ function WorkflowEditor(props: {
                       placeholder={index() === 0 ? "Research {{input}} and list the key facts." : "Write a short post from this research."}
                       onInput={(e) => setStep(index(), { prompt: e.currentTarget.value })}
                     />
+                    <Show when={step.check}>
+                      {(check) => (
+                        <div class="wf-check" role="group" aria-label={`Step ${n()} check`}>
+                          <span>If the reply</span>
+                          <select
+                            aria-label="When"
+                            value={check().when}
+                            onChange={(e) => setCheck(index(), { when: e.currentTarget.value as StepCheck["when"] })}
+                          >
+                            <option value="lacks">doesn't contain</option>
+                            <option value="contains">contains</option>
+                          </select>
+                          <input
+                            aria-label="Phrase"
+                            placeholder="APPROVED"
+                            value={check().phrase}
+                            onInput={(e) => setCheck(index(), { phrase: e.currentTarget.value })}
+                          />
+                          <span>go to</span>
+                          <select
+                            aria-label="Go to step"
+                            value={targetShown(check().target) ? String(check().target) : ""}
+                            onChange={(e) => setCheck(index(), { target: Number(e.currentTarget.value) })}
+                          >
+                            <Show when={!targetShown(check().target)}>
+                              <option value="" disabled>
+                                Choose a step
+                              </option>
+                            </Show>
+                            <For each={steps}>
+                              {(other, i) => (
+                                <Show when={canGoTo(i())}>
+                                  <option value={String(other.key)}>
+                                    Step {i() + 1}, {agentName(other.agentId)}
+                                  </option>
+                                </Show>
+                              )}
+                            </For>
+                          </select>
+                        </div>
+                      )}
+                    </Show>
                   </div>
                 </li>
               );

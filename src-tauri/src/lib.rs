@@ -18,9 +18,10 @@ mod tools;
 mod tray;
 mod updates;
 mod vault;
+mod workflow_runs;
 mod workflows;
 
-use db::{now_ms, Access, Agent, Avatar, Db, Message, Provider, Routine, Schedule, Workflow, WorkflowStep};
+use db::{now_ms, Access, Agent, Avatar, Db, Message, Provider, Routine, Workflow, WorkflowStep};
 use routines::Scheduler;
 use runtime::Runtime;
 use serde::{Deserialize, Serialize};
@@ -315,50 +316,14 @@ fn last_messages(state: State<AppState>) -> Result<Vec<Message>, String> {
     state.db.last_messages()
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RoutineInput {
-    id: Option<String>,
-    agent_id: String,
-    name: String,
-    prompt: String,
-    schedule: Schedule,
-    enabled: bool,
-}
-
 #[tauri::command]
 fn list_routines(state: State<AppState>) -> Result<Vec<Routine>, String> {
     state.db.list_routines()
 }
 
 #[tauri::command]
-fn save_routine(state: State<AppState>, input: RoutineInput) -> Result<Routine, String> {
-    let name = clean_name(&input.name)?;
-    let prompt = input.prompt.trim().to_string();
-    if prompt.is_empty() {
-        return Err("Tell the familiar what to do on each run.".into());
-    }
-    if state.db.get_agent(&input.agent_id)?.is_none() {
-        return Err("Pick a familiar for this ritual.".into());
-    }
-    routines::validate(&input.schedule)?;
-    let existing = match input.id.as_deref() {
-        Some(id) => state.db.list_routines()?.into_iter().find(|r| r.id == id),
-        None => None,
-    };
-    let now = now_ms();
-    let routine = Routine {
-        id: existing.as_ref().map(|r| r.id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-        agent_id: input.agent_id,
-        name,
-        prompt,
-        next_run_at: if input.enabled { routines::next_run_ms(&input.schedule, now) } else { None },
-        schedule: input.schedule,
-        enabled: input.enabled,
-        last_run_at: existing.as_ref().and_then(|r| r.last_run_at),
-        created_at: existing.map(|r| r.created_at).unwrap_or(now),
-    };
-    state.db.save_routine(&routine)?;
+fn save_routine(state: State<AppState>, input: routines::RoutineInput) -> Result<Routine, String> {
+    let routine = routines::save(&state.db, input)?;
     state.scheduler.changed();
     Ok(routine)
 }
@@ -409,8 +374,18 @@ fn delete_workflow(app: AppHandle, state: State<AppState>, id: String) -> Result
 }
 
 #[tauri::command]
-fn run_workflow(state: State<AppState>, id: String, input: Option<String>) -> Result<(), String> {
-    state.workflows.start(&id, input.unwrap_or_default().trim().to_string())
+fn run_workflow(state: State<AppState>, id: String, input: Option<String>) -> Result<String, String> {
+    state.workflows.start(&id, input.unwrap_or_default().trim().to_string(), None)
+}
+
+#[tauri::command]
+fn recent_workflow_runs(state: State<AppState>) -> Result<Vec<workflow_runs::Run>, String> {
+    workflow_runs::recent(&state.db, workflow_runs::RECENT_PER_SPELL)
+}
+
+#[tauri::command]
+fn get_workflow_run(state: State<AppState>, id: String) -> Result<workflow_runs::RunDetail, String> {
+    workflow_runs::detail(&state.db, &id)?.ok_or_else(|| "That cast is gone.".into())
 }
 
 #[tauri::command]
@@ -646,7 +621,7 @@ pub fn run() {
             }
             // Rituals can fire as soon as the scheduler starts, so the approval gate and the tool socket
             // have to be up first.
-            let scheduler = Scheduler::start(db.clone(), &runtime, app.handle().clone());
+            let scheduler = Scheduler::start(db.clone(), &runtime, &workflows, app.handle().clone());
             app.manage(AppState { db, runtime, scheduler, workflows, dock: dock::Dock::default(), themes_dir, approvals, secrets });
             if edge.is_some() {
                 let state = app.state::<AppState>();
@@ -690,6 +665,8 @@ pub fn run() {
             delete_workflow,
             run_workflow,
             stop_workflow,
+            recent_workflow_runs,
+            get_workflow_run,
             list_themes,
             save_theme,
             delete_theme,

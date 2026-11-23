@@ -152,7 +152,11 @@ pub enum Schedule {
 #[serde(rename_all = "camelCase")]
 pub struct Routine {
     pub id: String,
-    pub agent_id: String,
+    /// The familiar this ritual messages, or None when it casts a spell.
+    pub agent_id: Option<String>,
+    /// The spell this ritual casts, with `prompt` as the optional starting text.
+    #[serde(default)]
+    pub workflow_id: Option<String>,
     pub name: String,
     pub prompt: String,
     pub schedule: Schedule,
@@ -162,11 +166,33 @@ pub struct Routine {
     pub created_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowStep {
     pub agent_id: String,
     pub prompt: String,
+    /// Runs alongside the previous step instead of after it.
+    #[serde(default)]
+    pub parallel: bool,
+    #[serde(default)]
+    pub check: Option<StepCheck>,
+}
+
+/// After a step, sends the spell to another step when its reply contains, or lacks, a phrase.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StepCheck {
+    pub when: CheckWhen,
+    pub phrase: String,
+    /// Index of the step to go to.
+    pub go_to: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckWhen {
+    Contains,
+    Lacks,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -198,7 +224,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -386,6 +412,9 @@ impl Db {
                  COMMIT;",
             )?;
         }
+        if version < 12 {
+            crate::workflow_runs::migrate(&conn)?;
+        }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
             [],
@@ -526,7 +555,7 @@ impl Db {
     pub fn list_routines(&self) -> Result<Vec<Routine>, String> {
         self.with(|c| {
             let mut stmt = c.prepare_cached(
-                "SELECT id, agent_id, name, prompt, schedule, enabled, last_run_at, next_run_at, created_at
+                "SELECT id, agent_id, name, prompt, schedule, enabled, last_run_at, next_run_at, created_at, workflow_id
                  FROM routines ORDER BY created_at",
             )?;
             let rows = stmt.query_map([], |r| {
@@ -543,6 +572,7 @@ impl Db {
                     last_run_at: r.get(6)?,
                     next_run_at: r.get(7)?,
                     created_at: r.get(8)?,
+                    workflow_id: r.get(9)?,
                 })
             })?;
             rows.collect()
@@ -553,10 +583,10 @@ impl Db {
         let schedule = serde_json::to_string(&routine.schedule).map_err(|e| e.to_string())?;
         self.with(|c| {
             c.execute(
-                "INSERT INTO routines (id, agent_id, name, prompt, schedule, enabled, last_run_at, next_run_at, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "INSERT INTO routines (id, agent_id, name, prompt, schedule, enabled, last_run_at, next_run_at, created_at, workflow_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(id) DO UPDATE SET agent_id = ?2, name = ?3, prompt = ?4, schedule = ?5, enabled = ?6,
-                   last_run_at = ?7, next_run_at = ?8",
+                   last_run_at = ?7, next_run_at = ?8, workflow_id = ?10",
                 params![
                     routine.id,
                     routine.agent_id,
@@ -566,7 +596,8 @@ impl Db {
                     routine.enabled,
                     routine.last_run_at,
                     routine.next_run_at,
-                    routine.created_at
+                    routine.created_at,
+                    routine.workflow_id
                 ],
             )
             .map(|_| ())
@@ -812,7 +843,8 @@ mod tests {
         db.insert_agent(&agent("a")).unwrap();
         let mut routine = Routine {
             id: "r1".into(),
-            agent_id: "a".into(),
+            agent_id: Some("a".into()),
+            workflow_id: None,
             name: "Morning check".into(),
             prompt: "Check the build".into(),
             schedule: Schedule::Daily { time: "09:00".into(), days: vec![1, 2, 3, 4, 5] },
@@ -829,7 +861,7 @@ mod tests {
         let workflow = Workflow {
             id: "w1".into(),
             name: "Ship".into(),
-            steps: vec![WorkflowStep { agent_id: "a".into(), prompt: "Write notes about {{previous}}".into() }],
+            steps: vec![WorkflowStep { agent_id: "a".into(), prompt: "Write notes about {{previous}}".into(), ..Default::default() }],
             created_at: 1,
             created_by: Some("a".into()),
         };
