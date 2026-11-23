@@ -12,7 +12,6 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{Emitter, State};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 /// The local port webhooks arrive on.
@@ -21,7 +20,6 @@ pub const WEBHOOK_PORT: u16 = 47615;
 const COOLDOWN_MS: i64 = 60_000;
 /// How long the watcher sleeps between rounds.
 const TICK: Duration = Duration::from_secs(15);
-const HEAD_LIMIT: usize = 8 * 1024;
 const BODY_LIMIT: usize = 64 * 1024;
 /// How much of a webhook body reaches the familiar.
 const BODY_SHOWN: usize = 4000;
@@ -435,43 +433,10 @@ pub fn webhook_url(secret: &str) -> String {
     format!("http://127.0.0.1:{WEBHOOK_PORT}/hooks/{secret}")
 }
 
-#[derive(Debug, PartialEq)]
-struct Head {
-    method: String,
-    path: String,
-    length: Option<usize>,
-    chunked: bool,
-}
-
-fn parse_head(head: &str) -> Option<Head> {
-    let mut lines = head.split("\r\n");
-    let mut first = lines.next()?.split(' ');
-    let (method, target, version) = (first.next()?, first.next()?, first.next()?);
-    if first.next().is_some() || !version.starts_with("HTTP/1.") {
-        return None;
-    }
-    let mut head = Head { method: method.into(), path: target.split('?').next()?.into(), length: None, chunked: false };
-    for line in lines.filter(|l| !l.is_empty()) {
-        let (name, value) = line.split_once(':')?;
-        let value = value.trim();
-        if name.eq_ignore_ascii_case("content-length") {
-            head.length = Some(value.parse().ok()?);
-        } else if name.eq_ignore_ascii_case("transfer-encoding") {
-            head.chunked = !value.eq_ignore_ascii_case("identity");
-        }
-    }
-    Some(head)
-}
-
-/// Compares secrets in time that doesn't depend on where they differ.
-fn same_secret(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
 fn ritual_for(db: &Db, path: &str) -> Result<Option<Routine>, String> {
     let Some(secret) = path.strip_prefix("/hooks/").filter(|s| !s.is_empty()) else { return Ok(None) };
     Ok(db.list_routines()?.into_iter().find(|r| {
-        r.enabled && matches!(&r.schedule, Schedule::Webhook { secret: s } if !s.is_empty() && same_secret(s, secret))
+        r.enabled && matches!(&r.schedule, Schedule::Webhook { secret: s } if !s.is_empty() && crate::http::same_secret(s, secret))
     }))
 }
 
@@ -513,49 +478,23 @@ pub async fn serve(scheduler: Arc<Scheduler>) {
 }
 
 async fn reply(stream: &mut TcpStream, status: &str, text: &str) {
-    let response = format!("HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}\n", text.len() + 1);
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
+    crate::http::reply(stream, status, "text/plain", format!("{text}\n").as_bytes()).await;
 }
 
 async fn answer(mut stream: TcpStream, scheduler: &Arc<Scheduler>) {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    let end = loop {
-        if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            break at;
-        }
-        if buf.len() > HEAD_LIMIT {
-            return reply(&mut stream, "431 Request Header Fields Too Large", "Headers too large.").await;
-        }
-        match stream.read(&mut chunk).await {
-            Ok(0) | Err(_) => return,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-        }
+    let found = |head: &crate::http::Head| match ritual_for(&scheduler.db, &head.path) {
+        Ok(Some(routine)) if head.method == "POST" => Ok(routine),
+        _ => Err(("404 Not Found", "Not found.")),
     };
-    let Some(head) = std::str::from_utf8(&buf[..end]).ok().and_then(parse_head) else {
-        return reply(&mut stream, "400 Bad Request", "Bad request.").await;
+    let mut routine = None;
+    let request = crate::http::read_request(&mut stream, BODY_LIMIT, |head| found(head).map(|r| routine = Some(r))).await;
+    let request = match request {
+        Ok(request) => request,
+        Err(Some((status, text))) => return reply(&mut stream, status, text).await,
+        Err(None) => return,
     };
-    let routine = match ritual_for(&scheduler.db, &head.path) {
-        Ok(Some(routine)) if head.method == "POST" => routine,
-        _ => return reply(&mut stream, "404 Not Found", "Not found.").await,
-    };
-    if head.chunked {
-        return reply(&mut stream, "411 Length Required", "Send a Content-Length.").await;
-    }
-    let length = head.length.unwrap_or(0);
-    if length > BODY_LIMIT {
-        return reply(&mut stream, "413 Payload Too Large", "The body is over 64 KB.").await;
-    }
-    let mut body = buf[end + 4..].to_vec();
-    while body.len() < length {
-        match stream.read(&mut chunk).await {
-            Ok(0) | Err(_) => return,
-            Ok(n) => body.extend_from_slice(&chunk[..n]),
-        }
-    }
-    body.truncate(length);
-    match webhook_fire(scheduler, &routine, &body) {
+    let Some(routine) = routine else { return };
+    match webhook_fire(scheduler, &routine, &request.body) {
         Ok(true) => reply(&mut stream, "202 Accepted", "Ritual started.").await,
         Ok(false) => reply(&mut stream, "429 Too Many Requests", "This ritual ran less than a minute ago.").await,
         Err(_) => reply(&mut stream, "500 Internal Server Error", "Grimoire couldn't start the ritual.").await,
@@ -823,17 +762,6 @@ mod tests {
         assert!(home_path(&home.join("a/b").to_string_lossy()).is_ok());
         for bad in ["/etc/hosts", "~/../x", "~", "relative/path", "~other/x"] {
             assert!(home_path(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn parses_webhook_requests() {
-        let head = parse_head("POST /hooks/abc?x=1 HTTP/1.1\r\nHost: 127.0.0.1\r\ncontent-length: 12").unwrap();
-        assert_eq!(head, Head { method: "POST".into(), path: "/hooks/abc".into(), length: Some(12), chunked: false });
-        assert!(parse_head("POST /hooks/abc HTTP/1.1\r\nTransfer-Encoding: chunked").unwrap().chunked);
-        assert_eq!(parse_head("GET / HTTP/1.0").unwrap().length, None);
-        for bad in ["", "POST /x", "POST /x SPDY/3", "POST /x HTTP/1.1 extra", "POST /x HTTP/1.1\r\nbroken", "POST /x HTTP/1.1\r\nContent-Length: -1"] {
-            assert!(parse_head(bad).is_none(), "{bad:?}");
         }
     }
 

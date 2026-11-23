@@ -2,7 +2,8 @@ import { createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 import AvatarStudio from "./AvatarStudio";
 import { Segmented } from "./ui";
 import { inkFor, randomAvatar, type Avatar } from "./avatar";
-import { api, createFetch, errorText, PROVIDER_NAMES, shortPath, type Access, type Agent, type Coven, type HostCheck, type Provider } from "./api";
+import { api, createFetch, errorText, onEvent, onMountAsync, PROVIDER_NAMES, shortPath, type Access, type Agent, type Coven, type HostCheck, type Peer, type Provider } from "./api";
+import { runsOnOptions } from "./linked";
 import { effortName, modelCatalog, modelName } from "./models";
 import { BudgetField } from "./BudgetControls";
 import { formatTokens, parseTokens, type BudgetPeriod } from "./budgets";
@@ -55,7 +56,18 @@ export default function AgentForm(props: {
     setEffort("");
   };
   const [workspace, setWorkspace] = createSignal("");
-  const [remote, setRemote] = createSignal(false);
+  // "here", "ssh", or "peer:<id>" for a linked Mac.
+  const [runsOn, setRunsOn] = createSignal("here");
+  const remote = () => runsOn() === "ssh";
+  const [peers, setPeers] = createSignal<Peer[]>([]);
+  const peer = () => (runsOn().startsWith("peer:") ? peers().find((p) => `peer:${p.id}` === runsOn()) : undefined);
+  const linkedMac = () => runsOn().startsWith("peer:");
+  onMountAsync(async (keep) => {
+    if (editing) return;
+    const load = () => api.linkStatus().then((s) => setPeers(s.peers), () => setPeers([]));
+    keep(await onEvent("links_changed", () => void load()));
+    await load();
+  });
   const [host, setHost] = createSignal(props.agent?.host ?? "");
   const [checking, setChecking] = createSignal(false);
   const [check, setCheck] = createSignal<HostCheck | string | null>(null);
@@ -108,22 +120,32 @@ export default function AgentForm(props: {
       setError("Write the other Mac's SSH destination, like me@studio.local.");
       return;
     }
+    const target = peer();
+    if (!editing && linkedMac() && !target?.online) {
+      setError(`${target?.name ?? "That Mac"} is offline. Pick another Mac, or try again when it's back.`);
+      return;
+    }
     setSaving(true);
     try {
       const saved = props.agent
         ? await api.updateAgent(props.agent.id, { name: name(), model: model(), access: access(), avatar: avatar(), effort: effort(), covenId: coven() || null })
-        : await api.createAgent({
-            name: name(),
-            provider: provider(),
-            model: model(),
-            workspace: workspace(),
-            access: access(),
-            avatar: avatar(),
-            effort: effort(),
-            covenId: coven() || null,
-            host: remote() ? host() : "",
-          });
-      if (tokens !== null || hadBudget) await api.setBudget(saved.id, tokens === null ? null : { tokens, period: period() });
+        : await api.createAgent(
+            target
+              ? { name: name(), provider: provider(), model: model(), workspace: "", access: access(), avatar: avatar(), effort: effort(), peerId: target.id }
+              : {
+                  name: name(),
+                  provider: provider(),
+                  model: model(),
+                  workspace: workspace(),
+                  access: access(),
+                  avatar: avatar(),
+                  effort: effort(),
+                  covenId: coven() || null,
+                  host: remote() ? host() : "",
+                },
+          );
+      // A linked Mac keeps its familiars' budgets; this Mac can't set one there.
+      if (!target && (tokens !== null || hadBudget)) await api.setBudget(saved.id, tokens === null ? null : { tokens, period: period() });
       if (!editing && saved.setupPending) {
         setSavedPending(saved);
         return;
@@ -229,7 +251,7 @@ export default function AgentForm(props: {
           </select>
         </label>
 
-        <Show when={props.covens?.length}>
+        <Show when={props.covens?.length && !linkedMac()}>
           <label class="field">
             <span>Coven</span>
             <select value={coven()} onChange={(e) => setCoven(e.currentTarget.value)}>
@@ -242,15 +264,15 @@ export default function AgentForm(props: {
         <Show when={!editing}>
           <div class="field wide">
             <span>Runs on</span>
-            <Segmented
-              label="Runs on"
-              value={remote() ? "ssh" : "here"}
-              options={[
-                { value: "here", label: "This Mac" },
-                { value: "ssh", label: "Another Mac over SSH" },
-              ]}
-              onChange={(next) => setRemote(next === "ssh")}
-            />
+            <Segmented label="Runs on" value={runsOn()} options={runsOnOptions(peers())} onChange={setRunsOn} />
+            <Show when={peer()}>
+              {(mac) => (
+                <p class="hint">
+                  It lives on {mac().name} and shows up here too. Only {mac().name} can change or delete it, and{" "}
+                  {PROVIDER_NAMES[provider()]} must be installed and signed in there.
+                </p>
+              )}
+            </Show>
             <Show when={remote()}>
               <p class="hint">
                 SSH must sign in with a key, without a password prompt, and {PROVIDER_NAMES[provider()]} must be installed and signed in on
@@ -288,20 +310,24 @@ export default function AgentForm(props: {
               )}
             </Show>
           </Show>
-          <label class="field">
-            <span>{remote() ? "Workspace on that Mac" : "Workspace folder"}</span>
-            <input
-              value={workspace()}
-              onInput={(e) => setWorkspace(e.currentTarget.value)}
-              placeholder={remote() ? "A new folder in ~/Grimoire there" : "A new folder in ~/Grimoire"}
-              autocapitalize="off"
-              autocorrect="off"
-              spellcheck={false}
-            />
-          </label>
+          <Show when={!linkedMac()}>
+            <label class="field">
+              <span>{remote() ? "Workspace on that Mac" : "Workspace folder"}</span>
+              <input
+                value={workspace()}
+                onInput={(e) => setWorkspace(e.currentTarget.value)}
+                placeholder={remote() ? "A new folder in ~/Grimoire there" : "A new folder in ~/Grimoire"}
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck={false}
+              />
+            </label>
+          </Show>
         </Show>
 
-        <BudgetField text={budget()} period={period()} onText={setBudget} onPeriod={setPeriod} />
+        <Show when={!linkedMac()}>
+          <BudgetField text={budget()} period={period()} onText={setBudget} onPeriod={setPeriod} />
+        </Show>
 
         <div class="field wide">
           <span>Access</span>

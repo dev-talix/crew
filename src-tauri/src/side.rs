@@ -68,15 +68,29 @@ fn row_to_side(r: &rusqlite::Row) -> rusqlite::Result<SideChat> {
     })
 }
 
+/// A side chat's columns, in `row_to_side`'s order. A familiar on a linked Mac asks as its `peer:` id.
+const COLUMNS: &str = "id, agent_id, CASE WHEN remote_peer IS NULL THEN side_of ELSE 'peer:' || remote_peer || ':' || remote_asker END, \
+                       title, session_id, created_at, updated_at";
+
 pub fn get(db: &Db, chat_id: &str) -> Result<Option<SideChat>, String> {
+    db.with(|c| c.query_row(&format!("SELECT {COLUMNS} FROM chats WHERE id = ?1 AND side_of IS NOT NULL"), params![chat_id], row_to_side).optional())
+}
+
+/// Starts a side conversation asked by `asker_id`, a familiar called `asker_name` on linked Mac
+/// `peer`. `side_of` holds the asked familiar itself, as a helper's chat does, so every side-chat
+/// filter finds it; the remote columns say who really asked, so the asker never passes for a familiar
+/// on this Mac.
+pub fn create_remote(db: &Db, peer: &str, asker_id: &str, asker_name: &str, target_id: &str, first: &str) -> Result<SideChat, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = now_ms();
     db.with(|c| {
-        c.query_row(
-            "SELECT id, agent_id, side_of, title, session_id, created_at, updated_at FROM chats WHERE id = ?1 AND side_of IS NOT NULL",
-            params![chat_id],
-            row_to_side,
+        c.execute(
+            "INSERT INTO chats (id, agent_id, title, session_id, created_at, updated_at, side_of, remote_peer, remote_asker, remote_name)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?4, ?2, ?5, ?6, ?7)",
+            params![id, target_id, crate::chats::title_from(first), now, peer, asker_id, asker_name],
         )
-        .optional()
-    })
+    })?;
+    get(db, &id)?.ok_or_else(|| "The side conversation wasn't saved.".into())
 }
 
 /// Starts a side conversation from `asker` to `target`, titled from its first message.
@@ -109,13 +123,13 @@ pub fn follow_up(db: &Db, thread: &str, asker: &Agent, target: &Agent) -> Result
 /// Only meaningful at startup, before any side turn runs.
 pub fn unfinished(db: &Db) -> Result<Vec<SideChat>, String> {
     db.with(|c| {
-        let mut stmt = c.prepare(
-            "SELECT id, agent_id, side_of, title, session_id, created_at, updated_at FROM chats c
+        let mut stmt = c.prepare(&format!(
+            "SELECT {COLUMNS} FROM chats c
              WHERE side_of IS NOT NULL AND id NOT IN (SELECT chat_id FROM helpers) AND NOT EXISTS (
                  SELECT 1 FROM messages m WHERE m.id = (SELECT MAX(id) FROM messages WHERE chat_id = c.id)
                  AND (m.role = 'error' OR (m.role = 'assistant' AND m.status IN ('done', 'stopped')))
-             )",
-        )?;
+             )"
+        ))?;
         let rows = stmt.query_map([], row_to_side)?;
         rows.collect()
     })

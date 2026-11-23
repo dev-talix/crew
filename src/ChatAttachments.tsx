@@ -20,8 +20,8 @@ export interface PendingFile {
 let nextKey = 1;
 const hasFiles = (e: DragEvent) => !!e.dataTransfer?.types.includes("Files");
 
-/** Files waiting in the composer, added by drop, paste, or the attach button. */
-export function createComposerFiles(onError: (message: string) => void) {
+/** Files waiting in the composer, added by drop, paste, or the attach button. Drop and paste take files only while `enabled`. */
+export function createComposerFiles(onError: (message: string) => void, enabled: () => boolean = () => true) {
   const [items, setItems] = createSignal<PendingFile[]>([]);
   const [dragging, setDragging] = createSignal(false);
   const release = (list: PendingFile[]) => list.forEach((item) => item.preview && URL.revokeObjectURL(item.preview));
@@ -56,13 +56,13 @@ export function createComposerFiles(onError: (message: string) => void) {
     release,
     onPaste: (e: ClipboardEvent) => {
       const files = Array.from(e.clipboardData?.files ?? []);
-      if (!files.length) return;
+      if (!files.length || !enabled()) return;
       e.preventDefault();
       add(files);
     },
     dropTarget: {
       onDragOver: (e: DragEvent) => {
-        if (!hasFiles(e)) return;
+        if (!enabled() || !hasFiles(e)) return;
         e.preventDefault();
         if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
         setDragging(true);
@@ -71,7 +71,7 @@ export function createComposerFiles(onError: (message: string) => void) {
         if (!(e.currentTarget as Node).contains(e.relatedTarget as Node | null)) setDragging(false);
       },
       onDrop: (e: DragEvent) => {
-        if (!hasFiles(e)) return;
+        if (!enabled() || !hasFiles(e)) return;
         e.preventDefault();
         setDragging(false);
         add(Array.from(e.dataTransfer?.files ?? []));

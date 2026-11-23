@@ -250,7 +250,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 24;
+const SCHEMA_VERSION: i64 = 27;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -531,6 +531,29 @@ impl Db {
         }
         if version < 24 {
             crate::handoffs::migrate_requests(&conn)?;
+        }
+        if version < 25 {
+            // Other Macs linked over Tailscale. Their tokens live in the Keychain, not here.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE link_peers (
+                   id TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   address TEXT NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   last_seen INTEGER,
+                   version TEXT,
+                   familiars TEXT NOT NULL DEFAULT '[]'
+                 );
+                 PRAGMA user_version = 25;
+                 COMMIT;",
+            )?;
+        }
+        if version < 26 {
+            crate::handoffs::migrate_linked(&conn)?;
+        }
+        if version < 27 {
+            crate::handoffs::migrate_remote_request(&conn)?;
         }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
@@ -1065,7 +1088,12 @@ mod tests {
         // Roll the file back to version 21, as the previous release left it.
         {
             let conn = Connection::open(&path).unwrap();
-            conn.execute_batch("ALTER TABLE agents DROP COLUMN setup_pending; ALTER TABLE chats DROP COLUMN handoff; DROP TABLE handoffs; PRAGMA user_version = 21;").unwrap();
+            conn.execute_batch(
+                "ALTER TABLE agents DROP COLUMN setup_pending; ALTER TABLE chats DROP COLUMN handoff; DROP TABLE handoffs; DROP TABLE link_peers;
+                 ALTER TABLE chats DROP COLUMN remote_peer; ALTER TABLE chats DROP COLUMN remote_asker; ALTER TABLE chats DROP COLUMN remote_name;
+                 PRAGMA user_version = 21;",
+            )
+            .unwrap();
         }
         let db = Db::open(&path).unwrap();
         let version: i64 = db.with(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
@@ -1075,6 +1103,49 @@ mod tests {
         assert!(db.pending_setups().unwrap().contains("a"));
         db.set_setup_pending("a", false).unwrap();
         assert!(db.pending_setups().unwrap().is_empty());
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_existing_database_keeps_its_handoffs_and_gains_linked_ones() {
+        let dir = std::env::temp_dir().join(format!("grimoire-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grimoire.db");
+        let chat = {
+            let db = Db::open(&path).unwrap();
+            db.insert_agent(&agent("a")).unwrap();
+            db.insert_agent(&agent("b")).unwrap();
+            let chat = crate::side::create(&db, "a", "b", "Old question").unwrap().id;
+            crate::handoffs::record(&db, &chat, "ask", "Old question", crate::handoffs::Status::Done).unwrap();
+            chat
+        };
+        // Roll the file back to version 25, as the previous release left it.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE chats DROP COLUMN remote_peer; ALTER TABLE chats DROP COLUMN remote_asker; ALTER TABLE chats DROP COLUMN remote_name;
+                 CREATE TABLE old (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+                   kind TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL);
+                 INSERT INTO old SELECT id, chat_id, kind, text, status, created_at FROM handoffs;
+                 DROP TABLE handoffs; ALTER TABLE old RENAME TO handoffs; CREATE INDEX handoffs_by_chat ON handoffs(chat_id);
+                 PRAGMA user_version = 25;",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let version: i64 = db.with(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let list = crate::handoffs::list(&db, 10).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0].chat_id.as_str(), list[0].from_id.as_str(), list[0].to_id.as_str(), list[0].what.as_str()), (chat.as_str(), "a", "b", "Old question"));
+        assert_eq!(crate::side::get(&db, &chat).unwrap().unwrap().asker_id, "a");
+        let remote = crate::side::create_remote(&db, "mac-b", "ada", "Ada", "b", "New question").unwrap();
+        assert_eq!(remote.asker_id, "peer:mac-b:ada");
+        // Deleting the asked familiar takes its handoffs with it, as before.
+        crate::handoffs::record(&db, &remote.id, "ask", "New question", crate::handoffs::Status::Waiting).unwrap();
+        db.delete_agent("b").unwrap();
+        assert!(crate::handoffs::list(&db, 10).unwrap().is_empty());
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }

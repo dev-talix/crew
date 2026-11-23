@@ -5,6 +5,7 @@ import Chat from "./Chat";
 import { createChatStore } from "./chatStore";
 import { api, onEvent, onMountAsync, subscribe, type Agent } from "./api";
 import { inkFor } from "./avatar";
+import { isRemote } from "./linked";
 import { createMoods } from "./moods";
 import { runningModelName } from "./models";
 import "./dock.css";
@@ -26,8 +27,8 @@ const nextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() 
 export default function Dock() {
   const [all, setAgents] = createSignal<Agent[]>([]);
   const [hidden, setHidden] = createSignal<string[]>([]);
-  // The familiars you chose to keep in the dock, in sidebar order.
-  const agents = createMemo(() => all().filter((a) => !hidden().includes(a.id)));
+  // The familiars you chose to keep in the dock, in sidebar order. Linked Macs' familiars stay out.
+  const agents = createMemo(() => all().filter((a) => !isRemote(a) && !hidden().includes(a.id)));
   const [busy, setBusy] = createStore<Record<string, boolean>>({});
   const [unread, setUnread] = createStore<Record<string, boolean>>({});
   const [edge, setEdge] = createSignal<"left" | "right">("right");

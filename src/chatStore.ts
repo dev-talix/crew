@@ -68,8 +68,10 @@ export function createChatStore(selected: Accessor<string | null>) {
     const agentId = selected();
     const first = messages[0];
     if (!agentId || !first) return;
+    const token = loadToken;
     const older = await api.listMessages(agentId, first.id);
-    if (agentId !== selected()) return;
+    // A reload or a switch since then replaced the transcript this page belongs to.
+    if (token !== loadToken || agentId !== selected()) return;
     setMessages((list) => {
       list.unshift(...older);
     });

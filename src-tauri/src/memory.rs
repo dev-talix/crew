@@ -610,11 +610,13 @@ fn owner_exists(db: &Db, owner: Owner) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_memory(state: State<AppState>, scope: Scope, id: String) -> Result<Memory, String> {
+    crate::link::local_only(&id)?;
     read(&state.db, dir()?, Owner { scope, id: &id })
 }
 
 #[tauri::command]
 pub fn save_memory(app: AppHandle, state: State<AppState>, scope: Scope, id: String, entries: Vec<Draft>, removed: Vec<String>) -> Result<Memory, String> {
+    crate::link::local_only(&id)?;
     let owner = Owner { scope, id: &id };
     owner_exists(&state.db, owner)?;
     let saved = save(&state.db, dir()?, owner, &entries, &removed, &today())?;
@@ -625,6 +627,7 @@ pub fn save_memory(app: AppHandle, state: State<AppState>, scope: Scope, id: Str
 /// Adds one entry from the user, like a chat message made into a rule.
 #[tauri::command]
 pub fn add_memory(app: AppHandle, state: State<AppState>, scope: Scope, id: String, kind: Kind, project: Option<String>, text: String) -> Result<Memory, String> {
+    crate::link::local_only(&id)?;
     let owner = Owner { scope, id: &id };
     owner_exists(&state.db, owner)?;
     let (saved, _) = add(&state.db, dir()?, owner, kind, project.as_deref(), &text, None, &today())?;

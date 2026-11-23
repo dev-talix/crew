@@ -132,6 +132,24 @@ test("loadOlder prepends the previous page", async () => {
   dispose();
 });
 
+test("a page requested before a reload is dropped", async () => {
+  pages.a = [msg(8, "old"), msg(9, "older"), ...pages.a];
+  const { store, dispose } = setup();
+  await settle();
+  let release!: () => void;
+  gate = new Promise((resolve) => (release = resolve));
+  const older = store.loadOlder();
+  // The reload's page comes back first, then the old chat's earlier page.
+  gate = null;
+  pages.a = [msg(8, "old"), msg(9, "older"), msg(30, "another chat")];
+  await store.reload();
+  release();
+  await older;
+  await settle();
+  expect(texts(store)).toEqual(["30:another chat"]);
+  dispose();
+});
+
 test("reload fetches the familiar's chat again after a switch", async () => {
   const { store, dispose } = setup();
   await settle();

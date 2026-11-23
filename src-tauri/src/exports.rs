@@ -853,6 +853,7 @@ pub struct Picked {
 /// Exports one familiar, spell, coven, or theme. Returns where it went, or nothing when cancelled.
 #[tauri::command]
 pub(crate) async fn export_item(app: AppHandle, state: State<'_, crate::AppState>, kind: Kind, id: String) -> Result<Option<String>, String> {
+    crate::link::local_only(&id)?;
     let (file, name) = export_one(&state.db, &state.themes_dir, kind, &id)?;
     let Some(path) = save_dialog(&app, &name).await else { return Ok(None) };
     write(&path, &file)?;

@@ -32,11 +32,55 @@ export interface Agent {
   setupPending?: boolean;
   /** Its Mac didn't answer the last time Grimoire tried. */
   offline?: boolean;
+  /** The linked Mac it lives on, or null on this Mac. A linked familiar's id is `peer:<peerId>:<agentId>`. */
+  home?: AgentHome | null;
   createdAt: number;
 }
 
+/** The linked Mac a familiar lives on. Only that Mac can change or delete it. */
+export interface AgentHome {
+  peerId: string;
+  name: string;
+  online: boolean;
+}
+
+/** This Mac's side of linking. */
+export interface ThisMac {
+  installId: string;
+  name: string;
+  /** Its tailnet names and addresses. */
+  addresses: string[];
+  listening: boolean;
+  /** Why it isn't listening, like "Tailscale isn't running". */
+  error: string | null;
+}
+
+/** A Mac linked to this one over the tailnet. */
+export interface Peer {
+  id: string;
+  name: string;
+  address: string;
+  online: boolean;
+  lastSeen: number | null;
+  version: string | null;
+}
+
+export interface LinkStatus {
+  thisMac: ThisMac;
+  peers: Peer[];
+}
+
+/** A one-time code another Mac enters to link with this one. */
+export interface PairingCode {
+  code: string;
+  expiresAt: number;
+  name: string;
+  addresses: string[];
+}
+
 /** What the host badge says about a remote familiar's Mac, or null when there's nothing to flag. */
-export function hostState(agent: Pick<Agent, "setupPending" | "offline">): "Setup pending" | "Offline" | null {
+export function hostState(agent: Pick<Agent, "setupPending" | "offline" | "home">): "Setup pending" | "Offline" | null {
+  if (agent.home) return agent.home.online ? null : "Offline";
   if (agent.setupPending) return "Setup pending";
   if (agent.offline) return "Offline";
   return null;
@@ -108,10 +152,16 @@ export type HandoffStatus = "waiting" | "accepted" | "done" | "failed";
 /** One ask_familiar or message_familiar request. Follow-ups in the same thread get their own. */
 export interface Handoff {
   id: number;
-  /** The side conversation it was sent in. */
+  /** The side conversation it was sent in. For a familiar on a linked Mac, the thread on that Mac. */
   chatId: string;
+  /** A familiar on a linked Mac has its `peer:` id. */
   fromId: string;
   toId: string;
+  fromName: string;
+  toName: string;
+  /** The linked Mac a familiar lives on, or null for this Mac. */
+  fromMac: string | null;
+  toMac: string | null;
   kind: "ask" | "message";
   /** The request, trimmed. */
   what: string;
@@ -340,6 +390,8 @@ export interface NewAgentInput {
   covenId?: string | null;
   /** An SSH destination to run it on another Mac. */
   host?: string;
+  /** A linked Mac to create it on. It then lives there, so host and workspace are left out. */
+  peerId?: string;
 }
 
 export interface AgentChanges {
@@ -575,6 +627,10 @@ export const api = {
   /** Marks a draft sent, with the person's edits, or discarded. The familiar hears which. */
   closeDraft: (id: string, sent: boolean, edits: DraftEdits | null) => invoke<Draft>("close_draft", { id, sent, edits }),
   openDraftLink: (id: string, url: string) => invoke<void>("open_draft_link", { id, url }),
+  linkStatus: () => invoke<LinkStatus>("link_status"),
+  linkStartPairing: () => invoke<PairingCode>("link_start_pairing"),
+  linkPair: (address: string, code: string) => invoke<Peer>("link_pair", { address, code }),
+  linkUnlink: (peerId: string) => invoke<void>("link_unlink", { peerId }),
 };
 
 export interface InboxOption {
@@ -634,7 +690,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

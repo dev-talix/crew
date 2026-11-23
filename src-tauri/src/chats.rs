@@ -366,6 +366,10 @@ struct ChatsChanged<'a> {
 
 fn changed(app: &AppHandle, agent_id: &str, switched: bool) {
     let _ = app.emit("chats_changed", ChatsChanged { agent_id, switched });
+    if switched {
+        // Linked Macs show the current chat, so they reload it.
+        crate::link::record("chat", || serde_json::json!({ "agentId": agent_id }));
+    }
 }
 
 /// Switches the familiar's current chat, dropping the live CLI session so the next turn resumes the new one.
@@ -385,16 +389,19 @@ fn switch(app: &AppHandle, state: &AppState, agent_id: &str, to: impl FnOnce() -
 
 #[tauri::command]
 pub fn list_chats(state: State<AppState>, agent_id: String) -> Result<Vec<Chat>, String> {
+    crate::link::local_only(&agent_id)?;
     list(&state.db, &agent_id)
 }
 
 #[tauri::command]
 pub fn new_chat(app: AppHandle, state: State<AppState>, agent_id: String) -> Result<Chat, String> {
+    crate::link::local_only(&agent_id)?;
     switch(&app, &state, &agent_id, || start(&state.db, &agent_id))
 }
 
 #[tauri::command]
 pub fn open_chat(app: AppHandle, state: State<AppState>, agent_id: String, chat_id: String) -> Result<Chat, String> {
+    crate::link::local_only(&agent_id)?;
     // Opening the chat that is already current changes nothing, so it's fine mid-turn, like a search jump.
     if state.db.with(|c| current_id(c, &agent_id))?.as_deref() == Some(chat_id.as_str()) {
         return open(&state.db, &agent_id, &chat_id);

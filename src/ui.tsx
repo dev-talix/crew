@@ -2,11 +2,13 @@ import { For, onSettled, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import BotAvatar from "./BotAvatar";
 import { hostState, type Agent } from "./api";
+import { homeTitle } from "./linked";
 
-/** The Mac a remote familiar runs on, and whether that Mac is offline or still owes it its setup. */
+/** The Mac a remote or linked familiar runs on, and whether that Mac is offline or still owes it its setup. */
 export function HostBadge(props: { agent: Agent; host: string; title?: string }) {
   const state = () => hostState(props.agent);
   const title = () => {
+    if (props.agent.home) return homeTitle(props.agent);
     if (props.agent.setupPending) return `${props.host} was offline when this familiar was summoned. Grimoire finishes setting it up when that Mac connects.`;
     if (props.agent.offline) return `${props.host} didn't answer the last time Grimoire tried.`;
     return props.title;
@@ -61,7 +63,7 @@ export function Sheet(props: { label: string; onClose: () => void; children: JSX
 export function Segmented<T extends string>(props: {
   label: string;
   value: T;
-  options: { value: T; label: string }[];
+  options: { value: T; label: string; disabled?: boolean }[];
   onChange: (value: T) => void;
 }) {
   return (
@@ -73,6 +75,7 @@ export function Segmented<T extends string>(props: {
             role="radio"
             aria-checked={props.value === option.value ? "true" : "false"}
             class={{ on: props.value === option.value }}
+            disabled={option.disabled}
             onClick={() => props.onChange(option.value)}
           >
             {option.label}

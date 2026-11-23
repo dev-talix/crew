@@ -387,6 +387,17 @@
   margin: 0 auto 8px;
 }
 
+/* A linked familiar's Mac is offline, so nothing can be sent. */
+.composer-notice {
+  max-width: 760px;
+  margin: 0 auto 8px;
+  padding: 8px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .composer-card {
   position: relative;
   max-width: 760px;

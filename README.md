@@ -160,6 +160,37 @@ are refused, and Finder can't open the workspace. The host can't be changed afte
 familiar. Your Permissions rules still apply, since Codex and Claude ask Grimoire over the same
 stream.
 
+### Linked Macs
+
+Two Macs running Grimoire on the same Tailscale tailnet can link, with no SSH. Each familiar lives
+on one Mac, its home, which keeps its chats, memory, ledger, and rituals. Every linked Mac lists it
+with its home Mac's name, shows its chat as it streams, and can send it messages and stop its turns.
+Only the home Mac can edit or delete it. A linked Mac can also summon a new familiar on another
+Mac, which then becomes its home.
+
+To link, make a pairing code on one Mac, then enter that Mac's Tailscale name or address and the
+code on the other. A code is 8 characters, works once, lasts 10 minutes, and dies after 5 wrong
+tries. Unlinking on either Mac removes the link from both, or from the other one the next time it
+connects.
+
+Grimoire asks the Tailscale CLI (`tailscale status --json`) for this Mac's addresses and its peers,
+listens on port 47620 on those addresses only, and drops connections from any address Tailscale
+doesn't list as a peer. It also sends a token or pairing code only to an address Tailscale lists.
+It checks again every minute and moves to new addresses when they change. Without the CLI, it falls
+back to tailnet-range addresses (100.64.0.0/10 and fd7a:115c:a1e0::/48) on Tailscale's own tunnel
+interfaces, never Wi-Fi or Ethernet, since ISPs and hotspots use 100.64.0.0/10 too. Tailscale
+encrypts the traffic. Each pair of Macs shares a token each way, kept in the Keychain. A linked Mac
+can only list familiars, read and send chat messages, stop turns, and summon familiars that run on
+the home Mac itself with workspace access. It can't reach the vault, approvals, settings, memory, or
+Grimoire's tools. Attachments don't cross yet. When a linked Mac is offline, its familiars stay
+listed as of the last time it answered. When it reconnects, it catches up on what it missed, or
+reloads open chats if it missed too much or the other Mac restarted. Switching chats on the home Mac
+reloads that familiar's chat on linked Macs.
+
+Familiars can ask and message familiars on a linked Mac too (see below). The asking Mac runs its own
+checks and approval prompt, then the home Mac runs the side conversation and sends the reply back to
+that Mac only. A familiar asking from another Mac gets no tools, vault, or settings on the home Mac.
+
 ## Attachments
 
 Drop files on the chat, paste a screenshot, or click the paperclip in the composer. You can attach up
@@ -280,6 +311,11 @@ chat list, search, and backups.
 
 Handoffs in the sidebar lists the latest 100 of these exchanges, newest first: who handed what to
 whom, when, whether it's Waiting, Accepted, Done, or Failed, and a link that opens each thread.
+
+`list_familiars` also lists the familiars on linked Macs, online or not. A familiar picks one by id,
+by name when it's unique, or as "Scribe on NigelBot". The same limits apply across Macs, and the side
+conversation lives on the familiar's home Mac, so the asking Mac's chat and Handoffs page name it
+without opening it. If that Mac is offline, the request fails at once.
 
 Grimoire refuses a question or message when:
 

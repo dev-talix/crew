@@ -9,7 +9,8 @@ import { BackupSection } from "./ImportExport";
 import { appIcon, readMode, setAppIcon, setMode, type AppIconSetting, type ModeSetting } from "./themeStore";
 import nightIcon from "./assets/icon-night.svg";
 import paperIcon from "./assets/icon-paper.svg";
-import { BarsIcon, BellIcon, CloseIcon, DownloadIcon, GearIcon, PaletteIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
+import { BarsIcon, BellIcon, CloseIcon, DownloadIcon, GearIcon, LinkIcon, PaletteIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
+import LinkedMacsPage from "./LinkedMacsPage";
 import NotificationsPage from "./NotificationsPage";
 import UpdatesPage from "./UpdatesPage";
 import UsagePage from "./UsagePage";
@@ -256,7 +257,7 @@ function GeneralSettings(props: { agents: Agent[] }) {
                 Grimoire keeps its data on this Mac in <code>~/Library/Application Support/dev.talix.grimoire</code>.
               </p>
             </div>
-            <span class="settings-value">Version {appVersion() ?? "0.2.0"}</span>
+            <span class="settings-value">Version {appVersion() ?? "0.3.0"}</span>
           </div>
         </div>
       </div>
@@ -320,7 +321,7 @@ function AppearanceSettings() {
   );
 }
 
-export type SettingsSection = "general" | "appearance" | "notifications" | "vault" | "permissions" | "usage" | "updates";
+export type SettingsSection = "general" | "appearance" | "notifications" | "vault" | "permissions" | "links" | "usage" | "updates";
 
 /** The sections, with words the ⌘K palette also finds them by. */
 export const SETTINGS_SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element; keywords: string }[] = [
@@ -329,6 +330,7 @@ export const SETTINGS_SECTIONS: { id: SettingsSection; label: string; icon: () =
   { id: "notifications", label: "Notifications", icon: BellIcon, keywords: "alerts banners finished approvals rituals" },
   { id: "vault", label: "Vault", icon: VaultIcon, keywords: "keychain passwords logins api keys cards secrets" },
   { id: "permissions", label: "Permissions", icon: ShieldIcon, keywords: "approvals rules commands ask allow" },
+  { id: "links", label: "Linked Macs", icon: LinkIcon, keywords: "link pair tailscale tailnet other mac devices" },
   { id: "usage", label: "Usage", icon: BarsIcon, keywords: "tokens plan limits rate" },
   { id: "updates", label: "Updates", icon: DownloadIcon, keywords: "version release download" },
 ];
@@ -376,11 +378,14 @@ export default function SettingsPage(props: { section?: SettingsSection; agents:
         <Match when={section() === "permissions"}>
           <PermissionsPage onOpenVault={() => setSection("vault")} />
         </Match>
+        <Match when={section() === "links"}>
+          <LinkedMacsPage />
+        </Match>
         <Match when={section() === "usage"}>
           <UsagePage agents={props.agents} />
         </Match>
         <Match when={section() === "updates"}>
-          <UpdatesPage version={appVersion() ?? "0.2.0"} />
+          <UpdatesPage version={appVersion() ?? "0.3.0"} />
         </Match>
       </Switch>
     </div>

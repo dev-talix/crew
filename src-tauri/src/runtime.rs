@@ -141,14 +141,17 @@ struct ModelPayload<'a> {
 impl Sink for AppHandle {
     fn message(&self, message: &Message) {
         let _ = self.emit("message", message);
+        crate::link::record("message", || crate::link::message_value(message));
     }
 
     fn delta(&self, agent_id: &str, message_id: i64, chunk: &str) {
         let _ = self.emit("delta", DeltaPayload { agent_id, message_id, chunk });
+        crate::link::record("delta", || serde_json::json!(DeltaPayload { agent_id, message_id, chunk }));
     }
 
     fn model(&self, agent_id: &str, model: &str) {
         let _ = self.emit("agent_model", ModelPayload { agent_id, model });
+        crate::link::record("model", || serde_json::json!(ModelPayload { agent_id, model }));
     }
 }
 
@@ -189,6 +192,7 @@ impl Runtime {
 
     fn set_busy(&self, agent_id: &str, busy: bool) {
         let _ = self.app.emit("agent_status", StatusPayload { agent_id, busy });
+        crate::link::record("status", || serde_json::json!(StatusPayload { agent_id, busy }));
         crate::tray::agent_status(&self.app, agent_id, busy);
     }
 

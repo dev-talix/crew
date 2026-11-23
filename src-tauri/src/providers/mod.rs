@@ -74,7 +74,7 @@ pub fn inherited_vars_to_drop(names: impl Iterator<Item = String>, use_subscript
         .collect()
 }
 
-fn login_shell_path() -> Option<String> {
+pub(crate) fn login_shell_path() -> Option<String> {
     LOGIN_PATH
         .get_or_init(|| {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
