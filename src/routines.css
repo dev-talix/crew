@@ -1,0 +1,121 @@
+.routines {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.routine-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.routine-group-head {
+  align-self: flex-start;
+  gap: 8px;
+  margin-left: -6px;
+  padding: 3px 8px 3px 6px;
+  font-weight: 600;
+}
+
+.routine-group-head:hover {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.routine-open {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1px;
+  margin: -6px -8px;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.routine-open:hover .list-title {
+  text-decoration: underline;
+  text-decoration-color: var(--faint);
+  text-underline-offset: 2px;
+}
+
+.routine-row.paused .list-title,
+.routine-row.paused .list-sub {
+  color: var(--faint);
+}
+
+.routine-next {
+  flex-shrink: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.routine-row .list-actions {
+  gap: 12px;
+}
+
+.routine-run {
+  min-width: 76px;
+}
+
+.routine-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.routine-schedule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.routine-inline-label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.field input.routine-amount {
+  width: 80px;
+}
+
+.field input.routine-time {
+  width: 130px;
+}
+
+.routine-days {
+  display: flex;
+  flex-basis: 100%;
+  gap: 4px;
+  margin-bottom: 2px;
+}
+
+.routine-day {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-color: var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.routine-day:hover {
+  border-color: var(--faint);
+}
+
+.routine-day[aria-pressed="true"] {
+  border-color: var(--agent);
+  background: var(--agent);
+  color: var(--agent-ink);
+  font-weight: 600;
+}
+
+.routine-schedule .ghost.small[aria-pressed="true"] {
+  border-color: var(--agent);
+  color: var(--text);
+}
+

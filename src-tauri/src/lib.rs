@@ -1,0 +1,489 @@
+mod db;
+mod dock;
+mod providers;
+mod routines;
+mod runtime;
+mod status;
+mod workflows;
+
+use db::{now_ms, Access, Agent, Avatar, Db, Message, Provider, Routine, Schedule, Workflow, WorkflowStep};
+use routines::Scheduler;
+use runtime::Runtime;
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::Ordering;
+use workflows::WorkflowRunner;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
+use tauri_plugin_opener::OpenerExt;
+
+struct AppState {
+    db: Arc<Db>,
+    runtime: Arc<Runtime>,
+    scheduler: Arc<Scheduler>,
+    workflows: Arc<WorkflowRunner>,
+    dock: dock::Dock,
+}
+
+const CLAUDE_BILLING: &str = "claude_billing";
+const DOCK_EDGE: &str = "dock_edge";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NewAgent {
+    name: String,
+    provider: Provider,
+    model: Option<String>,
+    workspace: Option<String>,
+    access: Access,
+    avatar: Avatar,
+    effort: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentChanges {
+    name: String,
+    model: Option<String>,
+    access: Access,
+    avatar: Avatar,
+    effort: Option<String>,
+}
+
+fn clean_effort(effort: Option<String>) -> Result<Option<String>, String> {
+    match effort.map(|e| e.trim().to_lowercase()).filter(|e| !e.is_empty()) {
+        Some(e) if providers::EFFORTS.contains(&e.as_str()) => Ok(Some(e)),
+        Some(e) => Err(format!("Unknown effort level: {e}")),
+        None => Ok(None),
+    }
+}
+
+fn clean_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 60 {
+        return Err("Give the agent a name of 1 to 60 characters.".into());
+    }
+    Ok(name.to_string())
+}
+
+fn clean_model(model: Option<String>) -> Option<String> {
+    model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty())
+}
+
+fn home() -> Result<PathBuf, String> {
+    std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| "HOME is not set.".into())
+}
+
+fn slug(name: &str) -> String {
+    let slug: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() { "agent".into() } else { slug }
+}
+
+fn expand(path: &str, home: &Path) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => home.join(rest),
+        None if path == "~" => home.to_path_buf(),
+        None => PathBuf::from(path),
+    }
+}
+
+fn workspace_for(requested: Option<&str>, name: &str, id: &str, home: &Path) -> Result<PathBuf, String> {
+    let path = match requested.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(path) => expand(path, home),
+        None => home.join("Crew").join(format!("{}-{}", slug(name), &id[..6])),
+    };
+    if !path.is_absolute() {
+        return Err("The workspace must be a full path, like ~/Projects/site.".into());
+    }
+    if path.parent().is_none() || path == home {
+        return Err("Pick a folder inside your home folder, not the disk root or the home folder itself.".into());
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+fn list_agents(state: State<AppState>) -> Result<Vec<Agent>, String> {
+    state.db.list_agents()
+}
+
+#[tauri::command]
+fn busy_agents(state: State<AppState>) -> Vec<String> {
+    state.runtime.busy_agents()
+}
+
+#[tauri::command]
+fn create_agent(app: AppHandle, state: State<AppState>, input: NewAgent) -> Result<Agent, String> {
+    let name = clean_name(&input.name)?;
+    input.avatar.validate()?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let workspace = workspace_for(input.workspace.as_deref(), &name, &id, &home()?)?;
+    std::fs::create_dir_all(&workspace).map_err(|e| format!("Could not create {}: {e}", workspace.display()))?;
+    let agent = Agent {
+        id,
+        name,
+        provider: input.provider,
+        model: clean_model(input.model),
+        workspace: workspace.to_string_lossy().into_owned(),
+        access: input.access,
+        session_id: None,
+        avatar: input.avatar,
+        effort: clean_effort(input.effort)?,
+        active_model: None,
+        created_at: now_ms(),
+    };
+    state.db.insert_agent(&agent)?;
+    let _ = app.emit("agents_changed", ());
+    Ok(agent)
+}
+
+#[tauri::command]
+async fn update_agent(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    agent_id: String,
+    changes: AgentChanges,
+) -> Result<Agent, String> {
+    let mut agent = state.db.get_agent(&agent_id)?.ok_or("That agent no longer exists.")?;
+    changes.avatar.validate()?;
+    let settings_changed = agent.model != clean_model(changes.model.clone()) || agent.access != changes.access;
+    agent.name = clean_name(&changes.name)?;
+    agent.model = clean_model(changes.model);
+    agent.access = changes.access;
+    agent.avatar = changes.avatar;
+    agent.effort = clean_effort(changes.effort)?;
+    state.db.update_agent(&agent)?;
+    if settings_changed {
+        state.runtime.settings_changed(&agent_id).await;
+    }
+    let _ = app.emit("agents_changed", ());
+    Ok(agent)
+}
+
+#[tauri::command]
+fn open_workspace(app: AppHandle, state: State<AppState>, agent_id: String) -> Result<(), String> {
+    let agent = state.db.get_agent(&agent_id)?.ok_or("That agent no longer exists.")?;
+    app.opener().open_path(&agent.workspace, None::<&str>).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_agent(app: AppHandle, state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
+    state.runtime.remove_agent(&agent_id).await?;
+    state.db.delete_agent(&agent_id)?;
+    let _ = app.emit("agents_changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn list_messages(
+    state: State<AppState>,
+    agent_id: String,
+    before_id: Option<i64>,
+    limit: Option<i64>,
+) -> Result<Vec<Message>, String> {
+    state.db.list_messages(&agent_id, before_id, limit.unwrap_or(100).clamp(1, 500))
+}
+
+#[tauri::command]
+fn send_message(state: State<AppState>, agent_id: String, text: String) -> Result<Message, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("The message is empty.".into());
+    }
+    state.runtime.send(&agent_id, text.to_string(), None)
+}
+
+#[tauri::command]
+async fn stop_turn(state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
+    state.runtime.stop(&agent_id).await
+}
+
+#[tauri::command]
+fn new_chat(state: State<AppState>, agent_id: String) -> Result<Message, String> {
+    if state.runtime.is_busy(&agent_id) {
+        return Err("Wait for the agent to finish, or stop it first.".into());
+    }
+    state.runtime.reset_session(&agent_id);
+    state.db.set_session(&agent_id, None)?;
+    state.db.insert_message(&agent_id, "divider", "New chat", "done")
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Settings {
+    claude_billing: String,
+    dock_edge: String,
+}
+
+#[tauri::command]
+fn dock_edge(state: State<AppState>) -> Option<dock::Edge> {
+    state.dock.edge()
+}
+
+#[tauri::command]
+fn dock_resize(app: AppHandle, state: State<AppState>, width: f64, height: f64, focus: bool) -> Result<(), String> {
+    state.dock.resize(&app, width, height, focus)
+}
+
+#[tauri::command]
+fn show_main(app: AppHandle, agent_id: Option<String>) -> Result<(), String> {
+    dock::show_main(&app, agent_id)
+}
+
+#[tauri::command]
+async fn list_models(state: State<'_, AppState>, provider: Provider) -> Result<Vec<providers::ModelOption>, String> {
+    state.runtime.list_models(&provider).await
+}
+
+#[tauri::command]
+fn get_settings(state: State<AppState>) -> Result<Settings, String> {
+    Ok(Settings {
+        claude_billing: state.db.setting(CLAUDE_BILLING)?.unwrap_or_else(|| "subscription".into()),
+        dock_edge: state.db.setting(DOCK_EDGE)?.unwrap_or_else(|| "off".into()),
+    })
+}
+
+#[tauri::command]
+async fn save_settings(app: AppHandle, state: State<'_, AppState>, settings: Settings) -> Result<Settings, String> {
+    if !matches!(settings.claude_billing.as_str(), "subscription" | "api") {
+        return Err("Claude billing must be subscription or api.".into());
+    }
+    if !matches!(settings.dock_edge.as_str(), "off" | "left" | "right") {
+        return Err("The dock goes on the left, the right, or off.".into());
+    }
+    let previous_billing = state.db.setting(CLAUDE_BILLING)?.unwrap_or_else(|| "subscription".into());
+    state.db.set_setting(CLAUDE_BILLING, &settings.claude_billing)?;
+    state.db.set_setting(DOCK_EDGE, &settings.dock_edge)?;
+    if previous_billing != settings.claude_billing {
+        providers::USE_CLAUDE_SUBSCRIPTION.store(settings.claude_billing == "subscription", Ordering::Relaxed);
+        state.runtime.claude_billing_changed();
+    }
+    state.dock.set_edge(&app, dock::Edge::parse(&settings.dock_edge))?;
+    Ok(settings)
+}
+
+#[tauri::command]
+async fn provider_status() -> Vec<status::ProviderStatus> {
+    let (codex, claude) = tokio::join!(status::check("codex"), status::check("claude"));
+    vec![codex, claude]
+}
+
+#[tauri::command]
+fn last_messages(state: State<AppState>) -> Result<Vec<Message>, String> {
+    state.db.last_messages()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RoutineInput {
+    id: Option<String>,
+    agent_id: String,
+    name: String,
+    prompt: String,
+    schedule: Schedule,
+    enabled: bool,
+}
+
+#[tauri::command]
+fn list_routines(state: State<AppState>) -> Result<Vec<Routine>, String> {
+    state.db.list_routines()
+}
+
+#[tauri::command]
+fn save_routine(state: State<AppState>, input: RoutineInput) -> Result<Routine, String> {
+    let name = clean_name(&input.name)?;
+    let prompt = input.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err("Tell the agent what to do on each run.".into());
+    }
+    if state.db.get_agent(&input.agent_id)?.is_none() {
+        return Err("Pick an agent for this routine.".into());
+    }
+    routines::validate(&input.schedule)?;
+    let existing = match input.id.as_deref() {
+        Some(id) => state.db.list_routines()?.into_iter().find(|r| r.id == id),
+        None => None,
+    };
+    let now = now_ms();
+    let routine = Routine {
+        id: existing.as_ref().map(|r| r.id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        agent_id: input.agent_id,
+        name,
+        prompt,
+        next_run_at: if input.enabled { routines::next_run_ms(&input.schedule, now) } else { None },
+        schedule: input.schedule,
+        enabled: input.enabled,
+        last_run_at: existing.as_ref().and_then(|r| r.last_run_at),
+        created_at: existing.map(|r| r.created_at).unwrap_or(now),
+    };
+    state.db.save_routine(&routine)?;
+    state.scheduler.changed();
+    Ok(routine)
+}
+
+#[tauri::command]
+fn delete_routine(state: State<AppState>, id: String) -> Result<(), String> {
+    state.db.delete_routine(&id)?;
+    state.scheduler.changed();
+    Ok(())
+}
+
+#[tauri::command]
+fn run_routine(state: State<AppState>, id: String) -> Result<(), String> {
+    let routine = state.db.list_routines()?.into_iter().find(|r| r.id == id).ok_or("That routine no longer exists.")?;
+    state.scheduler.run_now(&routine)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowInput {
+    id: Option<String>,
+    name: String,
+    steps: Vec<WorkflowStep>,
+}
+
+#[tauri::command]
+fn list_workflows(state: State<AppState>) -> Result<Vec<Workflow>, String> {
+    state.db.list_workflows()
+}
+
+#[tauri::command]
+fn running_workflows(state: State<AppState>) -> Vec<String> {
+    state.workflows.running()
+}
+
+#[tauri::command]
+fn save_workflow(state: State<AppState>, input: WorkflowInput) -> Result<Workflow, String> {
+    let existing = match input.id.as_deref() {
+        Some(id) => state.db.list_workflows()?.into_iter().find(|w| w.id == id),
+        None => None,
+    };
+    let workflow = Workflow {
+        id: existing.as_ref().map(|w| w.id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        name: input.name.trim().to_string(),
+        steps: input
+            .steps
+            .into_iter()
+            .map(|s| WorkflowStep { agent_id: s.agent_id, prompt: s.prompt.trim().to_string() })
+            .collect(),
+        created_at: existing.map(|w| w.created_at).unwrap_or_else(now_ms),
+    };
+    let agents = state.db.list_agents()?;
+    workflows::validate(&workflow, |id| agents.iter().any(|a| a.id == id))?;
+    state.db.save_workflow(&workflow)?;
+    Ok(workflow)
+}
+
+#[tauri::command]
+fn delete_workflow(state: State<AppState>, id: String) -> Result<(), String> {
+    state.db.delete_workflow(&id)
+}
+
+#[tauri::command]
+fn run_workflow(state: State<AppState>, id: String, input: Option<String>) -> Result<(), String> {
+    state.workflows.start(&id, input.unwrap_or_default().trim().to_string())
+}
+
+#[tauri::command]
+async fn stop_workflow(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.workflows.stop(&id).await
+}
+
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&dir)?;
+            let db = Arc::new(Db::open(&dir.join("crew.db"))?);
+            let billing = db.setting(CLAUDE_BILLING).ok().flatten();
+            providers::USE_CLAUDE_SUBSCRIPTION.store(billing.as_deref() != Some("api"), Ordering::Relaxed);
+            let runtime = Runtime::new(db.clone(), app.handle().clone());
+            let scheduler = Scheduler::start(db.clone(), &runtime, app.handle().clone());
+            let workflows = WorkflowRunner::new(db.clone(), runtime.clone(), app.handle().clone());
+            let edge = db.setting(DOCK_EDGE).ok().flatten().and_then(|e| dock::Edge::parse(&e));
+            app.manage(AppState { db, runtime, scheduler, workflows, dock: dock::Dock::default() });
+            if edge.is_some() {
+                let state = app.state::<AppState>();
+                state.dock.set_edge(app.handle(), edge)?;
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            list_agents,
+            busy_agents,
+            create_agent,
+            update_agent,
+            open_workspace,
+            delete_agent,
+            list_messages,
+            send_message,
+            stop_turn,
+            new_chat,
+            get_settings,
+            list_models,
+            dock_edge,
+            dock_resize,
+            show_main,
+            save_settings,
+            provider_status,
+            last_messages,
+            list_routines,
+            save_routine,
+            delete_routine,
+            run_routine,
+            list_workflows,
+            running_workflows,
+            save_workflow,
+            delete_workflow,
+            run_workflow,
+            stop_workflow
+        ])
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let dock_on = window.app_handle().state::<AppState>().dock.edge().is_some();
+                if window.label() == "main" && dock_on {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building Crew")
+        .run(|app, event| {
+            if let RunEvent::Reopen { .. } = event {
+                let _ = dock::show_main(app, None);
+            }
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picks_a_default_workspace_under_crew() {
+        let home = Path::new("/Users/me");
+        let path = workspace_for(None, "Site Builder!", "abcdef123", home).unwrap();
+        assert_eq!(path, Path::new("/Users/me/Crew/site-builder-abcdef"));
+    }
+
+    #[test]
+    fn accepts_known_effort_levels_only() {
+        assert_eq!(clean_effort(Some(" High ".into())).unwrap().as_deref(), Some("high"));
+        assert_eq!(clean_effort(Some(String::new())).unwrap(), None);
+        assert!(clean_effort(Some("turbo".into())).is_err());
+    }
+
+    #[test]
+    fn expands_home_and_refuses_unsafe_folders() {
+        let home = Path::new("/Users/me");
+        assert_eq!(workspace_for(Some("~/code/app"), "a", "abcdef", home).unwrap(), Path::new("/Users/me/code/app"));
+        assert!(workspace_for(Some("~"), "a", "abcdef", home).is_err());
+        assert!(workspace_for(Some("/"), "a", "abcdef", home).is_err());
+        assert!(workspace_for(Some("relative/dir"), "a", "abcdef", home).is_err());
+    }
+}

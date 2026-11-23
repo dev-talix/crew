@@ -1,0 +1,167 @@
+.wf-page-error {
+  margin-bottom: 12px;
+}
+
+.wf-empty-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.wf-empty-action .hint {
+  order: 1;
+}
+
+.wf-row {
+  align-items: flex-start;
+}
+
+.wf-row .list-actions {
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.wf-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  margin-top: 6px;
+}
+
+.wf-chain {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  row-gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wf-chain li {
+  display: flex;
+  align-items: center;
+}
+
+.wf-chain li.pending {
+  opacity: 0.5;
+}
+
+.wf-connector {
+  width: 14px;
+  height: 1px;
+  margin: 0 3px;
+  background: var(--line);
+}
+
+.wf-chain-agent {
+  padding: 2px;
+  border-radius: 50%;
+}
+
+.wf-chain-agent:hover {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.wf-missing {
+  width: 22px;
+  height: 22px;
+  margin: 2px;
+  border: 1px dashed var(--faint);
+  border-radius: 50%;
+}
+
+.wf-status {
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.wf-status.live {
+  color: var(--text);
+}
+
+.wf-error {
+  display: -webkit-box;
+  margin-top: 4px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 12.5px;
+  color: var(--danger);
+  word-break: break-word;
+  user-select: text;
+}
+
+.wf-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.wf-form .hint code {
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.wf-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wf-step {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.wf-step-num {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.wf-step-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.wf-step-head .agent-select {
+  width: min(280px, 100%);
+}
+
+.wf-step-head .icon-button:disabled {
+  opacity: 0.3;
+}
+
+.wf-add {
+  align-self: flex-start;
+  margin: 4px 0 0 32px;
+}

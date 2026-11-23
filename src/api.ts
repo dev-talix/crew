@@ -1,0 +1,247 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { Avatar } from "./avatar";
+
+export type Provider = "codex" | "claude";
+export type Access = "workspace" | "full";
+
+export const PROVIDER_NAMES: Record<Provider, string> = { codex: "Codex", claude: "Claude" };
+
+export interface Agent {
+  id: string;
+  name: string;
+  provider: Provider;
+  model: string | null;
+  workspace: string;
+  access: Access;
+  sessionId: string | null;
+  avatar: Avatar;
+  effort: string | null;
+  activeModel: string | null;
+  createdAt: number;
+}
+
+export interface ModelOption {
+  id: string;
+  name: string;
+  description: string;
+  efforts: string[];
+  defaultEffort: string | null;
+  isDefault: boolean;
+}
+
+export interface Message {
+  id: number;
+  agentId: string;
+  role: "user" | "assistant" | "tool" | "error" | "divider";
+  text: string;
+  status: "done" | "streaming" | "queued" | "cancelled" | "stopped" | "interrupted";
+  source: string | null;
+  createdAt: number;
+  updatedAt: number | null;
+}
+
+export type Schedule = { kind: "interval"; minutes: number } | { kind: "daily"; time: string; days: number[] };
+
+export interface Routine {
+  id: string;
+  agentId: string;
+  name: string;
+  prompt: string;
+  schedule: Schedule;
+  enabled: boolean;
+  lastRunAt: number | null;
+  nextRunAt: number | null;
+  createdAt: number;
+}
+
+export interface RoutineInput {
+  id?: string;
+  agentId: string;
+  name: string;
+  prompt: string;
+  schedule: Schedule;
+  enabled: boolean;
+}
+
+export interface WorkflowStep {
+  agentId: string;
+  prompt: string;
+}
+
+export interface Workflow {
+  id: string;
+  name: string;
+  steps: WorkflowStep[];
+  createdAt: number;
+}
+
+export interface WorkflowInput {
+  id?: string;
+  name: string;
+  steps: WorkflowStep[];
+}
+
+export interface WorkflowProgress {
+  workflowId: string;
+  step: number;
+  total: number;
+  agentId: string | null;
+  state: "running" | "done" | "failed" | "stopped";
+  error: string | null;
+}
+
+export interface ProviderStatus {
+  provider: Provider;
+  installed: boolean;
+  version: string | null;
+  signedIn: boolean | null;
+  method: string | null;
+  detail: string | null;
+}
+
+export type DockEdge = "off" | "left" | "right";
+
+export interface Settings {
+  claudeBilling: "subscription" | "api";
+  dockEdge: DockEdge;
+}
+
+export interface NewAgentInput {
+  name: string;
+  provider: Provider;
+  model: string;
+  workspace: string;
+  access: Access;
+  avatar: Avatar;
+  effort: string;
+}
+
+export interface AgentChanges {
+  name: string;
+  model: string;
+  access: Access;
+  avatar: Avatar;
+  effort: string;
+}
+
+export function changesFor(agent: Agent, patch: Partial<AgentChanges> = {}): AgentChanges {
+  return {
+    name: agent.name,
+    model: agent.model ?? "",
+    access: agent.access,
+    avatar: agent.avatar,
+    effort: agent.effort ?? "",
+    ...patch,
+  };
+}
+
+export const PAGE_SIZE = 100;
+
+export const api = {
+  listAgents: () => invoke<Agent[]>("list_agents"),
+  busyAgents: () => invoke<string[]>("busy_agents"),
+  createAgent: (input: NewAgentInput) => invoke<Agent>("create_agent", { input }),
+  updateAgent: (agentId: string, changes: AgentChanges) => invoke<Agent>("update_agent", { agentId, changes }),
+  deleteAgent: (agentId: string) => invoke<void>("delete_agent", { agentId }),
+  openWorkspace: (agentId: string) => invoke<void>("open_workspace", { agentId }),
+  listMessages: (agentId: string, beforeId?: number) =>
+    invoke<Message[]>("list_messages", { agentId, beforeId: beforeId ?? null, limit: PAGE_SIZE }),
+  sendMessage: (agentId: string, text: string) => invoke<Message>("send_message", { agentId, text }),
+  stopTurn: (agentId: string) => invoke<void>("stop_turn", { agentId }),
+  newChat: (agentId: string) => invoke<Message>("new_chat", { agentId }),
+  lastMessages: () => invoke<Message[]>("last_messages"),
+  listModels: (provider: Provider) => invoke<ModelOption[]>("list_models", { provider }),
+  dockEdge: () => invoke<"left" | "right" | null>("dock_edge"),
+  dockResize: (width: number, height: number, focus: boolean) => invoke<void>("dock_resize", { width, height, focus }),
+  showMain: (agentId?: string) => invoke<void>("show_main", { agentId: agentId ?? null }),
+  getSettings: () => invoke<Settings>("get_settings"),
+  saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
+  providerStatus: () => invoke<ProviderStatus[]>("provider_status"),
+  listRoutines: () => invoke<Routine[]>("list_routines"),
+  saveRoutine: (input: RoutineInput) => invoke<Routine>("save_routine", { input }),
+  deleteRoutine: (id: string) => invoke<void>("delete_routine", { id }),
+  runRoutine: (id: string) => invoke<void>("run_routine", { id }),
+  listWorkflows: () => invoke<Workflow[]>("list_workflows"),
+  runningWorkflows: () => invoke<string[]>("running_workflows"),
+  saveWorkflow: (input: WorkflowInput) => invoke<Workflow>("save_workflow", { input }),
+  deleteWorkflow: (id: string) => invoke<void>("delete_workflow", { id }),
+  runWorkflow: (id: string, input: string) => invoke<void>("run_workflow", { id, input }),
+  stopWorkflow: (id: string) => invoke<void>("stop_workflow", { id }),
+};
+
+export function onEvent<T>(
+  name: "routines_changed" | "workflow_progress" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge",
+  handler: (payload: T) => void,
+) {
+  return listen<T>(name, (e) => handler(e.payload));
+}
+
+export interface DeltaEvent {
+  agentId: string;
+  messageId: number;
+  chunk: string;
+}
+
+export interface StatusEvent {
+  agentId: string;
+  busy: boolean;
+}
+
+export async function subscribe(handlers: {
+  message: (m: Message) => void;
+  delta: (d: DeltaEvent) => void;
+  status: (s: StatusEvent) => void;
+}): Promise<UnlistenFn> {
+  const stops = await Promise.all([
+    listen<Message>("message", (e) => handlers.message(e.payload)),
+    listen<DeltaEvent>("delta", (e) => handlers.delta(e.payload)),
+    listen<StatusEvent>("agent_status", (e) => handlers.status(e.payload)),
+  ]);
+  return () => stops.forEach((stop) => stop());
+}
+
+export function errorText(error: unknown): string {
+  return typeof error === "string" ? error : error instanceof Error ? error.message : "Something went wrong.";
+}
+
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+export function describeSchedule(schedule: Schedule): string {
+  if (schedule.kind === "interval") {
+    const { minutes } = schedule;
+    if (minutes % 1440 === 0) return minutes === 1440 ? "Every day" : `Every ${minutes / 1440} days`;
+    if (minutes % 60 === 0) return minutes === 60 ? "Every hour" : `Every ${minutes / 60} hours`;
+    return `Every ${minutes} minutes`;
+  }
+  const days = [...schedule.days].sort();
+  const when = `at ${formatClock(schedule.time)}`;
+  if (days.length === 0 || days.length === 7) return `Every day ${when}`;
+  if (days.join() === "1,2,3,4,5") return `Weekdays ${when}`;
+  if (days.join() === "6,7") return `Weekends ${when}`;
+  return `${days.map((d) => WEEKDAYS[d - 1]).join(", ")} ${when}`;
+}
+
+function formatClock(time: string): string {
+  const [h, m] = time.split(":").map(Number);
+  return new Date(2000, 0, 1, h, m).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+export function relativeTime(ms: number, now = Date.now()): string {
+  const diff = ms - now;
+  const abs = Math.abs(diff);
+  const units: [Intl.RelativeTimeFormatUnit, number][] = [
+    ["day", 86_400_000],
+    ["hour", 3_600_000],
+    ["minute", 60_000],
+  ];
+  const format = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  for (const [unit, size] of units) {
+    if (abs >= size) return format.format(Math.round(diff / size), unit);
+  }
+  return diff >= 0 ? "in a moment" : "just now";
+}
+
+export function shortPath(path: string): string {
+  return path.replace(/^\/Users\/[^/]+/, "~");
+}

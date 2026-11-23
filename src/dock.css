@@ -1,0 +1,204 @@
+html.dock-window,
+html.dock-window body,
+html.dock-window #root {
+  background: transparent;
+  overflow: hidden;
+}
+
+.dock {
+  --pad: 10px;
+  --spring: cubic-bezier(0.2, 0.9, 0.25, 1.08);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+  padding: var(--pad);
+}
+
+.dock[data-edge="right"] {
+  flex-direction: row-reverse;
+}
+
+.dock-rail {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 56px;
+  flex-shrink: 0;
+  max-height: 100%;
+  padding: 10px 0 4px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.18);
+  opacity: 0;
+  transform: translateX(var(--from, 24px)) scale(0.96);
+  transition:
+    opacity 220ms ease,
+    transform 360ms var(--spring);
+}
+
+.dock[data-edge="left"] .dock-rail {
+  --from: -24px;
+}
+
+.dock.entered .dock-rail {
+  opacity: 1;
+  transform: none;
+}
+
+.dock-agent {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 13px;
+  flex-shrink: 0;
+  opacity: 0;
+  transform: scale(0.6);
+  transition:
+    opacity 200ms ease var(--stagger, 0ms),
+    transform 380ms var(--spring) var(--stagger, 0ms),
+    background 140ms ease;
+}
+
+.dock.entered .dock-agent {
+  opacity: 1;
+  transform: none;
+}
+
+.dock.entered .dock-agent:hover {
+  transform: scale(1.08);
+  transition-delay: 0ms;
+}
+
+.dock.entered .dock-agent:active {
+  transform: scale(0.95);
+}
+
+.dock-agent.active {
+  background: color-mix(in srgb, var(--agent) 20%, transparent);
+}
+
+.dock-agent.active::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--agent);
+}
+
+.dock[data-edge="right"] .dock-agent.active::before {
+  left: -8px;
+}
+
+.dock[data-edge="left"] .dock-agent.active::before {
+  right: -8px;
+}
+
+.dock-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--agent);
+}
+
+.dock-sep {
+  width: 24px;
+  height: 1px;
+  margin: 2px 0;
+  flex-shrink: 0;
+  background: var(--line);
+}
+
+.dock-home {
+  color: var(--muted);
+}
+
+.dock-home:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.dock-panel {
+  flex: 1;
+  align-self: stretch;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--bg);
+  box-shadow: 0 14px 36px rgb(0 0 0 / 0.26);
+  opacity: 0;
+  transform: translateX(var(--panel-from, 18px)) scale(0.97);
+  transform-origin: var(--panel-origin, right center);
+  transition:
+    opacity 180ms ease,
+    transform 260ms var(--spring);
+}
+
+.dock[data-edge="left"] .dock-panel {
+  --panel-from: -18px;
+  --panel-origin: left center;
+}
+
+.dock[data-phase="open"] .dock-panel {
+  opacity: 1;
+  transform: none;
+}
+
+.dock[data-phase="closing"] .dock-panel {
+  transition:
+    opacity 150ms ease,
+    transform 190ms ease-in;
+}
+
+.chat.compact .chat-bar {
+  height: 42px;
+  padding: 0 6px 0 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.chat.compact .timeline {
+  padding: 14px 14px 6px;
+}
+
+.chat.compact .row.user .user-bubble {
+  max-width: 88%;
+}
+
+.chat.compact .composer-dock {
+  padding: 4px 10px 10px;
+}
+
+.chat.compact .composer-card {
+  border-radius: 16px;
+}
+
+.chat.compact .chip-sep,
+.chat.compact .chip.access-chip {
+  display: none;
+}
+
+.chat.compact .picker {
+  width: calc(100% - 16px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dock-rail,
+  .dock-agent,
+  .dock-panel {
+    transform: none !important;
+    transition: opacity 120ms ease !important;
+  }
+}

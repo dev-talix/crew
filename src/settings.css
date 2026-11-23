@@ -1,0 +1,114 @@
+:root {
+  --status-ok: #2f9e57;
+  --status-unknown: #c98a12;
+  --status-off: #cf4a36;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --status-ok: #4cc27a;
+    --status-unknown: #e3aa3c;
+    --status-off: #f07a66;
+  }
+}
+
+:root[data-theme="dark"] {
+  --status-ok: #4cc27a;
+  --status-unknown: #e3aa3c;
+  --status-off: #f07a66;
+}
+
+.page-body > .settings {
+  max-width: 640px;
+  padding-bottom: 12px;
+}
+
+.settings-caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 22px;
+}
+
+.settings-caption h2 {
+  font: inherit;
+}
+
+.settings-caption .icon-button {
+  width: 22px;
+  height: 22px;
+  margin-right: 6px;
+}
+
+.settings-caption .icon-button:disabled {
+  opacity: 1;
+}
+
+.settings-caption .spinning svg {
+  animation: settings-spin 0.9s linear infinite;
+}
+
+@keyframes settings-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.settings-row {
+  align-items: flex-start;
+}
+
+.settings-row > .settings-value {
+  margin-top: 2px;
+}
+
+.status-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin: 6px 2px 0;
+  border-radius: 50%;
+  background: var(--line);
+}
+
+.status-dot[data-state="ok"] {
+  background: var(--status-ok);
+}
+
+.status-dot[data-state="unknown"] {
+  background: var(--status-unknown);
+}
+
+.status-dot[data-state="off"] {
+  background: var(--status-off);
+}
+
+.settings-value {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-detail {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--muted);
+  user-select: text;
+}
+
+.settings code {
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.settings-footnote {
+  margin: 6px 14px 0;
+}
+
+.settings-error {
+  margin-top: 8px;
+}
