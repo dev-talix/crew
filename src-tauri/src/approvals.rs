@@ -23,7 +23,7 @@ pub enum Decision {
 pub struct Request {
     pub id: String,
     pub agent_id: String,
-    /// "vault", "command", or "file".
+    /// "vault", "command", "file", or "familiar".
     pub kind: &'static str,
     pub title: String,
     pub detail: String,

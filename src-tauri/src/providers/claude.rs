@@ -90,7 +90,9 @@ fn args(agent: &Agent) -> Vec<String> {
         Access::Full => "bypassPermissions".into(),
     });
     if let Some((command, server_args)) = crate::tools::server_command(&agent.id) {
-        let config = json!({ "mcpServers": { (crate::tools::SERVER_NAME): { "command": command, "args": server_args } } });
+        // "timeout" (ms) caps each tool call, and also lifts Claude's idle cutoff for silent calls like ask_familiar.
+        let server = json!({ "command": command, "args": server_args, "timeout": crate::tools::CALL_TIMEOUT_SECS * 1000 });
+        let config = json!({ "mcpServers": { (crate::tools::SERVER_NAME): server } });
         args.extend(["--mcp-config".into(), config.to_string(), "--allowedTools".into(), crate::tools::claude_tool_names()]);
     }
     if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
@@ -300,6 +302,7 @@ fn tool_label(name: &str, input: &Value) -> String {
         "Grep" | "Glob" => field("pattern").map(|p| format!("{name} {p}")),
         "WebFetch" => field("url").map(|u| format!("Fetch {u}")),
         "WebSearch" => field("query").map(|q| format!("Search {q}")),
+        "mcp__grimoire__ask_familiar" => Some(crate::delegation::tool_label(input)),
         _ => None,
     }
     .unwrap_or_else(|| name.to_string())
@@ -404,7 +407,8 @@ mod tests {
             delta("ng"),
             json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[
                 {"type":"text","text":"pong"},
-                {"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}
+                {"type":"tool_use","name":"Bash","input":{"command":"ls -la"}},
+                {"type":"tool_use","name":"mcp__grimoire__ask_familiar","input":{"familiar":"Scribe","message":"hi"}}
             ]}}),
             text_start(),
             delta("done"),
@@ -418,6 +422,7 @@ mod tests {
                 ProviderEvent::Delta("po".into()),
                 ProviderEvent::Delta("ng".into()),
                 ProviderEvent::Tool("$ ls -la".into()),
+                ProviderEvent::Tool("Asked Scribe".into()),
                 ProviderEvent::Delta("\n\n".into()),
                 ProviderEvent::Delta("done".into()),
                 ProviderEvent::Done,

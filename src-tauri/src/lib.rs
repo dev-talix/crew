@@ -1,6 +1,7 @@
 mod approvals;
 mod covens;
 mod db;
+mod delegation;
 mod dock;
 mod mcp;
 mod permissions;
@@ -578,6 +579,16 @@ fn save_permissions(state: State<AppState>, permissions: permissions::Permission
 }
 
 #[tauri::command]
+fn get_delegation(state: State<AppState>) -> delegation::Settings {
+    delegation::load(&state.db)
+}
+
+#[tauri::command]
+fn save_delegation(state: State<AppState>, settings: delegation::Settings) -> Result<delegation::Settings, String> {
+    delegation::save(&state.db, settings)
+}
+
+#[tauri::command]
 fn answer_approval(state: State<AppState>, id: String, decision: approvals::Decision) -> Result<(), String> {
     state.approvals.answer(&id, decision)
 }
@@ -617,6 +628,7 @@ pub fn run() {
                 themes_dir: themes_dir.clone(),
                 approvals: approvals.clone(),
                 secrets: secrets.clone(),
+                runtime: runtime.clone(),
             };
             if let Err(e) = tools::serve(Arc::new(tools), &dir.join("grimoire.sock")) {
                 eprintln!("Grimoire tools are off: {e}");
@@ -676,6 +688,8 @@ pub fn run() {
             waiting_approvals,
             get_permissions,
             save_permissions,
+            get_delegation,
+            save_delegation,
             usage_since,
             plan_limits,
             check_for_updates,
