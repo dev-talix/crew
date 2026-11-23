@@ -390,7 +390,7 @@ fn save_routine(state: State<AppState>, input: routines::RoutineInput) -> Result
 
 #[tauri::command]
 fn delete_routine(state: State<AppState>, id: String) -> Result<(), String> {
-    state.db.delete_routine(&id)?;
+    triggers::while_editing(|| state.db.delete_routine(&id))?;
     state.scheduler.changed();
     Ok(())
 }

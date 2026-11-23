@@ -45,44 +45,52 @@ struct Job {
     reply: Option<Reply>,
 }
 
-/// Saves `text` as a message from `source` in `chat`, or in the familiar's current chat, for the
-/// person to see, and queues it for the familiar's next main-chat turn, since a stored message never
-/// reaches the CLI on its own. For results that come back while the familiar can't take a turn.
+/// Saves `text` as a message from `source` in `chat`, or in the familiar's current chat when `chat` is
+/// none or was deleted, for the person to see. It also queues the text for the familiar's next turn in
+/// that chat, since a stored message never reaches the CLI on its own. For results that come back while
+/// the familiar can't take a turn there.
 pub fn hold(db: &Db, agent_id: &str, chat: Option<&str>, text: &str, source: &str) -> Result<Message, String> {
-    let row = match chat {
-        Some(chat) => db.insert_message_in(chat, agent_id, "user", text, "done", Some(source))?,
-        None => db.insert_message_from(agent_id, "user", text, "done", Some(source))?,
+    let home = chat.and_then(|chat| db.insert_message_in(chat, agent_id, "user", text, "done", Some(source)).ok().map(|row| (row, chat.to_string())));
+    let (row, chat) = match home {
+        Some((row, chat)) => (row, Some(chat)),
+        None => (db.insert_message_from(agent_id, "user", text, "done", Some(source))?, crate::chats::current(db, agent_id)?),
     };
     db.with(|c| {
         c.execute(
-            "INSERT INTO pending_notes (agent_id, source, text, created_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![agent_id, source, text, crate::db::now_ms()],
+            "INSERT INTO pending_notes (agent_id, chat_id, source, text, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![agent_id, chat, source, text, crate::db::now_ms()],
         )
     })?;
     Ok(row)
 }
 
-/// What goes before the familiar's next main-chat turn: the person's ledger edits, then the held
-/// messages it hasn't seen. Also returns the last held note's id, to clear once the turn starts.
-fn turn_notes(db: &Db, agent: &Agent) -> (Vec<String>, Option<i64>) {
+/// What goes before the familiar's next turn in its current chat: the person's ledger edits, then the
+/// held messages for that chat it hasn't seen. Also returns their ids, to clear once the turn starts.
+fn turn_notes(db: &Db, agent: &Agent) -> (Vec<String>, Vec<i64>) {
     // A resumed chat keeps its old system prompt, so pass on the person's ledger edits here.
     let mut notes: Vec<String> = crate::ledger::turn_note(db, agent).into_iter().collect();
+    let chat = crate::chats::current(db, &agent.id).ok().flatten();
     let held: Vec<(i64, String, String)> = db
         .with(|c| {
-            let mut stmt = c.prepare_cached("SELECT id, source, text FROM pending_notes WHERE agent_id = ?1 ORDER BY id")?;
-            let rows = stmt.query_map(rusqlite::params![agent.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let mut stmt = c.prepare_cached(
+                "SELECT id, source, text FROM pending_notes WHERE agent_id = ?1 AND (chat_id IS ?2 OR chat_id IS NULL) ORDER BY id",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![agent.id, chat], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             rows.collect()
         })
         .unwrap_or_default();
-    let last = held.last().map(|(id, ..)| *id);
+    let ids = held.iter().map(|(id, ..)| *id).collect();
     notes.extend(held.into_iter().map(|(_, source, text)| {
         format!("(Grimoire: this message, {source}, came in while you couldn't take a turn.)\n{text}")
     }));
-    (notes, last)
+    (notes, ids)
 }
 
-fn clear_notes(db: &Db, agent_id: &str, through: i64) {
-    let _ = db.with(|c| c.execute("DELETE FROM pending_notes WHERE agent_id = ?1 AND id <= ?2", rusqlite::params![agent_id, through]));
+fn clear_notes(db: &Db, ids: &[i64]) {
+    let _ = db.with(|c| {
+        let mut stmt = c.prepare_cached("DELETE FROM pending_notes WHERE id = ?1")?;
+        ids.iter().try_for_each(|id| stmt.execute(rusqlite::params![id]).map(|_| ()))
+    });
 }
 
 pub const RITUAL_SOURCE: &str = "Ritual: ";
@@ -479,9 +487,7 @@ impl Runtime {
         };
         match started {
             Ok(()) => {
-                if let Some(held) = held {
-                    clear_notes(&self.db, &agent.id, held);
-                }
+                clear_notes(&self.db, &held);
                 stream_turn(&mut writer, rx).await
             }
             Err(e) => writer.fail(&e),
@@ -818,7 +824,7 @@ mod tests {
     #[test]
     fn held_messages_reach_the_next_turn_once() {
         let (db, agent) = setup();
-        assert_eq!(turn_notes(&db, &agent), (vec![], None));
+        assert_eq!(turn_notes(&db, &agent), (vec![], vec![]));
         let row = hold(&db, "a", None, "Scribe replied to your message:\n\nDone.", "Reply from Scribe").unwrap();
         assert_eq!((row.role.as_str(), row.source.as_deref()), ("user", Some("Reply from Scribe")), "the person sees it");
         hold(&db, "a", None, "Helper tests finished.", "Helper tests").unwrap();
@@ -828,8 +834,25 @@ mod tests {
         assert!(notes[1].ends_with("Helper tests finished."), "{}", notes[1]);
         // A turn that fails to start leaves them for the next one; one that starts clears them.
         assert_eq!(turn_notes(&db, &agent).0, notes);
-        clear_notes(&db, "a", held.unwrap());
-        assert_eq!(turn_notes(&db, &agent), (vec![], None));
+        clear_notes(&db, &held);
+        assert_eq!(turn_notes(&db, &agent), (vec![], vec![]));
+    }
+
+    #[test]
+    fn held_messages_wait_for_their_own_chat() {
+        let (db, agent) = setup();
+        let first = crate::chats::start(&db, "a").unwrap().id;
+        hold(&db, "a", Some(&first), "Reply for the first chat.", "Reply from Scribe").unwrap();
+        let second = crate::chats::start(&db, "a").unwrap().id;
+        assert!(turn_notes(&db, &agent).0.is_empty(), "a turn in another chat doesn't take it");
+        crate::chats::open(&db, "a", &first).unwrap();
+        assert_eq!(turn_notes(&db, &agent).0.len(), 1, "it waits for the first chat");
+        // A deleted home chat sends it to the current chat instead of losing it.
+        crate::chats::open(&db, "a", &second).unwrap();
+        crate::chats::delete(&db, &first).unwrap();
+        hold(&db, "a", Some(&first), "Reply after the chat was deleted.", "Reply from Scribe").unwrap();
+        let notes = turn_notes(&db, &agent).0;
+        assert!(notes.len() == 1 && notes[0].ends_with("Reply after the chat was deleted."), "{notes:?}");
     }
 
     #[test]

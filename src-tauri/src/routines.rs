@@ -135,9 +135,11 @@ pub fn save(db: &Db, input: RoutineInput) -> Result<Routine, String> {
         last_run_at: existing.as_ref().and_then(|r| r.last_run_at),
         created_at: existing.map(|r| r.created_at).unwrap_or(now),
     };
-    db.save_routine(&routine)?;
     // Saving never runs an event ritual: its watcher looks again and only runs it for what's new after that.
-    crate::triggers::reset(db, &routine.id)?;
+    crate::triggers::while_editing(|| {
+        db.save_routine(&routine)?;
+        crate::triggers::reset(db, &routine.id)
+    })?;
     Ok(routine)
 }
 

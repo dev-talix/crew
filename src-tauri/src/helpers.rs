@@ -318,7 +318,8 @@ where
     };
     match startup.cancel() {
         Phase::Waiting | Phase::Cancelled => return ending,
-        // An interrupt sent mid-start finds no turn to stop, so let the start finish first.
+        // An interrupt sent mid-start finds no turn to stop, so let the start finish first, however slow,
+        // up to the helper's own limit. A start that outlasts that is left to the CLI's own timeouts.
         Phase::Starting => {
             let started = async {
                 tokio::select! {
@@ -326,7 +327,7 @@ where
                     _ = startup.started.notified() => true,
                 }
             };
-            if !tokio::time::timeout(GRACE, started).await.unwrap_or(false) {
+            if !tokio::time::timeout(limit, started).await.unwrap_or(false) {
                 return ending;
             }
         }
@@ -411,6 +412,12 @@ fn launch(app: AppHandle, db: Arc<Db>, runtime: Arc<Runtime>, agent: Agent, help
     running().insert(helper.id.clone(), stop.clone());
     let home = crate::chats::current(&db, &agent.id).ok().flatten();
     tauri::async_runtime::spawn(async move {
+        // A stop that came between saving the helper and registering it above settled the row with no one
+        // to signal, so check before starting anything.
+        if !get(&db, &helper.id).is_ok_and(|h| h.is_some_and(|h| h.status == "running")) {
+            running().remove(&helper.id);
+            return;
+        }
         let key = side::lane_key(&agent.id, &helper.chat_id);
         let prompt = framed(&agent.name, &helper.task);
         let turn = runtime.helper_turn(&helper.chat_id, &helper.task, &prompt, &startup);
@@ -701,6 +708,26 @@ mod tests {
         assert_eq!(ending, Ending::Stopped);
         let (at, phase) = halted_at.into_inner().unwrap().expect("the started turn is interrupted");
         assert_eq!((at, phase), (Duration::from_secs(10), Phase::Started), "not before it started");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_during_a_slow_start_still_interrupts() {
+        let stop = Notify::new();
+        let startup = Startup::default();
+        let began = tokio::time::Instant::now();
+        let halted_at = Mutex::new(None);
+        // The CLI takes longer to start than GRACE, the wind-down allowance.
+        let turn = helper_turn(&startup, GRACE + Duration::from_secs(15), Duration::from_secs(3600));
+        let supervised = supervise(turn, &stop, TIMEOUT, &startup, || async {
+            *halted_at.lock().unwrap() = Some(began.elapsed());
+        });
+        let stopper = async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            stop.notify_one();
+        };
+        let (ending, ()) = tokio::join!(supervised, stopper);
+        assert_eq!(ending, Ending::Stopped);
+        assert_eq!(halted_at.into_inner().unwrap(), Some(GRACE + Duration::from_secs(15)), "interrupted once started");
     }
 
     #[test]

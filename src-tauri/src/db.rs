@@ -507,6 +507,7 @@ impl Db {
                  CREATE TABLE pending_notes (
                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                   chat_id TEXT REFERENCES chats(id) ON DELETE CASCADE,
                    source TEXT NOT NULL,
                    text TEXT NOT NULL,
                    created_at INTEGER NOT NULL

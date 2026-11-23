@@ -104,6 +104,13 @@ fn cooling_down(state: Option<&TriggerState>, now: i64) -> bool {
 /// Held while a check's result is saved, so two results can't both claim the same run.
 static CLAIM: Mutex<()> = Mutex::new(());
 
+/// Runs a ritual edit, like a save, pause, or delete, while no check can claim a run, so a check that
+/// started before the edit can't run the old ritual after it.
+pub fn while_editing<T>(edit: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let _held = CLAIM.lock().map_err(|_| "trigger lock poisoned".to_string())?;
+    edit()
+}
+
 /// Saves a check's result and returns the ritual to run, if `fire` and nothing moved underneath. The check
 /// started from `started`. When the ritual was deleted, paused, or given another trigger since, or its state
 /// changed (a save resets it, another webhook call records its run), the result is dropped.
@@ -729,6 +736,25 @@ mod tests {
         let db = db_with(&routine, &started);
         db.delete_routine("r").unwrap();
         assert!(claim(&db, &routine, Some(&started), &next, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_check_that_finishes_during_a_pause_does_not_run() {
+        let routine = ritual(Schedule::GithubPr { repo: "o/r".into() });
+        let started = TriggerState { routine_id: "r".into(), source: "githubPr:o/r".into(), cursor: Some("5".into()), ..Default::default() };
+        let next = TriggerState { cursor: Some("6".into()), fired_at: Some(1), ..started.clone() };
+        let db = Arc::new(db_with(&routine, &started));
+        let claimed = while_editing(|| {
+            // The check finishes while the pause is being written, and has to wait for it.
+            let (shared, seen) = (db.clone(), routine.clone());
+            let check = std::thread::spawn(move || claim(&shared, &seen, Some(&started), &next, true).unwrap().is_some());
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            db.save_routine(&Routine { enabled: false, ..routine.clone() })?;
+            reset(&db, "r")?;
+            Ok(check)
+        })
+        .unwrap();
+        assert!(!claimed.join().unwrap(), "the paused ritual must not run");
     }
 
     #[test]
