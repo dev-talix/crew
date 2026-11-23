@@ -213,7 +213,7 @@ pub fn list(db: &Db, agent_id: &str) -> Result<Vec<Chat>, String> {
     db.with(|c| {
         ensure_current(c, agent_id)?;
         let mut stmt = c.prepare(&format!(
-            "SELECT {CHAT_COLUMNS} FROM chats WHERE agent_id = ?1 ORDER BY updated_at DESC, created_at DESC"
+            "SELECT {CHAT_COLUMNS} FROM chats WHERE agent_id = ?1 AND side_of IS NULL ORDER BY updated_at DESC, created_at DESC"
         ))?;
         let rows = stmt.query_map(params![agent_id], row_to_chat)?;
         rows.collect()
@@ -227,6 +227,11 @@ fn make_current(c: &Connection, agent_id: &str, chat_id: &str) -> rusqlite::Resu
         params![agent_id, chat_id],
     )
     .map(|_| ())
+}
+
+/// The familiar's current chat, if it has one yet.
+pub fn current(db: &Db, agent_id: &str) -> Result<Option<String>, String> {
+    db.with(|c| current_id(c, agent_id))
 }
 
 fn current_id(c: &Connection, agent_id: &str) -> rusqlite::Result<Option<String>> {
@@ -262,7 +267,8 @@ pub fn start(db: &Db, agent_id: &str) -> Result<Chat, String> {
 
 /// Opens one of the familiar's chats; the next message resumes its session.
 pub fn open(db: &Db, agent_id: &str, chat_id: &str) -> Result<Chat, String> {
-    let chat = db.with(|c| get(c, chat_id))?.filter(|chat| chat.agent_id == agent_id).ok_or("That chat no longer exists.")?;
+    let main = crate::side::get(db, chat_id)?.is_none();
+    let chat = db.with(|c| get(c, chat_id))?.filter(|chat| chat.agent_id == agent_id && main).ok_or("That chat no longer exists.")?;
     db.with(|c| make_current(c, agent_id, chat_id))?;
     Ok(Chat { current: true, ..chat })
 }
@@ -290,7 +296,7 @@ pub fn delete(db: &Db, chat_id: &str) -> Result<(String, bool), String> {
         }
         let newest: Option<String> = c
             .query_row(
-                "SELECT id FROM chats WHERE agent_id = ?1 ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+                "SELECT id FROM chats WHERE agent_id = ?1 AND side_of IS NULL ORDER BY updated_at DESC, created_at DESC LIMIT 1",
                 params![chat.agent_id],
                 |r| r.get(0),
             )
@@ -331,7 +337,7 @@ pub fn search(db: &Db, input: &str, limit: i64) -> Result<Vec<SearchHit>, String
              FROM messages_fts
              JOIN messages m ON m.id = messages_fts.rowid
              JOIN chats ON chats.id = m.chat_id
-             WHERE messages_fts MATCH ?1
+             WHERE messages_fts MATCH ?1 AND chats.side_of IS NULL
              ORDER BY bm25(messages_fts), m.id DESC
              LIMIT ?2",
         )?;

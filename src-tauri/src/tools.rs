@@ -16,7 +16,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 pub const SERVER_NAME: &str = "grimoire";
-const TOOL_NAMES: [&str; 9] = [
+const TOOL_NAMES: [&str; 10] = [
     "list_familiars",
     "list_spells",
     "create_spell",
@@ -26,6 +26,7 @@ const TOOL_NAMES: [&str; 9] = [
     "vault_search",
     "vault_use",
     "ask_familiar",
+    "message_familiar",
 ];
 /// How long the CLIs let one Grimoire tool call run. ask_familiar waits up to 10 minutes for a reply,
 /// plus up to 2 for the person's OK, so this leaves room for both. Their defaults are far shorter.
@@ -131,12 +132,26 @@ pub fn definitions() -> Value {
         },
         {
             "name": "ask_familiar",
-            "description": "Send a message to another familiar and wait for its reply, which comes back as this tool's result. Use it when another familiar knows something or can do part of the work better. The message shows in that familiar's chat, labeled as asked by you, and it does not see your conversation, so include what it needs. If it is busy, your message waits in its queue until it finishes, and the wait counts toward a 10-minute limit. You can't ask yourself or a familiar that is waiting on you, chains stop at 3 familiars in a row, and the person may limit who you can ask or approve each message.",
+            "description": "Ask another familiar something and wait for its reply, which comes back as this tool's result. Use it when another familiar knows something or can do part of the work better. The two of you talk in a side conversation, out of both your main chats; the person can read it later. The other familiar answers from a copy of its own main conversation, so it knows what it knows, but it doesn't see yours, so include what it needs. It replies within 10 minutes or the wait ends. The result ends with the conversation's id: pass it as thread to follow up. You can't ask yourself or a familiar that is waiting on you, chains stop at 3 familiars in a row, and the person may limit who you can ask or approve each question.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "familiar": { "type": "string", "description": "Familiar id or exact name, from list_familiars." },
-                    "message": { "type": "string", "description": "What to ask or ask it to do." }
+                    "message": { "type": "string", "description": "What to ask or ask it to do." },
+                    "thread": { "type": "string", "description": "Optional. The id of a conversation you started with this familiar, to follow up in it. Leave out to start a new one." }
+                },
+                "required": ["familiar", "message"]
+            }
+        },
+        {
+            "name": "message_familiar",
+            "description": "Send another familiar a message without waiting. Use it to hand off work that takes a while, or to tell it something, while you carry on. It works on the message in a side conversation, out of both your main chats, answering from a copy of its own main conversation; include what it needs, since it doesn't see yours. When it's done, its reply comes to you as a new message, which starts your next turn. The result has the conversation's id: pass it as thread to add to the same conversation. You can send at most 5 messages to other familiars in 10 minutes, and the person may limit who you can message or approve each one.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "familiar": { "type": "string", "description": "Familiar id or exact name, from list_familiars." },
+                    "message": { "type": "string", "description": "What to tell it or ask it to do." },
+                    "thread": { "type": "string", "description": "Optional. The id of a conversation you started with this familiar, to add to it. Leave out to start a new one." }
                 },
                 "required": ["familiar", "message"]
             }
@@ -163,6 +178,7 @@ pub fn claude_tool_names() -> String {
 }
 
 /// The command and arguments a CLI runs to give `agent_id` the Grimoire tools, once the socket is up.
+/// In a side conversation `agent_id` is its lane key, so the tools know where the familiar is working.
 pub fn server_command(agent_id: &str) -> Option<(String, Vec<String>)> {
     let (exe, socket) = LAUNCH.get()?;
     Some((
@@ -453,7 +469,6 @@ pub fn serve(ctx: Arc<Context>, socket: &Path) -> std::io::Result<()> {
         std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
     }
     let _ = LAUNCH.set((std::env::current_exe()?, socket.to_path_buf()));
-    crate::delegation::install(ctx.db.clone());
     tauri::async_runtime::spawn(async move {
         let listener = match UnixListener::from_std(listener) {
             Ok(listener) => listener,
@@ -480,17 +495,22 @@ async fn handle_connection(stream: UnixStream, ctx: Arc<Context>) {
     while let Ok(Some(line)) = lines.next_line().await {
         let reply = match serde_json::from_str::<Request>(&line) {
             Ok(request) => {
+                // A familiar answering in a side conversation calls as "familiar~chat".
+                let (caller, lane) = crate::side::split(&request.agent);
+                let caller = caller.to_string();
                 let result = if request.tool == "ask_familiar" {
-                    crate::delegation::run(&ctx, &request.agent, request.arguments).await.map(|text| Outcome { text, changed: None })
+                    crate::delegation::run(&ctx, &caller, lane, request.arguments).await.map(|text| Outcome { text, changed: None })
+                } else if request.tool == "message_familiar" {
+                    crate::delegation::run_message(&ctx, &caller, lane, request.arguments).await.map(|text| Outcome { text, changed: None })
                 } else if request.tool == "vault_use" {
                     let ask = |question| ctx.approvals.ask(&ctx.app, question);
-                    let used = vault_use(&ctx.db, ctx.secrets.as_ref(), &request.agent, request.arguments, ask).await;
+                    let used = vault_use(&ctx.db, ctx.secrets.as_ref(), &caller, request.arguments, ask).await;
                     // Every attempt lands in the item's log, allowed or not.
                     let _ = ctx.app.emit("vault_changed", ());
                     used.map(|text| Outcome { text, changed: None })
                 } else {
                     let ctx = ctx.clone();
-                    tokio::task::spawn_blocking(move || call(&ctx.db, &ctx.themes_dir, &request.agent, &request.tool, request.arguments))
+                    tokio::task::spawn_blocking(move || call(&ctx.db, &ctx.themes_dir, &caller, &request.tool, request.arguments))
                         .await
                         .unwrap_or_else(|e| Err(e.to_string()))
                 };

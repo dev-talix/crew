@@ -1,6 +1,7 @@
 use crate::attachments::{Attachment, Staged};
 use crate::db::{Agent, Db, Message, Provider};
-use crate::providers::{claude::Claude, codex::Codex, ProviderEvent};
+use crate::providers::{claude::Claude, codex::Codex, Lane, LaneSession, ProviderEvent};
+use crate::side::SideSink;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -68,6 +69,8 @@ pub struct Runtime {
     codex: Arc<Codex>,
     claude: Claude,
     agents: Mutex<HashMap<String, AgentState>>,
+    /// One turn at a time in each side conversation, by lane key.
+    sides: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 pub trait Sink: Send + Sync {
@@ -105,6 +108,7 @@ impl Runtime {
             codex: Arc::new(Codex::default()),
             claude: Claude::default(),
             agents: Mutex::new(HashMap::new()),
+            sides: Mutex::new(HashMap::new()),
         })
     }
 
@@ -233,6 +237,12 @@ impl Runtime {
     pub async fn remove_agent(self: &Arc<Self>, agent_id: &str) -> Result<(), String> {
         self.stop(agent_id).await?;
         self.reset_session(agent_id);
+        // Its side conversations go with it, so stop any turn still running in one.
+        for key in crate::side::lanes_of(&self.db, agent_id)? {
+            let _ = self.codex.stop(&key).await;
+            self.codex.forget(&key);
+            self.claude.forget(&key);
+        }
         if let Ok(mut agents) = self.agents.lock() {
             agents.remove(agent_id);
         }
@@ -281,6 +291,47 @@ impl Runtime {
         }
     }
 
+    /// Runs one exchange in a side conversation: `asker`'s message goes to the familiar whose hidden
+    /// chat it is, on that chat's own session, alongside whatever it's doing in its main chat.
+    pub async fn side_turn(self: &Arc<Self>, chat_id: &str, asker: &str, message: &str) -> TurnOutcome {
+        let Ok(Some(chat)) = crate::side::get(&self.db, chat_id) else {
+            return TurnOutcome::Failed("That conversation was deleted.".into());
+        };
+        let key = crate::side::lane_key(&chat.target_id, &chat.id);
+        let lock = match self.sides.lock() {
+            Ok(mut sides) => sides.entry(key.clone()).or_default().clone(),
+            Err(_) => return TurnOutcome::Failed("runtime state poisoned".into()),
+        };
+        let _turn = lock.lock().await;
+        let sink = SideSink { app: self.app.clone(), chat_id: chat.id.clone() };
+        let source = format!("From {asker}");
+        match self.db.insert_message_in(&chat.id, &chat.target_id, "user", message, "done", Some(&source)) {
+            Ok(row) => sink.message(&row),
+            Err(e) => return TurnOutcome::Failed(e),
+        }
+        let agent = match self.db.get_agent(&chat.target_id) {
+            Ok(Some(agent)) => agent,
+            _ => return TurnOutcome::Failed("That familiar no longer exists.".into()),
+        };
+        // Read again under the lock: the previous exchange may have saved the session.
+        let session = crate::side::get(&self.db, &chat.id).ok().flatten().and_then(|c| c.session_id);
+        let mut writer = TurnWriter::for_side(&self.db, &sink, &agent, &chat.id, session.clone());
+        if let Err(reason) = crate::budgets::check_turn(&self.db, &agent.id) {
+            return writer.fail(&reason);
+        }
+        let lane = Lane { key, session: lane_session(session, agent.session_id.clone()) };
+        let prompt = crate::side::framed(asker, message);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let started = match agent.provider {
+            Provider::Codex => self.codex.start_turn_in(&agent, Some(&lane), &prompt, &[], tx).await,
+            Provider::Claude => self.claude.start_turn_in(&agent, Some(&lane), &prompt, &[], tx).await,
+        };
+        match started {
+            Ok(()) => stream_turn(&mut writer, rx).await,
+            Err(e) => writer.fail(&e),
+        }
+    }
+
     async fn run_turn(self: &Arc<Self>, agent_id: &str, text: &str, source: Option<&str>, attachments: &[Attachment]) -> TurnOutcome {
         let agent = match self.db.get_agent(agent_id) {
             Ok(Some(agent)) => agent,
@@ -301,6 +352,15 @@ impl Runtime {
             Ok(()) => stream_turn(&mut writer, rx).await,
             Err(e) => writer.fail(&e),
         }
+    }
+}
+
+/// A side conversation carries on its own session, or starts from a copy of the familiar's main one.
+fn lane_session(side: Option<String>, main: Option<String>) -> LaneSession {
+    match (side, main) {
+        (Some(side), _) => LaneSession::Resume(side),
+        (None, Some(main)) => LaneSession::Fork(main),
+        (None, None) => LaneSession::Fresh,
     }
 }
 
@@ -360,6 +420,8 @@ pub struct TurnWriter<'a> {
     /// "you", "ritual", or "spell".
     pub origin: &'static str,
     usage: Option<(u64, u64)>,
+    /// The side conversation this turn writes to, instead of the familiar's current chat.
+    chat_id: Option<String>,
 }
 
 /// The settings key for Claude's latest plan limit snapshot.
@@ -378,6 +440,19 @@ impl<'a> TurnWriter<'a> {
             provider: agent.provider.clone(),
             origin: "you",
             usage: None,
+            chat_id: None,
+        }
+    }
+
+    /// A writer for a side conversation's turn: its rows and its session stay on that chat.
+    pub fn for_side(db: &'a Db, sink: &'a dyn Sink, agent: &Agent, chat_id: &str, session: Option<String>) -> Self {
+        TurnWriter { session, chat_id: Some(chat_id.to_string()), ..TurnWriter::new(db, sink, agent) }
+    }
+
+    fn insert(&self, role: &str, text: &str, status: &str) -> Result<Message, String> {
+        match &self.chat_id {
+            Some(chat) => self.db.insert_message_in(chat, &self.agent_id, role, text, status, None),
+            None => self.db.insert_message(&self.agent_id, role, text, status),
         }
     }
 
@@ -395,7 +470,7 @@ impl<'a> TurnWriter<'a> {
                 if chunk.is_empty() {
                     return;
                 }
-                let Ok(message) = self.db.insert_message(&self.agent_id, "assistant", chunk, "streaming") else {
+                let Ok(message) = self.insert("assistant", chunk, "streaming") else {
                     return;
                 };
                 self.sink.message(&message);
@@ -431,7 +506,11 @@ impl<'a> TurnWriter<'a> {
 
     fn tool(&mut self, label: &str) {
         self.end_segment("done");
-        if let Ok(message) = self.db.insert_message(&self.agent_id, "tool", label, "done") {
+        // An empty label is a tool that adds its own row, like asking another familiar.
+        if label.is_empty() {
+            return;
+        }
+        if let Ok(message) = self.insert("tool", label, "done") {
             self.sink.message(&message);
         }
     }
@@ -446,7 +525,10 @@ impl<'a> TurnWriter<'a> {
 
     fn session(&mut self, id: &str) {
         if self.session.as_deref() != Some(id) {
-            let _ = self.db.set_session(&self.agent_id, Some(id));
+            let _ = match &self.chat_id {
+                Some(chat) => self.db.set_chat_session(chat, id),
+                None => self.db.set_session(&self.agent_id, Some(id)),
+            };
             self.session = Some(id.to_string());
         }
     }
@@ -464,7 +546,7 @@ impl<'a> TurnWriter<'a> {
     fn fail(&mut self, reason: &str) -> TurnOutcome {
         self.end_segment("done");
         self.record_usage();
-        if let Ok(message) = self.db.insert_message(&self.agent_id, "error", reason.trim(), "done") {
+        if let Ok(message) = self.insert("error", reason.trim(), "done") {
             self.sink.message(&message);
         }
         TurnOutcome::Failed(reason.trim().to_string())
@@ -565,6 +647,44 @@ mod tests {
         );
         assert_eq!(db.get_agent("a").unwrap().unwrap().session_id.as_deref(), Some("s1"));
         assert_eq!(db.get_agent("a").unwrap().unwrap().active_model.as_deref(), Some("gpt-6.2-sol"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn side_turns_write_to_their_own_chat() {
+        let (db, agent) = setup();
+        db.insert_message("a", "user", "Main chat", "done").unwrap();
+        db.set_session("a", Some("main-session")).unwrap();
+        let other = Agent { id: "b".into(), name: "Bo".into(), ..agent.clone() };
+        db.insert_agent(&other).unwrap();
+        let side = crate::side::create(&db, "b", "a", "hello").unwrap();
+        let sink = Recorder::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        for event in [
+            ProviderEvent::Session("side-session".into()),
+            ProviderEvent::Delta("Hi ".into()),
+            ProviderEvent::Tool(String::new()),
+            ProviderEvent::Tool("$ ls".into()),
+            ProviderEvent::Delta("Bo.".into()),
+            ProviderEvent::Done,
+        ] {
+            tx.send(event).unwrap();
+        }
+        let mut writer = TurnWriter::for_side(&db, &sink, &agent, &side.id, None);
+        assert_eq!(stream_turn(&mut writer, rx).await, TurnOutcome::Done("Bo.".into()));
+
+        let rows: Vec<(String, String)> = crate::side::messages(&db, &side.id).unwrap().into_iter().map(|m| (m.role, m.text)).collect();
+        assert_eq!(rows, [("assistant".into(), "Hi".into()), ("tool".into(), "$ ls".into()), ("assistant".into(), "Bo.".into())]);
+        let main: Vec<String> = db.list_messages("a", None, 10).unwrap().into_iter().map(|m| m.text).collect();
+        assert_eq!(main, ["Main chat"], "the main chat is untouched");
+        assert_eq!(db.get_agent("a").unwrap().unwrap().session_id.as_deref(), Some("main-session"));
+        assert_eq!(crate::side::get(&db, &side.id).unwrap().unwrap().session_id.as_deref(), Some("side-session"));
+    }
+
+    #[test]
+    fn side_conversations_fork_the_main_session_once() {
+        assert_eq!(lane_session(None, Some("m".into())), LaneSession::Fork("m".into()));
+        assert_eq!(lane_session(Some("s".into()), Some("m".into())), LaneSession::Resume("s".into()));
+        assert_eq!(lane_session(None, None), LaneSession::Fresh);
     }
 
     #[tokio::test(start_paused = true)]

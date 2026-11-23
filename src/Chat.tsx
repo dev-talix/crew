@@ -6,6 +6,7 @@ import ChatsMenu, { chatTitle } from "./ChatsMenu";
 import { AttachButton, createComposerFiles, DropOverlay, MessageAttachments, PendingFiles } from "./ChatAttachments";
 import type { ChatStore } from "./chatStore";
 import ModelPicker from "./ModelPicker";
+import SideConversation from "./SideConversation";
 import { effortName, runningModelName } from "./models";
 import {
   CheckIcon,
@@ -573,6 +574,9 @@ export default function Chat(props: {
                   {(r) => <ToolGroup messages={(r() as Extract<Row, { kind: "tools" }>).messages} workspace={props.agent.workspace} />}
                 </Match>
                 <Match when={row.kind === "error" && row}>{(r) => <div class="row error-box">{(r() as Extract<Row, { kind: "error" }>).message.text}</div>}</Match>
+                <Match when={row.kind === "side" && row}>
+                  {(r) => <SideConversation message={(r() as Extract<Row, { kind: "side" }>).message} asker={props.agent.name} />}
+                </Match>
               </Switch>
             )}
           </For>

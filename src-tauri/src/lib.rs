@@ -14,6 +14,7 @@ mod permissions;
 mod providers;
 mod routines;
 mod runtime;
+mod side;
 mod status;
 mod themes;
 mod tools;
@@ -653,6 +654,7 @@ pub fn run() {
             chats::rename_chat,
             chats::delete_chat,
             chats::search_messages,
+            side::side_thread,
             get_settings,
             list_models,
             dock_edge,

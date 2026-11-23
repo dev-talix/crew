@@ -58,6 +58,7 @@ export function dominantKind(entries: ToolEntry[]): ToolKind {
 export type Row =
   | { kind: "user"; key: string; message: Message }
   | { kind: "error"; key: string; message: Message }
+  | { kind: "side"; key: string; message: Message }
   | { kind: "assistant"; key: string; message: Message }
   | { kind: "tools"; key: string; messages: Message[] };
 

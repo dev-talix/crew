@@ -46,7 +46,8 @@ export interface ModelOption {
 export interface Message {
   id: number;
   agentId: string;
-  role: "user" | "assistant" | "tool" | "error";
+  /** "side" links to a side conversation with another familiar; its source holds that chat's id. */
+  role: "user" | "assistant" | "tool" | "error" | "side";
   text: string;
   status: "done" | "streaming" | "queued" | "cancelled" | "stopped" | "interrupted";
   source: string | null;
@@ -54,6 +55,33 @@ export interface Message {
   updatedAt: number | null;
   /** Files and images sent with a user message. */
   attachments?: Attachment[];
+}
+
+/** Two familiars talking behind the scenes: a hidden chat of the familiar that was asked. */
+export interface SideChat {
+  id: string;
+  askerId: string;
+  targetId: string;
+  title: string;
+  sessionId: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SideThread {
+  chat: SideChat;
+  messages: Message[];
+}
+
+export interface SideMessageEvent {
+  chatId: string;
+  message: Message;
+}
+
+export interface SideDeltaEvent {
+  chatId: string;
+  messageId: number;
+  chunk: string;
 }
 
 /** One of a familiar's conversations, with its own CLI session. */
@@ -369,6 +397,7 @@ export const api = {
   renameChat: (chatId: string, title: string) => invoke<ChatInfo>("rename_chat", { chatId, title }),
   deleteChat: (chatId: string) => invoke<void>("delete_chat", { chatId }),
   searchMessages: (query: string) => invoke<SearchHit[]>("search_messages", { query, limit: 30 }),
+  sideThread: (chatId: string) => invoke<SideThread>("side_thread", { chatId }),
   lastMessages: () => invoke<Message[]>("last_messages"),
   listModels: (provider: Provider) => invoke<ModelOption[]>("list_models", { provider }),
   dockEdge: () => invoke<"left" | "right" | null>("dock_edge"),
@@ -473,7 +502,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "chats_changed" | "budgets_changed",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

@@ -156,7 +156,8 @@ fn familiar_doc(db: &Db, agent: &Agent, history: bool) -> Result<FamiliarDoc, St
     let history = if history {
         db.list_messages(&agent.id, None, i64::MAX)?
             .into_iter()
-            .filter(|m| m.status != "streaming")
+            // Links to side conversations stay behind: those chats aren't in the backup.
+            .filter(|m| m.status != "streaming" && m.role != crate::side::LINK_ROLE)
             .map(|m| HistoryDoc { role: m.role, text: m.text, source: m.source, created_at: m.created_at })
             .collect()
     } else {

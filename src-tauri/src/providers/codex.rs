@@ -1,4 +1,4 @@
-use super::{command, spawn_error, EventTx, IdleTimer, ModelOption, ProviderEvent, StderrTail};
+use super::{command, spawn_error, EventTx, IdleTimer, Lane, LaneSession, ModelOption, ProviderEvent, StderrTail};
 use crate::db::{Access, Agent};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -87,7 +87,8 @@ fn approval_policy() -> &'static str {
     if crate::permissions::active() { "untrusted" } else { "never" }
 }
 
-fn thread_params(agent: &Agent) -> Value {
+/// `tools_key` is the familiar's id, or its side conversation's lane key, for Grimoire's tool server.
+fn thread_params(agent: &Agent, tools_key: &str) -> Value {
     let mut params = json!({
         "cwd": agent.workspace,
         "approvalPolicy": approval_policy(),
@@ -101,7 +102,7 @@ fn thread_params(agent: &Agent) -> Value {
     if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
         params["model"] = json!(model);
     }
-    if let Some((command, args)) = crate::tools::server_command(&agent.id) {
+    if let Some((command, args)) = crate::tools::server_command(tools_key) {
         // Codex refuses MCP calls that need approval under approvalPolicy "never", so pre-approve Grimoire's own tools.
         // Codex gives up on a tool call after 60 seconds by default; ask_familiar can wait minutes for a reply.
         let server = json!({
@@ -129,9 +130,20 @@ fn turn_input(text: &str, images: &[PathBuf]) -> Value {
 
 impl Codex {
     pub async fn start_turn(self: &Arc<Self>, agent: &Agent, text: &str, images: &[PathBuf], tx: EventTx) -> Result<(), String> {
+        self.start_turn_in(agent, None, text, images, tx).await
+    }
+
+    /// Starts a turn in the familiar's main chat, or in a side conversation when `lane` names one.
+    pub async fn start_turn_in(self: &Arc<Self>, agent: &Agent, lane: Option<&Lane>, text: &str, images: &[PathBuf], tx: EventTx) -> Result<(), String> {
         let process = self.ensure_process(&agent.workspace).await?;
         self.idle.cancel();
-        let thread_id = match self.open_thread(&process, agent).await {
+        let key = lane.map_or(&agent.id, |l| &l.key);
+        let known = match lane.map(|l| &l.session) {
+            None => agent.session_id.as_deref(),
+            Some(LaneSession::Resume(id)) => Some(id.as_str()),
+            Some(_) => None,
+        };
+        let thread_id = match self.open_thread(&process, agent, key, lane).await {
             Ok((id, model)) => {
                 if let Some(model) = model {
                     let _ = tx.send(ProviderEvent::Model(model));
@@ -143,11 +155,11 @@ impl Codex {
                 return Err(e);
             }
         };
-        if agent.session_id.as_deref() != Some(thread_id.as_str()) {
+        if known != Some(thread_id.as_str()) {
             let _ = tx.send(ProviderEvent::Session(thread_id.clone()));
         }
         if let Ok(mut threads) = self.threads.lock() {
-            threads.insert(agent.id.clone(), thread_id.clone());
+            threads.insert(key.clone(), thread_id.clone());
         }
         if let Ok(mut routes) = process.routes.lock() {
             routes.insert(thread_id.clone(), Route { tx: Some(tx), ..Route::default() });
@@ -203,12 +215,18 @@ impl Codex {
         result
     }
 
+    /// Makes the familiar's next turns resume with its current settings: its main thread and every
+    /// side conversation's, so a lowered access level reaches them all.
     pub async fn reload_thread(&self, agent_id: &str) {
-        let thread = self.threads.lock().ok().and_then(|t| t.get(agent_id).cloned());
+        let threads: Vec<String> = self
+            .threads
+            .lock()
+            .map(|t| t.iter().filter(|(key, _)| crate::side::split(key).0 == agent_id).map(|(_, thread)| thread.clone()).collect())
+            .unwrap_or_default();
         let process = self.process.lock().await.clone();
-        if let (Some(thread), Some(process)) = (thread, process) {
+        if let Some(process) = process {
             if let Ok(mut loaded) = process.loaded.lock() {
-                loaded.remove(&thread);
+                loaded.retain(|thread| !threads.contains(thread));
             }
         }
     }
@@ -219,20 +237,38 @@ impl Codex {
         }
     }
 
-    async fn open_thread(&self, process: &Arc<CodexProcess>, agent: &Agent) -> Result<(String, Option<String>), String> {
+    async fn open_thread(&self, process: &Arc<CodexProcess>, agent: &Agent, key: &str, lane: Option<&Lane>) -> Result<(String, Option<String>), String> {
         let model_of = |result: &Value| result["model"].as_str().map(str::to_string);
-        if let Some(saved) = agent.session_id.as_deref() {
+        let (saved, fork) = match lane.map(|l| &l.session) {
+            None => (agent.session_id.as_deref(), None),
+            Some(LaneSession::Resume(id)) => (Some(id.as_str()), None),
+            Some(LaneSession::Fork(id)) => (None, Some(id.as_str())),
+            Some(LaneSession::Fresh) => (None, None),
+        };
+        if let Some(saved) = saved {
             if process.loaded.lock().map(|l| l.contains(saved)).unwrap_or(false) {
                 return Ok((saved.to_string(), None));
             }
-            let mut params = thread_params(agent);
+            let mut params = thread_params(agent, key);
             params["threadId"] = json!(saved);
             if let Ok(result) = process.request("thread/resume", params).await {
                 process.loaded.lock().ok().map(|mut l| l.insert(saved.to_string()));
                 return Ok((saved.to_string(), model_of(&result)));
             }
         }
-        let result = process.request("thread/start", thread_params(agent)).await?;
+        if let Some(main) = fork {
+            let mut params = thread_params(agent, key);
+            params["threadId"] = json!(main);
+            params["excludeTurns"] = json!(true);
+            // A main thread Codex can't copy, say one it lost, starts the side conversation fresh.
+            if let Ok(result) = process.request("thread/fork", params).await {
+                if let Some(id) = result["thread"]["id"].as_str() {
+                    process.loaded.lock().ok().map(|mut l| l.insert(id.to_string()));
+                    return Ok((id.to_string(), model_of(&result)));
+                }
+            }
+        }
+        let result = process.request("thread/start", thread_params(agent, key)).await?;
         let id = result["thread"]["id"].as_str().ok_or("codex returned no thread id")?.to_string();
         process.loaded.lock().ok().map(|mut l| l.insert(id.clone()));
         Ok((id, model_of(&result)))
@@ -332,7 +368,7 @@ impl Codex {
                         let (id, process) = (id.clone(), process.clone());
                         tauri::async_runtime::spawn(async move {
                             let allowed = match agent {
-                                Some(agent) => crate::permissions::check_command(&agent, &command, codex_request_key(&id)).await,
+                                Some(key) => crate::permissions::check_command(crate::side::split(&key).0, &command, codex_request_key(&id)).await,
                                 None => false,
                             };
                             let decision = if allowed { "accept" } else { "decline" };
@@ -443,8 +479,9 @@ fn tool_label(item: &Value) -> Option<String> {
                 .unwrap_or_default();
             Some(format!("Edit {}", paths.join(", ")))
         }
-        "mcpToolCall" if text("server") == crate::tools::SERVER_NAME && text("tool") == "ask_familiar" => {
-            Some(crate::delegation::tool_label(&item["arguments"]))
+        // Grimoire adds its own row that opens the side conversation.
+        "mcpToolCall" if text("server") == crate::tools::SERVER_NAME && matches!(text("tool").as_str(), "ask_familiar" | "message_familiar") => {
+            Some(String::new())
         }
         "mcpToolCall" => Some(format!("{}.{}", text("server"), text("tool"))),
         "dynamicToolCall" => Some(text("tool")),
@@ -555,7 +592,7 @@ mod tests {
                 ProviderEvent::Delta("Looking".into()),
                 ProviderEvent::Tool("$ ls".into()),
                 ProviderEvent::Tool("Edit a.rs, b.rs".into()),
-                ProviderEvent::Tool("Asked Scribe".into()),
+                ProviderEvent::Tool(String::new()),
                 ProviderEvent::Tool("grimoire.list_spells".into()),
                 ProviderEvent::Delta("\n\n".into()),
                 ProviderEvent::Delta("Done".into()),
@@ -613,7 +650,7 @@ mod tests {
             coven_id: None,
             created_at: 0,
         };
-        let params = thread_params(&agent);
+        let params = thread_params(&agent, &agent.id);
         assert_eq!(params["sandbox"], "workspace-write");
         assert_eq!(params["approvalPolicy"], "never");
         assert!(params.get("model").is_none());
@@ -623,7 +660,7 @@ mod tests {
         let dir = crate::memory::test_dir();
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("memory-codex.md"), "Deploys go out on Fridays.").unwrap();
-        let instructions = thread_params(&agent)["developerInstructions"].as_str().unwrap().to_string();
+        let instructions = thread_params(&agent, &agent.id)["developerInstructions"].as_str().unwrap().to_string();
         assert!(instructions.contains("Deploys go out on Fridays."));
     }
 }

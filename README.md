@@ -184,22 +184,34 @@ next run, and a run missed while Grimoire was closed fires once at the next laun
 
 ## Familiars asking familiars
 
-A familiar can ask another one for help with `ask_familiar`. Grimoire sends the message to the other
-familiar's chat, labeled "Asked by Researcher", waits for its reply, and hands the reply back. The
-asking familiar's chat shows a row like "Asked Scribe". If the other familiar is busy, the question
-waits in its queue like any message.
+Familiars can talk to each other behind the scenes, out of both main chats:
 
-Grimoire refuses a question when:
+- `ask_familiar` asks another familiar something and waits up to 10 minutes for the reply.
+- `message_familiar` sends a message and carries on. When the other familiar is done, its reply
+  arrives in the sender's chat as a new message labeled "Reply from Scribe", which starts the
+  sender's next turn.
+
+Each exchange runs in a side conversation: a hidden chat of the familiar being asked, with its own
+CLI session. That session starts as a copy of the familiar's current chat (Claude's
+`--fork-session`, Codex's `thread/fork`), so it answers from what it knows, and its main chat stays
+as it was. It runs alongside whatever the familiar is doing for you. A familiar can follow up in the
+same conversation by passing its id as `thread`.
+
+The asking familiar's chat shows a row like "Asked Scribe" or "Messaged Scribe". Click it to read
+the conversation in place, live while the other familiar works. Side conversations stay out of the
+chat list, search, and backups.
+
+Grimoire refuses a question or message when:
 
 - a familiar asks itself;
 - it would make a loop, like Scribe asking Researcher while Researcher waits on Scribe;
 - it would be a fourth familiar in a row (A asks B, B asks C, C asks D is the limit);
+- a familiar has already sent 5 messages with `message_familiar` in the last 10 minutes;
 - Settings, Permissions says no. "Who can ask whom" is any familiar (the default), only familiars in
   the same coven, or nobody.
 
-A familiar waits up to 10 minutes for a reply, counted from when its question is queued. Turn on
-"Approve each question" in the same section and Grimoire asks you first: "Researcher wants to ask
-Scribe", with the message. No answer in 2 minutes counts as Deny.
+Turn on "Approve each question" in the same section and Grimoire asks you first: "Researcher wants to
+ask Scribe" (or "wants to message"), with the message. No answer in 2 minutes counts as Deny.
 
 Grimoire tells Codex (`tool_timeout_sec`) and Claude (the MCP server's `timeout`) to allow 15
 minutes for its tool calls, since their defaults are shorter than a reply can take.

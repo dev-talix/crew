@@ -1,21 +1,29 @@
-//! `ask_familiar`: one familiar sends another a message and waits for its reply. The message shows in
-//! the other familiar's chat as "Asked by Researcher". Guard rails keep familiars from asking
-//! themselves, waiting on each other in a loop, or chaining questions too deep.
+//! Familiars talking to each other behind the scenes. `ask_familiar` sends another familiar a message
+//! and waits for its reply; `message_familiar` sends one and carries on, and the reply comes back later
+//! as a new message. Either way the exchange runs in a side conversation (see `side`), out of both main
+//! chats. Guard rails keep familiars from asking themselves, waiting on each other in a loop, chaining
+//! questions too deep, or flooding each other with messages.
 
 use crate::approvals::{self, Decision};
 use crate::db::{Agent, Db};
 use crate::runtime::TurnOutcome;
+use crate::side::{self, SideChat};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
-/// How long a familiar waits for a reply, counted from when its question is queued.
+/// How long a familiar waits for a reply to `ask_familiar`.
 pub const TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// The most questions in one chain: A asks B, B asks C, C asks D.
 pub const MAX_DEPTH: usize = 3;
-pub const SOURCE: &str = "Asked by ";
+/// The most `message_familiar` calls one familiar makes in `WINDOW`, so two can't ping-pong forever.
+pub const MAX_MESSAGES: usize = 5;
+pub const WINDOW: Duration = Duration::from_secs(10 * 60);
+/// The source label on a reply that comes back to the familiar who sent a message.
+pub const REPLY_SOURCE: &str = "Reply from ";
 const KEY: &str = "delegation";
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -32,7 +40,7 @@ pub enum Scope {
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub scope: Scope,
-    /// Ask the person before each question goes out.
+    /// Ask the person before each question or message goes out.
     pub approve: bool,
 }
 
@@ -112,6 +120,32 @@ fn depth_into(waits: &[(String, String)], agent: &str, hops: usize) -> usize {
     waits.iter().filter(|(_, t)| t == agent).map(|(a, _)| 1 + depth_into(waits, a, hops + 1)).max().unwrap_or(0)
 }
 
+/// Counts each familiar's recent `message_familiar` calls.
+#[derive(Default)]
+pub struct Limiter {
+    sent: Mutex<HashMap<String, VecDeque<Instant>>>,
+}
+
+impl Limiter {
+    /// Records a message from `asker` at `now`, unless it already sent `MAX_MESSAGES` in `WINDOW`.
+    pub fn allow(&self, asker: &str, now: Instant) -> Result<(), String> {
+        let mut sent = self.sent.lock().unwrap_or_else(|e| e.into_inner());
+        let recent = sent.entry(asker.to_string()).or_default();
+        while recent.front().is_some_and(|at| now.duration_since(*at) >= WINDOW) {
+            recent.pop_front();
+        }
+        if recent.len() >= MAX_MESSAGES {
+            return Err(format!(
+                "You've sent {MAX_MESSAGES} messages to other familiars in the last {} minutes, which is Grimoire's limit. \
+                 Wait for their replies before sending more.",
+                WINDOW.as_secs() / 60
+            ));
+        }
+        recent.push_back(now);
+        Ok(())
+    }
+}
+
 /// Whether `scope` lets `asker` ask `target`, with the reason when it doesn't.
 pub fn allowed(scope: Scope, asker: &Agent, target: &Agent) -> Result<(), String> {
     match scope {
@@ -126,67 +160,144 @@ pub fn allowed(scope: Scope, asker: &Agent, target: &Agent) -> Result<(), String
 }
 
 #[derive(Deserialize)]
-struct Question {
+struct Request {
     familiar: String,
     message: String,
+    #[serde(default)]
+    thread: Option<String>,
 }
 
-/// Puts `caller`'s question to another familiar and returns its reply. `approve` asks the person when
-/// the settings say so, and `send` delivers the message (target id, text, source label).
-pub async fn ask<Approve, Approved, Send, Sent>(
+/// A message that passed every check, ready to go into a side conversation.
+#[derive(Debug, Clone)]
+pub struct Outgoing {
+    pub asker: Agent,
+    pub target: Agent,
+    pub message: String,
+    /// The conversation it follows up on, or None to start a new one.
+    pub thread: Option<SideChat>,
+}
+
+fn prepare(db: &Db, caller: &str, arguments: Value) -> Result<Outgoing, String> {
+    let request: Request = serde_json::from_value(arguments).map_err(|e| format!("Invalid arguments: {e}"))?;
+    let message = request.message.trim().to_string();
+    if message.is_empty() {
+        return Err("Write the message to send.".into());
+    }
+    let agents = db.list_agents()?;
+    let asker = agents.iter().find(|a| a.id == caller).ok_or("Only a familiar can ask another familiar.")?;
+    let target = crate::tools::resolve_agent(&agents, &request.familiar)?;
+    if target.id == asker.id {
+        return Err("You can't ask yourself. Use list_familiars to find another familiar.".into());
+    }
+    allowed(load(db).scope, asker, target)?;
+    let thread = match request.thread.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(thread) => Some(side::follow_up(db, thread, asker, target)?),
+        None => None,
+    };
+    Ok(Outgoing { asker: asker.clone(), target: target.clone(), message, thread })
+}
+
+/// Asks the person first when the settings say so.
+async fn approved<Approve, Approved>(db: &Db, out: &Outgoing, verb: &str, approve: Approve) -> Result<(), String>
+where
+    Approve: FnOnce(approvals::Request) -> Approved,
+    Approved: Future<Output = Decision>,
+{
+    if !load(db).approve {
+        return Ok(());
+    }
+    let request = approvals::Request {
+        id: uuid::Uuid::new_v4().to_string(),
+        agent_id: out.asker.id.clone(),
+        kind: "familiar",
+        title: format!("{} wants to {verb} {}", out.asker.name, out.target.name),
+        detail: preview(&out.message),
+        can_remember: false,
+    };
+    match approve(request).await {
+        Decision::Deny => Err(format!("The person didn't let you {verb} {}. Carry on without it.", out.target.name)),
+        _ => Ok(()),
+    }
+}
+
+/// How a familiar finds its way back to a conversation.
+fn follow_up_note(chat: &str, name: &str) -> String {
+    format!("(Conversation {chat} with {name}. To follow up, call ask_familiar or message_familiar with thread set to {chat}.)")
+}
+
+/// Puts `caller`'s question to another familiar in a side conversation and returns its reply.
+/// `approve` asks the person when the settings say so, and `converse` opens the conversation and
+/// runs the exchange, returning the conversation's id and how the turn ended.
+pub async fn ask<Approve, Approved, Converse, Conversed>(
     db: &Db,
     chains: &Chains,
     caller: &str,
     arguments: Value,
     timeout: Duration,
     approve: Approve,
-    send: Send,
+    converse: Converse,
 ) -> Result<String, String>
 where
     Approve: FnOnce(approvals::Request) -> Approved,
     Approved: Future<Output = Decision>,
-    Send: FnOnce(String, String, String) -> Sent,
-    Sent: Future<Output = TurnOutcome>,
+    Converse: FnOnce(Outgoing) -> Conversed,
+    Conversed: Future<Output = Result<(String, TurnOutcome), String>>,
 {
-    let question: Question = serde_json::from_value(arguments).map_err(|e| format!("Invalid arguments: {e}"))?;
-    let message = question.message.trim().to_string();
-    if message.is_empty() {
-        return Err("Write the message to send.".into());
-    }
-    let agents = db.list_agents()?;
-    let asker = agents.iter().find(|a| a.id == caller).ok_or("Only a familiar can ask another familiar.")?;
-    let target = crate::tools::resolve_agent(&agents, &question.familiar)?;
-    if target.id == asker.id {
-        return Err("You can't ask yourself. Use list_familiars to find another familiar.".into());
-    }
-    let settings = load(db);
-    allowed(settings.scope, asker, target)?;
-    let _wait = chains.begin(asker, target)?;
-    if settings.approve {
-        let request = approvals::Request {
-            id: uuid::Uuid::new_v4().to_string(),
-            agent_id: asker.id.clone(),
-            kind: "familiar",
-            title: format!("{} wants to ask {}", asker.name, target.name),
-            detail: preview(&message),
-            can_remember: false,
-        };
-        if approve(request).await == Decision::Deny {
-            return Err(format!("The person didn't let you ask {}. Carry on without it.", target.name));
+    let out = prepare(db, caller, arguments)?;
+    let _wait = chains.begin(&out.asker, &out.target)?;
+    approved(db, &out, "ask", approve).await?;
+    let name = out.target.name.clone();
+    match tokio::time::timeout(timeout, converse(out)).await {
+        Ok(Ok((chat, TurnOutcome::Done(reply)))) => {
+            let reply = if reply.trim().is_empty() { format!("{name} finished without writing a reply.") } else { reply };
+            Ok(format!("{reply}\n\n{}", follow_up_note(&chat, &name)))
         }
-    }
-    let source = format!("{SOURCE}{}", asker.name);
-    match tokio::time::timeout(timeout, send(target.id.clone(), message, source)).await {
-        Ok(TurnOutcome::Done(reply)) if reply.trim().is_empty() => Ok(format!("{} finished without writing a reply.", target.name)),
-        Ok(TurnOutcome::Done(reply)) => Ok(reply),
-        Ok(TurnOutcome::Stopped) => Err(format!("{} was stopped before it replied.", target.name)),
-        Ok(TurnOutcome::Failed(reason)) => Err(format!("{} couldn't reply: {reason}", target.name)),
+        Ok(Ok((_, TurnOutcome::Stopped))) => Err(format!("{name} was stopped before it replied.")),
+        Ok(Ok((_, TurnOutcome::Failed(reason)))) => Err(format!("{name} couldn't reply: {reason}")),
+        Ok(Err(e)) => Err(e),
         Err(_) => Err(format!(
-            "{} didn't reply within {} minutes. It may still be working; its reply will show in its own chat.",
-            target.name,
+            "{name} didn't reply within {} minutes. It may still be working; its reply will stay in your conversation with it.",
             timeout.as_secs() / 60
         )),
     }
+}
+
+/// Sends `caller`'s message to another familiar and returns right away. `start` opens the
+/// conversation, sets the exchange going in the background, and returns the conversation's id.
+pub async fn message<Approve, Approved, Start>(
+    db: &Db,
+    limiter: &Limiter,
+    caller: &str,
+    arguments: Value,
+    now: Instant,
+    approve: Approve,
+    start: Start,
+) -> Result<String, String>
+where
+    Approve: FnOnce(approvals::Request) -> Approved,
+    Approved: Future<Output = Decision>,
+    Start: FnOnce(Outgoing) -> Result<String, String>,
+{
+    let out = prepare(db, caller, arguments)?;
+    limiter.allow(&out.asker.id, now)?;
+    approved(db, &out, "message", approve).await?;
+    let name = out.target.name.clone();
+    let chat = start(out)?;
+    Ok(format!(
+        "Sent to {name}. Its reply will come to you as a new message when it's done, so carry on with your work now.\n\n{}",
+        follow_up_note(&chat, &name)
+    ))
+}
+
+/// The message that brings a reply back to the familiar who sent `message_familiar`.
+pub fn reply_text(name: &str, chat: &str, outcome: TurnOutcome) -> String {
+    let body = match outcome {
+        TurnOutcome::Done(reply) if reply.trim().is_empty() => format!("{name} finished without writing a reply."),
+        TurnOutcome::Done(reply) => format!("{name} replied to your message:\n\n{reply}"),
+        TurnOutcome::Stopped => format!("{name} was stopped before it replied to your message."),
+        TurnOutcome::Failed(reason) => format!("{name} couldn't reply to your message: {reason}"),
+    };
+    format!("{body}\n\n{}", follow_up_note(chat, name))
 }
 
 fn preview(message: &str) -> String {
@@ -198,26 +309,61 @@ fn preview(message: &str) -> String {
 }
 
 static CHAINS: LazyLock<Chains> = LazyLock::new(Chains::default);
-static DB: OnceLock<Arc<Db>> = OnceLock::new();
+static LIMITER: LazyLock<Limiter> = LazyLock::new(Limiter::default);
 
-/// Lets `tool_label` turn a familiar's id into its name.
-pub fn install(db: Arc<Db>) {
-    let _ = DB.set(db);
+/// Opens the conversation, a new one or the one being followed up, and links it from the asker's
+/// chat, or from the side conversation the asker is answering in (`lane`).
+fn open(ctx: &crate::tools::Context, lane: Option<&str>, out: &Outgoing, verb: &str) -> Result<String, String> {
+    let chat = match &out.thread {
+        Some(chat) => chat.id.clone(),
+        None => side::create(&ctx.db, &out.asker.id, &out.target.id, &out.message)?.id,
+    };
+    side::link(&ctx.app, &ctx.db, lane, &out.asker.id, &format!("{verb} {}", out.target.name), &chat)?;
+    Ok(chat)
 }
 
-/// Runs `ask_familiar` for real: through the approval prompt and the runtime's queue.
-pub async fn run(ctx: &crate::tools::Context, caller: &str, arguments: Value) -> Result<String, String> {
+/// Runs `ask_familiar` for real: through the approval prompt and a side conversation.
+pub async fn run(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, arguments: Value) -> Result<String, String> {
     let approve = |request| ctx.approvals.ask(&ctx.app, request);
-    let send = |target: String, text: String, source: String| async move { ctx.runtime.send_and_wait(&target, text, Some(&source)).await };
-    ask(&ctx.db, &CHAINS, caller, arguments, TIMEOUT, approve, send).await
+    let converse = |out: Outgoing| async move {
+        let chat = open(ctx, lane, &out, "Asked")?;
+        // The exchange runs as its own task, so a reply that outlasts the wait still finishes and is
+        // saved, and the conversation stays busy until it does.
+        let (runtime, chat_id) = (ctx.runtime.clone(), chat.clone());
+        let turn = tauri::async_runtime::spawn(async move { runtime.side_turn(&chat_id, &out.asker.name, &out.message).await });
+        let outcome = turn.await.unwrap_or_else(|e| TurnOutcome::Failed(e.to_string()));
+        Ok((chat, outcome))
+    };
+    ask(&ctx.db, &CHAINS, caller, arguments, TIMEOUT, approve, converse).await
 }
 
-/// The chat row for an `ask_familiar` call, like "Asked Scribe".
-pub fn tool_label(arguments: &Value) -> String {
-    let wanted = arguments.get("familiar").and_then(Value::as_str).unwrap_or_default().trim();
-    let agents = DB.get().and_then(|db| db.list_agents().ok()).unwrap_or_default();
-    let name = crate::tools::resolve_agent(&agents, wanted).map_or_else(|_| wanted.to_string(), |a| a.name.clone());
-    if name.is_empty() { "Asked a familiar".into() } else { format!("Asked {name}") }
+/// Runs `message_familiar` for real. The reply goes to the sender's main chat as a new message,
+/// which starts its next turn.
+pub async fn run_message(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, arguments: Value) -> Result<String, String> {
+    let approve = |request| ctx.approvals.ask(&ctx.app, request);
+    let start = |out: Outgoing| {
+        let chat = open(ctx, lane, &out, "Messaged")?;
+        let home = crate::chats::current(&ctx.db, &out.asker.id)?;
+        let (runtime, db, chat_id) = (ctx.runtime.clone(), ctx.db.clone(), chat.clone());
+        tauri::async_runtime::spawn(async move {
+            let outcome = runtime.side_turn(&chat_id, &out.asker.name, &out.message).await;
+            let name = &out.target.name;
+            let (text, source) = (reply_text(name, &chat_id, outcome), format!("{REPLY_SOURCE}{name}"));
+            // The reply starts the sender's next turn in the chat it sent from. If the person has
+            // since switched chats, it waits in that chat instead of landing in the new one.
+            match (crate::chats::current(&db, &out.asker.id), home) {
+                (Ok(now), home) if now == home => {
+                    let _ = runtime.send(&out.asker.id, text, Some(&source));
+                }
+                (_, Some(home)) => {
+                    let _ = db.insert_message_in(&home, &out.asker.id, "user", &text, "done", Some(&source));
+                }
+                _ => {}
+            }
+        });
+        Ok(chat)
+    };
+    message(&ctx.db, &LIMITER, caller, arguments, Instant::now(), approve, start).await
 }
 
 #[cfg(test)]
@@ -259,36 +405,58 @@ mod tests {
         panic!("should not ask the person")
     }
 
-    fn never_sent(_: String, _: String, _: String) -> std::future::Ready<TurnOutcome> {
-        panic!("should not send")
+    fn never_conversed(_: Outgoing) -> std::future::Ready<Result<(String, TurnOutcome), String>> {
+        panic!("should not converse")
+    }
+
+    fn replies(text: &str) -> impl FnOnce(Outgoing) -> std::future::Ready<Result<(String, TurnOutcome), String>> {
+        let text = text.to_string();
+        move |_| std::future::ready(Ok(("c1".into(), TurnOutcome::Done(text))))
     }
 
     #[tokio::test]
-    async fn sends_with_a_source_label_and_returns_the_reply() {
+    async fn asks_in_a_side_conversation_and_returns_the_reply() {
         let (db, ..) = setup();
         let chains = Chains::default();
         let sent = Mutex::new(None);
-        let reply = ask(&db, &chains, "a", json!({ "familiar": "scribe", "message": " Summarize the notes " }), TIMEOUT, never_asked, |id, text, source| {
-            *sent.lock().unwrap() = Some((id, text, source));
-            async { TurnOutcome::Done("Here's the summary.".into()) }
+        let reply = ask(&db, &chains, "a", json!({ "familiar": "scribe", "message": " Summarize the notes " }), TIMEOUT, never_asked, |out: Outgoing| {
+            *sent.lock().unwrap() = Some((out.asker.id, out.target.id, out.message, out.thread));
+            std::future::ready(Ok(("c1".into(), TurnOutcome::Done("Here's the summary.".into()))))
         })
         .await
         .unwrap();
-        assert_eq!(reply, "Here's the summary.");
-        assert_eq!(sent.into_inner().unwrap(), Some(("b".into(), "Summarize the notes".into(), "Asked by Researcher".into())));
+        assert!(reply.starts_with("Here's the summary.\n\n(Conversation c1 with Scribe."), "{reply}");
+        assert_eq!(sent.into_inner().unwrap(), Some(("a".into(), "b".into(), "Summarize the notes".into(), None)));
         assert!(chains.waits.lock().unwrap().is_empty(), "the wait ends with the reply");
+    }
+
+    #[tokio::test]
+    async fn follows_up_only_on_its_own_conversations() {
+        let (db, a, b, c, _) = setup();
+        let mine = side::create(&db, &a.id, &b.id, "first").unwrap();
+        let theirs = side::create(&db, &c.id, &b.id, "other").unwrap();
+        let chains = Chains::default();
+        let picked = Mutex::new(None);
+        ask(&db, &chains, "a", json!({ "familiar": "b", "message": "and then?", "thread": mine.id }), TIMEOUT, never_asked, |out: Outgoing| {
+            *picked.lock().unwrap() = out.thread.map(|t| t.id);
+            std::future::ready(Ok((mine.id.clone(), TurnOutcome::Done("ok".into()))))
+        })
+        .await
+        .unwrap();
+        assert_eq!(picked.into_inner().unwrap(), Some(mine.id.clone()));
+        let err = ask(&db, &chains, "a", json!({ "familiar": "b", "message": "x", "thread": theirs.id }), TIMEOUT, never_asked, never_conversed).await.unwrap_err();
+        assert!(err.contains("isn't one you started with Scribe"), "{err}");
     }
 
     #[tokio::test]
     async fn refuses_yourself_and_unknown_familiars() {
         let (db, ..) = setup();
         let chains = Chains::default();
-        let send = never_sent;
-        let err = ask(&db, &chains, "a", json!({ "familiar": "Researcher", "message": "hi" }), TIMEOUT, never_asked, send).await.unwrap_err();
+        let err = ask(&db, &chains, "a", json!({ "familiar": "Researcher", "message": "hi" }), TIMEOUT, never_asked, never_conversed).await.unwrap_err();
         assert!(err.contains("can't ask yourself"), "{err}");
-        let err = ask(&db, &chains, "a", json!({ "familiar": "Nobody", "message": "hi" }), TIMEOUT, never_asked, send).await.unwrap_err();
+        let err = ask(&db, &chains, "a", json!({ "familiar": "Nobody", "message": "hi" }), TIMEOUT, never_asked, never_conversed).await.unwrap_err();
         assert!(err.contains("No familiar is called"), "{err}");
-        let err = ask(&db, &chains, "a", json!({ "familiar": "b", "message": "  " }), TIMEOUT, never_asked, send).await.unwrap_err();
+        let err = ask(&db, &chains, "a", json!({ "familiar": "b", "message": "  " }), TIMEOUT, never_asked, never_conversed).await.unwrap_err();
         assert_eq!(err, "Write the message to send.");
     }
 
@@ -327,9 +495,10 @@ mod tests {
 
         save(&db, Settings { scope: Scope::Coven, approve: false }).unwrap();
         let chains = Chains::default();
-        let send = |_, _, _| async { TurnOutcome::Done("ok".into()) };
-        assert!(ask(&db, &chains, "a", json!({ "familiar": "c", "message": "hi" }), TIMEOUT, never_asked, send).await.is_err());
-        assert_eq!(ask(&db, &chains, "a", json!({ "familiar": "b", "message": "hi" }), TIMEOUT, never_asked, send).await.unwrap(), "ok");
+        assert!(ask(&db, &chains, "a", json!({ "familiar": "c", "message": "hi" }), TIMEOUT, never_asked, never_conversed).await.is_err());
+        assert!(ask(&db, &chains, "a", json!({ "familiar": "b", "message": "hi" }), TIMEOUT, never_asked, replies("ok")).await.unwrap().starts_with("ok"));
+        let err = message(&db, &Limiter::default(), "a", json!({ "familiar": "c", "message": "hi" }), Instant::now(), never_asked, |_| panic!("sent")).await;
+        assert!(err.unwrap_err().contains("own coven"));
     }
 
     #[tokio::test]
@@ -345,13 +514,16 @@ mod tests {
                 std::future::ready(decision)
             }
         };
-        let send = |_, _, _| async { TurnOutcome::Done("ok".into()) };
         let args = || json!({ "familiar": "Scribe", "message": "Check the draft" });
-        let err = ask(&db, &chains, "a", args(), TIMEOUT, approve(Decision::Deny), never_sent).await.unwrap_err();
+        let err = ask(&db, &chains, "a", args(), TIMEOUT, approve(Decision::Deny), never_conversed).await.unwrap_err();
         assert!(err.contains("didn't let you ask Scribe"), "{err}");
-        assert_eq!(ask(&db, &chains, "a", args(), TIMEOUT, approve(Decision::Once), send).await.unwrap(), "ok");
+        assert!(ask(&db, &chains, "a", args(), TIMEOUT, approve(Decision::Once), replies("ok")).await.is_ok());
         assert_eq!(asked.lock().unwrap()[0], ("Researcher wants to ask Scribe".into(), "Check the draft".into(), "familiar", false));
         assert!(chains.waits.lock().unwrap().is_empty());
+
+        let err = message(&db, &Limiter::default(), "a", args(), Instant::now(), approve(Decision::Deny), |_| panic!("sent")).await.unwrap_err();
+        assert!(err.contains("didn't let you message Scribe"), "{err}");
+        assert_eq!(asked.lock().unwrap()[2].0, "Researcher wants to message Scribe");
     }
 
     #[tokio::test(start_paused = true)]
@@ -359,24 +531,56 @@ mod tests {
         let (db, ..) = setup();
         let chains = Chains::default();
         let args = || json!({ "familiar": "b", "message": "hi" });
-        let slow = |_, _, _| async {
+        let slow = |_| async {
             tokio::time::sleep(Duration::from_secs(3600)).await;
-            TurnOutcome::Done("late".into())
+            Ok(("c1".to_string(), TurnOutcome::Done("late".into())))
         };
         let err = ask(&db, &chains, "a", args(), Duration::from_secs(120), never_asked, slow).await.unwrap_err();
         assert!(err.contains("Scribe didn't reply within 2 minutes"), "{err}");
         assert!(chains.waits.lock().unwrap().is_empty(), "a timed out wait leaves the chain");
 
-        let failed = |_, _, _| async { TurnOutcome::Failed("no network".into()) };
+        let failed = |_| std::future::ready(Ok(("c1".to_string(), TurnOutcome::Failed("no network".into()))));
         assert_eq!(ask(&db, &chains, "a", args(), TIMEOUT, never_asked, failed).await.unwrap_err(), "Scribe couldn't reply: no network");
-        let stopped = |_, _, _| async { TurnOutcome::Stopped };
+        let stopped = |_| std::future::ready(Ok(("c1".to_string(), TurnOutcome::Stopped)));
         assert!(ask(&db, &chains, "a", args(), TIMEOUT, never_asked, stopped).await.unwrap_err().contains("stopped"));
+        let empty = replies("  ");
+        assert!(ask(&db, &chains, "a", args(), TIMEOUT, never_asked, empty).await.unwrap().starts_with("Scribe finished without writing a reply."));
+    }
+
+    #[tokio::test]
+    async fn messages_return_at_once_and_are_rate_limited() {
+        let (db, ..) = setup();
+        let limiter = Limiter::default();
+        let start = Instant::now();
+        let sent = Mutex::new(Vec::new());
+        for i in 0..MAX_MESSAGES {
+            let note = message(&db, &limiter, "a", json!({ "familiar": "Scribe", "message": format!("note {i}") }), start, never_asked, |out: Outgoing| {
+                sent.lock().unwrap().push(out.message);
+                Ok("c9".into())
+            })
+            .await
+            .unwrap();
+            assert!(note.starts_with("Sent to Scribe.") && note.contains("thread set to c9"), "{note}");
+        }
+        assert_eq!(sent.lock().unwrap().len(), MAX_MESSAGES);
+        let args = || json!({ "familiar": "Scribe", "message": "one more" });
+        let err = message(&db, &limiter, "a", args(), start + Duration::from_secs(60), never_asked, |_| panic!("sent")).await.unwrap_err();
+        assert!(err.contains("Grimoire's limit"), "{err}");
+        // Others aren't held back, and the window moves on.
+        assert!(message(&db, &limiter, "b", json!({ "familiar": "a", "message": "hi" }), start, never_asked, |_| Ok("c2".into())).await.is_ok());
+        assert!(message(&db, &limiter, "a", args(), start + WINDOW, never_asked, |_| Ok("c9".into())).await.is_ok());
     }
 
     #[test]
-    fn labels_the_tool_row_and_trims_long_previews() {
-        assert_eq!(tool_label(&json!({ "familiar": "Scribe", "message": "x" })), "Asked Scribe");
-        assert_eq!(tool_label(&json!({})), "Asked a familiar");
+    fn words_replies_for_the_sender() {
+        let done = reply_text("Scribe", "c1", TurnOutcome::Done("All set.".into()));
+        assert!(done.starts_with("Scribe replied to your message:\n\nAll set.\n\n(Conversation c1"), "{done}");
+        assert!(reply_text("Scribe", "c1", TurnOutcome::Failed("offline".into())).starts_with("Scribe couldn't reply to your message: offline"));
+        assert!(reply_text("Scribe", "c1", TurnOutcome::Stopped).starts_with("Scribe was stopped"));
+    }
+
+    #[test]
+    fn trims_long_previews() {
         let long = "word ".repeat(200);
         assert!(preview(&long).ends_with('…'));
         assert!(preview(&long).chars().count() <= 401);
@@ -390,22 +594,23 @@ mod tests {
         fn model(&self, _: &str, _: &str) {}
     }
 
-    /// Two cheap familiars ask each other through the real CLIs and the dev build's `grimoire mcp`
-    /// relay. A stand-in for the app serves the socket: ask_familiar runs as in the app, and the
-    /// target's turn runs on the real provider. Codex's question is held for 75 seconds, past
-    /// Codex's default 60-second tool timeout. Run `cargo build` first.
+    /// Two cheap familiars talk through the real CLIs and the dev build's `grimoire mcp` relay. Each
+    /// first learns a code word in its main chat. Then each asks the other for its word: the answer
+    /// comes from a side conversation forked from the main chat, so it knows the word, while the main
+    /// chats stay as they were. A stand-in for the app serves the socket. Run `cargo build` first.
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "runs the real codex and claude CLIs"]
-    async fn live_familiars_ask_each_other() {
-        use crate::providers::{claude::Claude, codex::Codex};
+    async fn live_familiars_talk_behind_the_scenes() {
+        use crate::providers::{claude::Claude, codex::Codex, Lane, LaneSession};
         use crate::runtime::{stream_turn, TurnWriter};
+        use std::sync::Arc;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let exe = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/grimoire");
         assert!(exe.exists(), "run cargo build first");
         let id = &uuid::Uuid::new_v4().to_string()[..8];
-        let socket = std::path::PathBuf::from(format!("/tmp/grim-deleg-{id}.sock"));
-        let workspace = std::env::temp_dir().join(format!("grimoire-deleg-{id}"));
+        let socket = std::path::PathBuf::from(format!("/tmp/grim-side-{id}.sock"));
+        let workspace = std::env::temp_dir().join(format!("grimoire-side-{id}"));
         std::fs::create_dir_all(&workspace).unwrap();
         let db = Arc::new(Db::open_in_memory().unwrap());
         let live = |id: &str, name: &str, provider: Provider, model: &str, effort: Option<&str>| {
@@ -426,43 +631,68 @@ mod tests {
             db.insert_agent(&agent).unwrap();
             agent
         };
-        let researcher = live("r", "Researcher", Provider::Claude, "claude-haiku-5-5", None);
-        let scribe = live("s", "Scribe", Provider::Codex, "gpt-6.2-sol", Some("low"));
-        install(db.clone());
+        live("r", "Researcher", Provider::Claude, "claude-haiku-5-5", None);
+        live("s", "Scribe", Provider::Codex, "gpt-6.2-sol", Some("low"));
         crate::tools::LAUNCH.set((exe, socket.clone())).unwrap();
 
         let codex = Arc::new(Codex::default());
         let claude = Arc::new(Claude::default());
         let chains = Arc::new(Chains::default());
+        // One turn for `agent`, in its main chat or in a side conversation.
+        let turn = {
+            let (db, codex, claude) = (db.clone(), codex.clone(), claude.clone());
+            move |agent_id: String, prompt: String, side: Option<String>| {
+                let (db, codex, claude) = (db.clone(), codex.clone(), claude.clone());
+                async move {
+                    let agent = db.get_agent(&agent_id).unwrap().unwrap();
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    let lane = side.as_ref().map(|chat| {
+                        let session = side::get(&db, chat).unwrap().unwrap().session_id;
+                        let session = match (session, agent.session_id.clone()) {
+                            (Some(s), _) => LaneSession::Resume(s),
+                            (None, Some(m)) => LaneSession::Fork(m),
+                            (None, None) => LaneSession::Fresh,
+                        };
+                        Lane { key: side::lane_key(&agent.id, chat), session }
+                    });
+                    match agent.provider {
+                        Provider::Codex => codex.start_turn_in(&agent, lane.as_ref(), &prompt, &[], tx).await.unwrap(),
+                        Provider::Claude => claude.start_turn_in(&agent, lane.as_ref(), &prompt, &[], tx).await.unwrap(),
+                    }
+                    match &side {
+                        Some(chat) => {
+                            let session = side::get(&db, chat).unwrap().unwrap().session_id;
+                            stream_turn(&mut TurnWriter::for_side(&db, &Quiet, &agent, chat, session), rx).await
+                        }
+                        None => stream_turn(&mut TurnWriter::new(&db, &Quiet, &agent), rx).await,
+                    }
+                }
+            }
+        };
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let server = {
-            let (db, codex, claude, chains) = (db.clone(), codex.clone(), claude.clone(), chains.clone());
+            let (db, chains, turn) = (db.clone(), chains.clone(), turn.clone());
             tokio::spawn(async move {
                 while let Ok((stream, _)) = listener.accept().await {
-                    let (db, codex, claude, chains) = (db.clone(), codex.clone(), claude.clone(), chains.clone());
+                    let (db, chains, turn) = (db.clone(), chains.clone(), turn.clone());
                     tokio::spawn(async move {
                         let (read, mut write) = stream.into_split();
                         let Ok(Some(line)) = BufReader::new(read).lines().next_line().await else { return };
                         let request: Value = serde_json::from_str(&line).unwrap();
-                        let (caller, tool) = (request["agent"].as_str().unwrap(), request["tool"].as_str().unwrap());
+                        let (caller, _) = side::split(request["agent"].as_str().unwrap());
+                        let tool = request["tool"].as_str().unwrap();
                         let arguments = request["arguments"].clone();
                         let result = if tool == "ask_familiar" {
-                            let turn_db = db.clone();
-                            let send = |target: String, text: String, source: String| async move {
-                                let db = turn_db;
-                                db.insert_message_from(&target, "user", &text, "done", Some(&source)).unwrap();
-                                let agent = db.get_agent(&target).unwrap().unwrap();
-                                if caller == "s" {
-                                    tokio::time::sleep(Duration::from_secs(75)).await;
+                            let converse = |out: Outgoing| {
+                                let db = db.clone();
+                                async move {
+                                    let chat = side::create(&db, &out.asker.id, &out.target.id, &out.message)?;
+                                    db.insert_message_in(&chat.id, &out.target.id, "user", &out.message, "done", None)?;
+                                    let prompt = side::framed(&out.asker.name, &out.message);
+                                    Ok((chat.id.clone(), turn(out.target.id.clone(), prompt, Some(chat.id)).await))
                                 }
-                                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                                match agent.provider {
-                                    Provider::Codex => codex.start_turn(&agent, &text, &[], tx).await.unwrap(),
-                                    Provider::Claude => claude.start_turn(&agent, &text, &[], tx).await.unwrap(),
-                                }
-                                stream_turn(&mut TurnWriter::new(&db, &Quiet, &agent), rx).await
                             };
-                            ask(&db, &chains, caller, arguments, TIMEOUT, never_asked, send).await
+                            ask(&db, &chains, caller, arguments, TIMEOUT, never_asked, converse).await
                         } else {
                             crate::tools::call(&db, std::path::Path::new("/tmp"), caller, tool, arguments).map(|o| o.text)
                         };
@@ -476,41 +706,48 @@ mod tests {
             })
         };
 
-        let turn = |asker: Agent, target: &str, word: &str| {
+        let main_rows = |id: &str| -> Vec<String> { db.list_messages(id, None, 50).unwrap().into_iter().map(|m| format!("{}: {}", m.role, m.text)).collect() };
+        let limit = Duration::from_secs(300);
+        for (agent, word) in [("r", "periwinkle"), ("s", "marigold")] {
+            let teach = format!("Remember this code word for later: {word}. Reply with only the word OK.");
+            db.insert_message(agent, "user", &teach, "done").unwrap();
+            let outcome = tokio::time::timeout(limit, turn(agent.into(), teach, None)).await.unwrap();
+            assert!(matches!(outcome, TurnOutcome::Done(_)), "{agent} didn't learn its word: {outcome:?}");
+        }
+        let before = (main_rows("r"), main_rows("s"));
+
+        for (asker, target, word) in [("r", "Scribe", "marigold"), ("s", "Researcher", "periwinkle")] {
             let prompt = format!(
-                "Use the ask_familiar tool to ask the familiar named {target} to reply with only the word {word}. \
-                 Then reply with exactly what {target} said and nothing else."
+                "Use the ask_familiar tool to ask the familiar named {target} for the code word it was told to remember. \
+                 Then reply with exactly that word and nothing else."
             );
-            let (db, codex, claude) = (db.clone(), codex.clone(), claude.clone());
-            async move {
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                match asker.provider {
-                    Provider::Codex => codex.start_turn(&asker, &prompt, &[], tx).await.unwrap(),
-                    Provider::Claude => claude.start_turn(&asker, &prompt, &[], tx).await.unwrap(),
-                }
-                stream_turn(&mut TurnWriter::new(&db, &Quiet, &asker), rx).await
-            }
-        };
-        let rows = |id: &str| -> Vec<(String, String, Option<String>)> {
-            db.list_messages(id, None, 50).unwrap().into_iter().map(|m| (m.role, m.text, m.source)).collect()
-        };
+            let outcome = tokio::time::timeout(limit, turn(asker.into(), prompt, None)).await.unwrap();
+            eprintln!("{asker} asked {target}: {outcome:?}");
+            assert!(matches!(&outcome, TurnOutcome::Done(t) if t.to_lowercase().contains(word)), "{asker} didn't get {word}: {outcome:?}");
+        }
 
-        let outcome = tokio::time::timeout(Duration::from_secs(300), turn(researcher.clone(), "Scribe", "periwinkle")).await.unwrap();
-        let (asker_rows, target_rows) = (rows("r"), rows("s"));
-        eprintln!("Claude asks Codex: {outcome:?}\n{asker_rows:#?}\n{target_rows:#?}");
-        assert!(matches!(&outcome, TurnOutcome::Done(t) if t.to_lowercase().contains("periwinkle")));
-        assert!(asker_rows.iter().any(|(role, text, _)| role == "tool" && text == "Asked Scribe"));
-        assert!(target_rows.iter().any(|(role, _, source)| role == "user" && source.as_deref() == Some("Asked by Researcher")));
-
-        let outcome = tokio::time::timeout(Duration::from_secs(420), turn(scribe.clone(), "Researcher", "marigold")).await.unwrap();
-        let (asker_rows, target_rows) = (rows("s"), rows("r"));
-        eprintln!("Codex asks Claude after 75 s: {outcome:?}\n{asker_rows:#?}\n{target_rows:#?}");
-        assert!(matches!(&outcome, TurnOutcome::Done(t) if t.to_lowercase().contains("marigold")));
-        assert!(asker_rows.iter().any(|(role, text, _)| role == "tool" && text == "Asked Researcher"));
-        assert!(target_rows.iter().any(|(role, _, source)| role == "user" && source.as_deref() == Some("Asked by Scribe")));
+        // The asked familiars' main chats didn't change; each answer lives in a side conversation.
+        let after = (main_rows("r"), main_rows("s"));
+        assert_eq!(before.0[..], after.0[..before.0.len()], "Researcher's earlier chat is intact");
+        assert_eq!(before.1[..], after.1[..before.1.len()], "Scribe's earlier chat is intact");
+        for (target, word) in [("s", "marigold"), ("r", "periwinkle")] {
+            let sides: Vec<String> = db
+                .with(|c| {
+                    let mut stmt = c.prepare("SELECT id FROM chats WHERE agent_id = ?1 AND side_of IS NOT NULL")?;
+                    let rows = stmt.query_map([target], |r| r.get(0))?;
+                    rows.collect()
+                })
+                .unwrap();
+            // A familiar may ask more than once, and each question opens its own conversation.
+            assert!(!sides.is_empty(), "{target} answered in a side conversation");
+            let rows: Vec<_> = sides.iter().flat_map(|chat| side::messages(&db, chat).unwrap()).collect();
+            eprintln!("{target}'s side conversations: {:#?}", rows.iter().map(|m| (&m.role, &m.text)).collect::<Vec<_>>());
+            assert!(rows.iter().any(|m| m.role == "assistant" && m.text.to_lowercase().contains(word)));
+            assert!(!main_rows(target).iter().any(|r| r.contains("code word it was told")), "the question stayed out of {target}'s main chat");
+        }
 
         server.abort();
-        claude.forget("r");
+        claude.forget_idle();
         let _ = std::fs::remove_file(&socket);
         let _ = std::fs::remove_dir_all(&workspace);
     }

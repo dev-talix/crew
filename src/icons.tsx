@@ -220,6 +220,14 @@ export const WrenchIcon = () => (
   </Icon>
 );
 
+/** Two speech bubbles: familiars talking to each other. */
+export const TalkIcon = () => (
+  <Icon size={14}>
+    <path d="M2.5 3.5h7a1 1 0 0 1 1 1v3.5a1 1 0 0 1-1 1H6L3.5 11V9h-1a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z" />
+    <path d="M12.5 6.5h1a1 1 0 0 1 1 1V11a1 1 0 0 1-1 1h-1v2L10 12H8" />
+  </Icon>
+);
+
 export const CloseIcon = () => (
   <Icon>
     <path d="M4 4l8 8M12 4l-8 8" />

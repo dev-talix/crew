@@ -224,7 +224,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -434,6 +434,9 @@ impl Db {
                  COMMIT;",
             )?;
         }
+        if version < 14 {
+            crate::side::migrate(&conn)?;
+        }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
             [],
@@ -537,33 +540,28 @@ impl Db {
         status: &str,
         source: Option<&str>,
     ) -> Result<Message, String> {
-        let created_at = now_ms();
         self.with(|c| {
             let chat_id = crate::chats::ensure_current(c, agent_id)?;
-            c.execute(
-                "INSERT INTO messages (agent_id, role, text, status, created_at, source, chat_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![agent_id, role, text, status, created_at, source, chat_id],
-            )?;
-            crate::chats::touch(c, &chat_id, role, text, created_at)?;
-            Ok(Message {
-                id: c.last_insert_rowid(),
-                agent_id: agent_id.to_string(),
-                role: role.to_string(),
-                text: text.to_string(),
-                status: status.to_string(),
-                source: source.map(str::to_string),
-                created_at,
-                updated_at: None,
-                attachments: Vec::new(),
-            })
+            insert_into(c, &chat_id, agent_id, role, text, status, source)
         })
+    }
+
+    /// Adds a message to one chat, whichever chat is current: a side conversation's, for one.
+    pub fn insert_message_in(&self, chat_id: &str, agent_id: &str, role: &str, text: &str, status: &str, source: Option<&str>) -> Result<Message, String> {
+        self.with(|c| insert_into(c, chat_id, agent_id, role, text, status, source))
+    }
+
+    /// Saves the CLI session on one chat only, leaving the familiar's current chat alone.
+    pub fn set_chat_session(&self, chat_id: &str, session_id: &str) -> Result<(), String> {
+        self.with(|c| c.execute("UPDATE chats SET session_id = ?2 WHERE id = ?1", params![chat_id, session_id]).map(|_| ()))
     }
 
     pub fn last_messages(&self) -> Result<Vec<Message>, String> {
         self.with(|c| {
             let mut stmt = c.prepare_cached(
                 "SELECT m.id, m.agent_id, m.role, m.text, m.status, m.created_at, m.source, m.updated_at FROM messages m
-                 JOIN (SELECT agent_id, MAX(id) AS id FROM messages WHERE role IN ('user', 'assistant') GROUP BY agent_id) last
+                 JOIN (SELECT agent_id, MAX(id) AS id FROM messages WHERE role IN ('user', 'assistant')
+                       AND chat_id NOT IN (SELECT id FROM chats WHERE side_of IS NOT NULL) GROUP BY agent_id) last
                  ON last.id = m.id",
             )?;
             let rows = stmt.query_map([], row_to_message)?;
@@ -754,6 +752,34 @@ impl Db {
             Ok(messages)
         })
     }
+}
+
+fn insert_into(
+    c: &Connection,
+    chat_id: &str,
+    agent_id: &str,
+    role: &str,
+    text: &str,
+    status: &str,
+    source: Option<&str>,
+) -> rusqlite::Result<Message> {
+    let created_at = now_ms();
+    c.execute(
+        "INSERT INTO messages (agent_id, role, text, status, created_at, source, chat_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![agent_id, role, text, status, created_at, source, chat_id],
+    )?;
+    crate::chats::touch(c, chat_id, role, text, created_at)?;
+    Ok(Message {
+        id: c.last_insert_rowid(),
+        agent_id: agent_id.to_string(),
+        role: role.to_string(),
+        text: text.to_string(),
+        status: status.to_string(),
+        source: source.map(str::to_string),
+        created_at,
+        updated_at: None,
+        attachments: Vec::new(),
+    })
 }
 
 fn row_to_message(r: &rusqlite::Row) -> rusqlite::Result<Message> {

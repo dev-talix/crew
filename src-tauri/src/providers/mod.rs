@@ -26,6 +26,24 @@ pub enum ProviderEvent {
 
 pub type EventTx = mpsc::UnboundedSender<ProviderEvent>;
 
+/// Where a side conversation's turn runs: its own key for the CLI process or thread, and its own session.
+/// Main turns pass no lane and use the familiar's id and current session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lane {
+    pub key: String,
+    pub session: LaneSession,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LaneSession {
+    /// Carry on the side conversation's own session.
+    Resume(String),
+    /// Start from a copy of this session, the familiar's main chat.
+    Fork(String),
+    /// Start a new session: the familiar has no main session to copy yet.
+    Fresh,
+}
+
 #[derive(Debug, Clone, serde::Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOption {

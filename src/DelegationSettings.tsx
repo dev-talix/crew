@@ -3,9 +3,9 @@ import { api, errorText, type Delegation } from "./api";
 import { Toggle } from "./ui";
 
 const SCOPES: { value: Delegation["scope"]; label: string; about: string }[] = [
-  { value: "anyone", label: "Any familiar", about: "Any familiar can ask any other one for help and wait for its reply." },
+  { value: "anyone", label: "Any familiar", about: "Any familiar can ask or message any other one. They talk in side conversations you can open from the asking familiar's chat." },
   { value: "coven", label: "Same coven only", about: "A familiar can only ask familiars in its own coven. Unbound familiars can't ask anyone." },
-  { value: "nobody", label: "Nobody", about: "Familiars can't ask each other." },
+  { value: "nobody", label: "Nobody", about: "Familiars can't ask or message each other." },
 ];
 
 /** The Familiars section of Settings, Permissions: who can ask whom with ask_familiar. */
@@ -64,7 +64,7 @@ export default function DelegationSettings() {
         )}
       </Show>
       <p class="hint settings-footnote">
-        A familiar waits up to 10 minutes for a reply. It can't ask itself or a familiar that is waiting on it, and chains stop at 3 familiars in a row.
+        A familiar waits up to 10 minutes for an answer, or sends a message and gets the reply later. It can't ask itself or a familiar that is waiting on it, chains stop at 3 familiars in a row, and each familiar can send 5 messages per 10 minutes.
       </p>
       <Show when={error()}>
         <p class="error-box settings-error" role="alert">

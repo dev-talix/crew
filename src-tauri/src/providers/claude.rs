@@ -1,4 +1,4 @@
-use super::{command, spawn_error, EventTx, IdleTimer, ProviderEvent, StderrTail};
+use super::{command, spawn_error, EventTx, IdleTimer, Lane, LaneSession, ProviderEvent, StderrTail};
 use crate::db::{Access, Agent};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -72,7 +72,7 @@ fn config_key(agent: &Agent) -> String {
     format!("{:?}|{:?}|{:?}|{}", agent.model, agent.effort, agent.access, agent.workspace)
 }
 
-fn args(agent: &Agent) -> Vec<String> {
+fn args(agent: &Agent, lane: Option<&Lane>) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
         "--input-format",
@@ -90,7 +90,8 @@ fn args(agent: &Agent) -> Vec<String> {
         Access::Workspace => "acceptEdits".into(),
         Access::Full => "bypassPermissions".into(),
     });
-    if let Some((command, server_args)) = crate::tools::server_command(&agent.id) {
+    // In a side conversation, Grimoire's tools know which one the familiar is calling from.
+    if let Some((command, server_args)) = crate::tools::server_command(lane.map_or(&agent.id, |l| &l.key)) {
         // "timeout" (ms) caps each tool call, and also lifts Claude's idle cutoff for silent calls like ask_familiar.
         let server = json!({ "command": command, "args": server_args, "timeout": crate::tools::CALL_TIMEOUT_SECS * 1000 });
         let config = json!({ "mcpServers": { (crate::tools::SERVER_NAME): server } });
@@ -107,8 +108,15 @@ fn args(agent: &Agent) -> Vec<String> {
         // memory reaches the familiar in its next new chat.
         args.extend(["--append-system-prompt".into(), memory]);
     }
-    if let Some(session) = agent.session_id.as_deref() {
-        args.extend(["--resume".into(), session.into()]);
+    match lane.map(|l| &l.session) {
+        None => {
+            if let Some(session) = agent.session_id.as_deref() {
+                args.extend(["--resume".into(), session.into()]);
+            }
+        }
+        Some(LaneSession::Resume(session)) => args.extend(["--resume".into(), session.clone()]),
+        Some(LaneSession::Fork(session)) => args.extend(["--resume".into(), session.clone(), "--fork-session".into()]),
+        Some(LaneSession::Fresh) => {}
     }
     args
 }
@@ -150,8 +158,13 @@ fn read_image(path: &Path) -> Result<(&'static str, Vec<u8>), String> {
 
 impl Claude {
     pub async fn start_turn(&self, agent: &Agent, text: &str, images: &[PathBuf], tx: EventTx) -> Result<(), String> {
+        self.start_turn_in(agent, None, text, images, tx).await
+    }
+
+    /// Starts a turn in the familiar's main chat, or in a side conversation when `lane` names one.
+    pub async fn start_turn_in(&self, agent: &Agent, lane: Option<&Lane>, text: &str, images: &[PathBuf], tx: EventTx) -> Result<(), String> {
         let images = images.iter().map(|p| read_image(p)).collect::<Result<Vec<_>, _>>()?;
-        let process = self.process_for(agent)?;
+        let process = self.process_for(agent, lane)?;
         process.idle.cancel();
         process.interrupting.store(false, Ordering::SeqCst);
         if let Ok(mut route) = process.route.lock() {
@@ -172,7 +185,7 @@ impl Claude {
             Err(e) => Err(e),
         } {
             process.take_route();
-            self.forget(&agent.id);
+            self.forget(lane.map_or(&agent.id, |l| &l.key));
             return Err(format!("Could not send the message to claude: {e}"));
         }
         Ok(())
@@ -234,17 +247,18 @@ impl Claude {
         }
     }
 
-    fn process_for(&self, agent: &Agent) -> Result<Arc<ClaudeProcess>, String> {
+    fn process_for(&self, agent: &Agent, lane: Option<&Lane>) -> Result<Arc<ClaudeProcess>, String> {
         let mut processes = self.processes.lock().map_err(|_| "claude state poisoned")?;
+        let id = lane.map_or(&agent.id, |l| &l.key);
         let key = config_key(agent);
-        if let Some(existing) = processes.get(&agent.id) {
+        if let Some(existing) = processes.get(id) {
             if existing.config == key && existing.child.lock().map(|c| c.is_some()).unwrap_or(false) {
                 return Ok(existing.clone());
             }
             existing.kill();
         }
         let mut child = command("claude", &agent.workspace)
-            .args(args(agent))
+            .args(args(agent, lane))
             .spawn()
             .map_err(|e| spawn_error("claude", e))?;
         let stdin = child.stdin.take().ok_or("claude has no stdin")?;
@@ -262,9 +276,10 @@ impl Claude {
             hooked: AtomicBool::new(false),
             idle: IdleTimer::default(),
         });
-        processes.insert(agent.id.clone(), process.clone());
+        processes.insert(id.clone(), process.clone());
 
-        let agent_id = agent.id.clone();
+        let agent_id = id.clone();
+        let familiar = agent.id.clone();
         let registry = self.processes.clone();
         let reader = process.clone();
         tauri::async_runtime::spawn(async move {
@@ -273,7 +288,7 @@ impl Claude {
             while let Ok(Some(line)) = lines.next_line().await {
                 let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
                 if value["type"] == "control_request" && value["request"]["callback_id"] == BASH_HOOK {
-                    let (agent, process) = (agent_id.clone(), reader.clone());
+                    let (agent, process) = (familiar.clone(), reader.clone());
                     tauri::async_runtime::spawn(async move {
                         let command = value["request"]["input"]["tool_input"]["command"].as_str().unwrap_or_default();
                         let allowed = crate::permissions::check_command(&agent, command, uuid::Uuid::new_v4().to_string()).await;
@@ -292,12 +307,16 @@ impl Claude {
                     if finished && reader.interrupting.swap(false, Ordering::SeqCst) {
                         event = ProviderEvent::Stopped;
                     }
-                    let route = reader.route.lock().ok().and_then(|r| r.clone());
-                    if let Some(tx) = route {
-                        let _ = tx.send(event);
+                    if !finished {
+                        if let Some(tx) = reader.route.lock().ok().and_then(|r| r.clone()) {
+                            let _ = tx.send(event);
+                        }
+                        continue;
                     }
-                    if finished {
-                        reader.take_route();
+                    // Settle this turn before saying it's over: the next turn can start the moment it
+                    // hears, and it must not lose its route or inherit this turn's idle timer.
+                    let route = reader.take_route();
+                    {
                         let registry = registry.clone();
                         let id = agent_id.clone();
                         let idle = reader.clone();
@@ -311,6 +330,9 @@ impl Claude {
                             }
                             idle.kill();
                         });
+                    }
+                    if let Some(tx) = route {
+                        let _ = tx.send(event);
                     }
                 }
             }
@@ -344,7 +366,8 @@ fn tool_label(name: &str, input: &Value) -> String {
         "Grep" | "Glob" => field("pattern").map(|p| format!("{name} {p}")),
         "WebFetch" => field("url").map(|u| format!("Fetch {u}")),
         "WebSearch" => field("query").map(|q| format!("Search {q}")),
-        "mcp__grimoire__ask_familiar" => Some(crate::delegation::tool_label(input)),
+        // Grimoire adds its own row that opens the side conversation.
+        "mcp__grimoire__ask_familiar" | "mcp__grimoire__message_familiar" => Some(String::new()),
         _ => None,
     }
     .unwrap_or_else(|| name.to_string())
@@ -494,7 +517,7 @@ mod tests {
                 ProviderEvent::Delta("po".into()),
                 ProviderEvent::Delta("ng".into()),
                 ProviderEvent::Tool("$ ls -la".into()),
-                ProviderEvent::Tool("Asked Scribe".into()),
+                ProviderEvent::Tool(String::new()),
                 ProviderEvent::Delta("\n\n".into()),
                 ProviderEvent::Delta("done".into()),
                 ProviderEvent::Done,
@@ -555,12 +578,18 @@ mod tests {
             coven_id: None,
             created_at: 0,
         };
-        let joined = args(&agent).join(" ");
+        let joined = args(&agent, None).join(" ");
         assert!(joined.contains("--permission-mode bypassPermissions"));
         assert!(joined.contains("--model sonnet"));
         assert!(!joined.contains("--effort"));
         assert!(joined.ends_with("--resume s1"));
         assert!(!joined.contains("--append-system-prompt"), "no memory yet");
+
+        // A side conversation forks the main session first, then resumes its own.
+        let lane = |session| Lane { key: "a~c1".into(), session };
+        assert!(args(&agent, Some(&lane(LaneSession::Fork("s1".into())))).join(" ").ends_with("--resume s1 --fork-session"));
+        assert!(args(&agent, Some(&lane(LaneSession::Resume("s2".into())))).join(" ").ends_with("--resume s2"));
+        assert!(!args(&agent, Some(&lane(LaneSession::Fresh))).contains(&"--resume".to_string()));
     }
 
     #[test]
@@ -582,7 +611,7 @@ mod tests {
         let dir = crate::memory::test_dir();
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("memory-claude.md"), "The user's cat is Miso.").unwrap();
-        let args = args(&agent);
+        let args = args(&agent, None);
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
         assert!(args[at + 1].contains("<memory of=\"you\">\nThe user's cat is Miso.\n</memory>"));
     }
