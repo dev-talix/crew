@@ -55,6 +55,8 @@
   The helpers button in the chat header shows each one's status, time, and transcript, with a Stop
   button. Helpers still running when Grimoire quits show as interrupted at the next launch.
 - **Voice** dictation in the composer uses macOS speech recognition.
+- **Remote familiars** run on another Mac over SSH, so the menu bar app on your laptop can drive a
+  Mac Studio at home.
 
 <table>
   <tr>
@@ -122,6 +124,30 @@ it. The model chip in the composer shows the model it is running and switches it
 **Access.** "Workspace only" keeps Codex in its `workspace-write` sandbox and runs Claude in
 `acceptEdits` mode, so it can edit files but shell commands are refused. "Full access" uses Codex
 `danger-full-access` and Claude `bypassPermissions`. Neither asks for approval during a turn.
+
+### Familiars on another Mac
+
+Pick "Another Mac over SSH" under "Runs on" when you summon a familiar, and enter an SSH destination
+like `me@studio.local` or a `Host` alias from `~/.ssh/config`. Grimoire runs the CLI there with the
+system `ssh` and talks to it over the same stdio stream it uses locally. Set up the other Mac first:
+
+1. Turn on Remote Login in System Settings, General, Sharing.
+2. Make `ssh <destination>` work from Terminal with a key, without a password prompt. Grimoire runs
+   ssh with `BatchMode=yes`, so it can't answer prompts. Connect once in Terminal to accept the
+   host key.
+3. Install Codex or Claude on that Mac and sign in there. Grimoire runs it from a login shell
+   (`$SHELL -lc`), so PATH includes what your `.zprofile` or `.profile` adds.
+
+"Check connection" in the form shows whether the Mac answers and where `codex` and `claude` are on
+it. The workspace is a path on that Mac, a full path or one under `~/`, and defaults to a new folder
+in `~/Grimoire` there. Grimoire creates it when you summon the familiar.
+
+What doesn't cross machines yet: Grimoire's tools (saving memory, making spells and themes, the
+vault, and asking other familiars) need a socket on this Mac, so remote familiars run without them.
+They still get their memory when a chat starts, and other familiars can still ask them. Attachments
+are refused, and Finder can't open the workspace. The host can't be changed after you summon the
+familiar. Your Permissions rules still apply, since Codex and Claude ask Grimoire over the same
+stream.
 
 ## Attachments
 
@@ -346,8 +372,8 @@ Export a familiar from its settings, a spell from its editor, a coven from "Edit
 themes from the theme editor. Each becomes one JSON file, like `Researcher.grimoire.json`, with a
 `kind` and a `version`:
 
-- A familiar carries its name, provider, model, effort, access, avatar, and budget. Never its
-  workspace folder, session, or chat.
+- A familiar carries its name, provider, model, effort, access, avatar, and budget, and the SSH
+  destination of a familiar on another Mac. Never its workspace folder, session, or chat.
 - A spell names the familiar for each step, so it works on another Mac with familiars of those names.
 - A coven carries its members' names. A theme is the same JSON as a file in the themes folder.
 
@@ -431,7 +457,8 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
 - **Processes.** Nothing starts at launch. Codex familiars share one `codex app-server` process
   (JSON-RPC over stdio), started on the first Codex message and stopped after 10 idle minutes. Each
   Claude familiar gets one `claude -p --input-format stream-json` process, started on its first
-  message and stopped after 5 idle minutes. Closing Grimoire stops them all.
+  message and stopped after 5 idle minutes. Closing Grimoire stops them all. A familiar on another
+  Mac runs the same command through `ssh -T`, and each remote Codex workspace gets its own app server.
 - **Sessions.** Each chat saves its Codex thread ID or Claude session ID, so a restart resumes the
   same conversation. "New chat" starts a chat with no session; opening an older chat loads its
   session for the next turn. The current chat's session is also kept on the familiar, which is what

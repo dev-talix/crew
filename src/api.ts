@@ -26,7 +26,17 @@ export interface Agent {
   activeModel: string | null;
   /** The coven it sits in, if any. */
   covenId: string | null;
+  /** The SSH destination of the Mac it runs on. Null runs it on this Mac. */
+  host: string | null;
   createdAt: number;
+}
+
+/** What "Check connection" found on another Mac. */
+export interface HostCheck {
+  reachable: boolean;
+  codex: string | null;
+  claude: string | null;
+  error: string | null;
 }
 
 export interface Coven {
@@ -293,6 +303,8 @@ export interface NewAgentInput {
   avatar: Avatar;
   effort: string;
   covenId?: string | null;
+  /** An SSH destination to run it on another Mac. */
+  host?: string;
 }
 
 export interface AgentChanges {
@@ -450,6 +462,7 @@ export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
   providerStatus: () => invoke<ProviderStatus[]>("provider_status"),
+  checkHost: (host: string) => invoke<HostCheck>("check_host", { host }),
   listRoutines: () => invoke<Routine[]>("list_routines"),
   saveRoutine: (input: RoutineInput) => invoke<Routine>("save_routine", { input }),
   deleteRoutine: (id: string) => invoke<void>("delete_routine", { id }),

@@ -1,4 +1,4 @@
-use super::{command, spawn_error, EventTx, IdleTimer, Lane, LaneSession, ProviderEvent, StderrTail};
+use super::{launch, spawn_error, EventTx, IdleTimer, Lane, LaneSession, ProviderEvent, StderrTail};
 use crate::db::{Access, Agent};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -69,7 +69,7 @@ pub struct Claude {
 }
 
 fn config_key(agent: &Agent) -> String {
-    format!("{:?}|{:?}|{:?}|{}", agent.model, agent.effort, agent.access, agent.workspace)
+    format!("{:?}|{:?}|{:?}|{}|{:?}", agent.model, agent.effort, agent.access, agent.workspace, agent.host)
 }
 
 fn args(agent: &Agent, lane: Option<&Lane>) -> Vec<String> {
@@ -91,7 +91,8 @@ fn args(agent: &Agent, lane: Option<&Lane>) -> Vec<String> {
         Access::Full => "bypassPermissions".into(),
     });
     // In a side conversation, Grimoire's tools know which one the familiar is calling from.
-    if let Some(tools) = crate::tools::server_command(lane.map_or(&agent.id, |l| &l.key)) {
+    // The tool socket is on this Mac, so a familiar on another Mac runs without the tools.
+    if let Some(tools) = crate::tools::server_command(lane.map_or(&agent.id, |l| &l.key)).filter(|_| agent.host.is_none()) {
         // "timeout" (ms) caps each tool call, and also lifts Claude's idle cutoff for silent calls like ask_familiar.
         let server = json!({
             "command": tools.command,
@@ -264,8 +265,7 @@ impl Claude {
             }
             existing.kill();
         }
-        let mut child = command("claude", &agent.workspace)
-            .args(args(agent, lane))
+        let mut child = launch(agent.host.as_deref(), &agent.workspace, "claude", args(agent, lane))
             .spawn()
             .map_err(|e| spawn_error("claude", e))?;
         let stdin = child.stdin.take().ok_or("claude has no stdin")?;
@@ -583,6 +583,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: 0,
         };
         let joined = args(&agent, None).join(" ");
@@ -613,6 +614,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: 0,
         };
         let dir = crate::memory::test_dir();

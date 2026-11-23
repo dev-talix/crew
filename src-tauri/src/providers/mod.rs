@@ -106,6 +106,18 @@ pub fn command(program: &str, cwd: &str) -> Command {
     cmd
 }
 
+/// `program` in a familiar's workspace: on this Mac, or over ssh on its host.
+pub fn launch(host: Option<&str>, workspace: &str, program: &str, args: Vec<String>) -> Command {
+    match host {
+        Some(host) => crate::remote::command(host, workspace, program, &args),
+        None => {
+            let mut cmd = command(program, workspace);
+            cmd.args(args);
+            cmd
+        }
+    }
+}
+
 pub fn spawn_error(program: &str, err: std::io::Error) -> String {
     if err.kind() == std::io::ErrorKind::NotFound {
         format!("`{program}` is not installed or not on your PATH.")

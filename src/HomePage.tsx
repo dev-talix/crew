@@ -197,6 +197,7 @@ export default function HomePage(props: {
                       </span>
                       <span class="home-meta">
                         <span>{PROVIDER_NAMES[agent.provider]}</span>
+                        <Show when={agent.host}>{(host) => <span class="remote-badge">{host()}</span>}</Show>
                         <Show when={last[agent.id]}>{(m) => <span>{ago(m().createdAt)}</span>}</Show>
                       </span>
                     </button>

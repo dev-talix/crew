@@ -67,6 +67,8 @@ pub struct Runtime {
     db: Arc<Db>,
     app: AppHandle,
     codex: Arc<Codex>,
+    /// Codex app servers on other Macs, one per host and workspace, since each runs in its workspace.
+    remote_codex: Mutex<HashMap<(String, String), Arc<Codex>>>,
     claude: Claude,
     agents: Mutex<HashMap<String, AgentState>>,
     /// One turn at a time in each side conversation, by lane key.
@@ -106,10 +108,26 @@ impl Runtime {
             db,
             app,
             codex: Arc::new(Codex::default()),
+            remote_codex: Mutex::new(HashMap::new()),
             claude: Claude::default(),
             agents: Mutex::new(HashMap::new()),
             sides: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The Codex app server a familiar's turns go to: the local one, or one on its host.
+    fn codex_for(&self, agent: &Agent) -> Arc<Codex> {
+        let Some(host) = &agent.host else { return self.codex.clone() };
+        let Ok(mut remote) = self.remote_codex.lock() else { return Arc::new(Codex::on(host)) };
+        remote.entry((host.clone(), agent.workspace.clone())).or_insert_with(|| Arc::new(Codex::on(host))).clone()
+    }
+
+    fn all_codex(&self) -> Vec<Arc<Codex>> {
+        let mut all = vec![self.codex.clone()];
+        if let Ok(remote) = self.remote_codex.lock() {
+            all.extend(remote.values().cloned());
+        }
+        all
     }
 
     pub fn busy_agents(&self) -> Vec<String> {
@@ -149,8 +167,9 @@ impl Runtime {
         staged: Staged,
         reply: Option<Reply>,
     ) -> Result<Message, String> {
-        if self.db.get_agent(agent_id)?.is_none() {
-            return Err("That familiar no longer exists.".into());
+        let agent = self.db.get_agent(agent_id)?.ok_or("That familiar no longer exists.")?;
+        if agent.host.is_some() && !staged.is_empty() {
+            return Err("Attachments can't reach a familiar on another Mac yet. Send the message without them.".into());
         }
         if let Err(reason) = crate::budgets::check_turn(&self.db, agent_id) {
             // Spells and rituals have no composer to show the refusal, so it goes in the chat.
@@ -191,9 +210,9 @@ impl Runtime {
                 let _ = reply.send(TurnOutcome::Stopped);
             }
         }
-        match self.db.get_agent(agent_id)?.map(|a| a.provider) {
-            Some(Provider::Codex) => self.codex.stop(agent_id).await,
-            Some(Provider::Claude) => {
+        match self.db.get_agent(agent_id)? {
+            Some(agent) if agent.provider == Provider::Codex => self.codex_for(&agent).stop(agent_id).await,
+            Some(_) => {
                 self.claude.stop(agent_id).await;
                 Ok(())
             }
@@ -222,7 +241,9 @@ impl Runtime {
     }
 
     pub async fn settings_changed(&self, agent_id: &str) {
-        self.codex.reload_thread(agent_id).await;
+        for codex in self.all_codex() {
+            codex.reload_thread(agent_id).await;
+        }
     }
 
     pub fn claude_billing_changed(&self) {
@@ -230,7 +251,7 @@ impl Runtime {
     }
 
     pub fn reset_session(&self, agent_id: &str) {
-        self.codex.forget(agent_id);
+        self.all_codex().iter().for_each(|codex| codex.forget(agent_id));
         self.claude.forget(agent_id);
     }
 
@@ -239,8 +260,10 @@ impl Runtime {
         self.reset_session(agent_id);
         // Its side conversations go with it, so stop any turn still running in one.
         for key in crate::side::lanes_of(&self.db, agent_id)? {
-            let _ = self.codex.stop(&key).await;
-            self.codex.forget(&key);
+            for codex in self.all_codex() {
+                let _ = codex.stop(&key).await;
+                codex.forget(&key);
+            }
             self.claude.forget(&key);
         }
         if let Ok(mut agents) = self.agents.lock() {
@@ -323,7 +346,7 @@ impl Runtime {
         let prompt = crate::side::framed(asker, message);
         let (tx, rx) = mpsc::unbounded_channel();
         let started = match agent.provider {
-            Provider::Codex => self.codex.start_turn_in(&agent, Some(&lane), &prompt, &[], tx).await,
+            Provider::Codex => self.codex_for(&agent).start_turn_in(&agent, Some(&lane), &prompt, &[], tx).await,
             Provider::Claude => self.claude.start_turn_in(&agent, Some(&lane), &prompt, &[], tx).await,
         };
         match started {
@@ -392,7 +415,7 @@ impl Runtime {
         }
         let (tx, rx) = mpsc::unbounded_channel();
         let started = match agent.provider {
-            Provider::Codex => self.codex.start_turn(&agent, &input.text, &input.images, tx).await,
+            Provider::Codex => self.codex_for(&agent).start_turn(&agent, &input.text, &input.images, tx).await,
             Provider::Claude => self.claude.start_turn(&agent, &input.text, &input.images, tx).await,
         };
         match started {
@@ -659,6 +682,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: now_ms(),
         };
         db.insert_agent(&agent).unwrap();
@@ -773,6 +797,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: now_ms(),
         };
         db.insert_agent(&agent).unwrap();
@@ -837,6 +862,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: now_ms(),
         };
         db.insert_agent(&agent).unwrap();

@@ -80,6 +80,9 @@ pub struct FamiliarDoc {
     pub effort: Option<String>,
     pub access: Access,
     pub avatar: Avatar,
+    /// The SSH destination of the Mac it runs on, for a familiar on another Mac.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<Budget>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -177,6 +180,7 @@ fn familiar_doc(db: &Db, agent: &Agent, history: bool) -> Result<FamiliarDoc, St
         effort: agent.effort.clone(),
         access: agent.access.clone(),
         avatar: agent.avatar.clone(),
+        host: agent.host.clone(),
         budget: budgets::get(db, &agent.id)?,
         history,
         memory: Vec::new(),
@@ -437,9 +441,10 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
         let checked = crate::clean_name(&doc.name)
             .and_then(|name| doc.avatar.validate().map(|_| name))
             .and_then(|name| crate::clean_effort(doc.effort.clone()).map(|effort| (name, effort)))
-            .and_then(|pair| doc.budget.as_ref().map_or(Ok(()), Budget::validate).map(|_| pair));
-        let (name, effort) = match checked {
-            Ok(pair) => pair,
+            .and_then(|pair| doc.budget.as_ref().map_or(Ok(()), Budget::validate).map(|_| pair))
+            .and_then(|(name, effort)| crate::remote::clean_host(doc.host.as_deref()).map(|host| (name, effort, host)));
+        let (name, effort, host) = match checked {
+            Ok(checked) => checked,
             Err(why) => {
                 items.push(skipped("familiar", &doc.name, why));
                 continue;
@@ -447,12 +452,22 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
         };
         let id = uuid::Uuid::new_v4().to_string();
         let final_name = unique(&name, &mut taken, 60);
-        let workspace = crate::workspace_for(None, &final_name, &id, home)?;
         let mut line = item("familiar", &doc.name, &name, final_name.clone());
         if line.conflict {
             line.notes.push(format!("You already have a familiar named {name}, so this one becomes {final_name}."));
         }
-        line.notes.push(format!("Gets a new workspace folder in {}.", shortened(workspace.parent().unwrap_or(home), home)));
+        let workspace = match &host {
+            Some(host) => {
+                let workspace = crate::remote::clean_workspace(None, &final_name, &id)?;
+                line.notes.push(format!("Runs on {host} over SSH, in {workspace} there, without Grimoire's tools."));
+                workspace
+            }
+            None => {
+                let workspace = crate::workspace_for(None, &final_name, &id, home)?;
+                line.notes.push(format!("Gets a new workspace folder in {}.", shortened(workspace.parent().unwrap_or(home), home)));
+                workspace.to_string_lossy().into_owned()
+            }
+        };
         if !doc.history.is_empty() {
             line.notes.push(format!("Brings {} chat messages.", doc.history.len()));
         }
@@ -478,13 +493,14 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
                 name: final_name,
                 provider: doc.provider,
                 model: crate::clean_model(doc.model),
-                workspace: workspace.to_string_lossy().into_owned(),
+                workspace,
                 access,
                 session_id: None,
                 avatar: doc.avatar,
                 effort,
                 active_model: None,
                 coven_id: None,
+                host,
                 created_at: now,
             },
             budget: doc.budget,
@@ -699,9 +715,9 @@ fn write_rows(c: &rusqlite::Connection, plan: &Plan) -> rusqlite::Result<()> {
     for new in &plan.familiars {
         let a = &new.agent;
         c.execute(
-            "INSERT INTO agents (id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, coven_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, NULL)",
-            params![a.id, a.name, column(&a.provider), a.model, a.workspace, column(&a.access), a.created_at, serde_json::to_string(&a.avatar).unwrap_or_default(), a.effort],
+            "INSERT INTO agents (id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, coven_id, host)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, NULL, ?10)",
+            params![a.id, a.name, column(&a.provider), a.model, a.workspace, column(&a.access), a.created_at, serde_json::to_string(&a.avatar).unwrap_or_default(), a.effort, a.host],
         )?;
         if let Some(budget) = &new.budget {
             budgets::insert_on(c, &a.id, budget)?;
@@ -772,7 +788,8 @@ pub fn apply(db: &Db, themes_dir: &Path, plan: &Plan) -> Result<Imported, String
                 written.push(memory::write_imported(owner, entries)?);
             }
         }
-        for new in &plan.familiars {
+        // A familiar on another Mac makes its workspace there when it first starts.
+        for new in plan.familiars.iter().filter(|f| f.agent.host.is_none()) {
             let path = PathBuf::from(&new.agent.workspace);
             if !path.exists() {
                 std::fs::create_dir_all(&path).map_err(|e| format!("Could not create {}: {e}", path.display()))?;
@@ -910,6 +927,7 @@ mod tests {
             effort: Some("high".into()),
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: 1,
         };
         db.insert_agent(&agent).unwrap();
@@ -1081,6 +1099,36 @@ mod tests {
     }
 
     #[test]
+    fn remote_familiars_keep_their_host_and_make_no_local_folder() {
+        let themes = temp_dir("themes");
+        let home = temp_dir("home");
+        let db = Db::open_in_memory().unwrap();
+        let mut studio = familiar(&db, "st", "Studio");
+        studio.host = Some("me@studio.local".into());
+        db.delete_agent("st").unwrap();
+        db.insert_agent(&studio).unwrap();
+        let (file, _) = export_one(&db, &themes, Kind::Familiar, "st").unwrap();
+        let text = serde_json::to_string(&file).unwrap();
+        assert!(text.contains(r#""host":"me@studio.local""#), "{text}");
+
+        let mut file = parse(&text).unwrap();
+        let mut bad = file.familiars[0].clone();
+        bad.name = "Sneaky".into();
+        bad.host = Some("-oProxyCommand=sh".into());
+        file.familiars.push(bad);
+        let p = plan(&db, &themes, file, &home, false).unwrap();
+        assert!(p.preview.items.iter().find(|i| i.name == "Sneaky").unwrap().skipped, "a bad host is refused");
+        assert_eq!(p.familiars.len(), 1);
+        apply(&db, &themes, &p).unwrap();
+        let copy = db.list_agents().unwrap().into_iter().find(|a| a.name == "Studio (2)").unwrap();
+        assert_eq!(copy.host.as_deref(), Some("me@studio.local"));
+        assert!(copy.workspace.starts_with("~/Grimoire/studio-"), "{}", copy.workspace);
+        assert!(!home.join("Grimoire").exists(), "no folder on this Mac");
+        std::fs::remove_dir_all(themes).unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn single_spells_use_your_familiars_by_name() {
         let themes = temp_dir("themes");
         let home = temp_dir("home");
@@ -1132,6 +1180,7 @@ mod tests {
             effort: None,
             access: Access::Workspace,
             avatar: Avatar::for_seed("ada"),
+            host: None,
             budget: None,
             history: vec![],
             memory: memory::from_markdown("- Likes tea.", "2026-11-23"),

@@ -469,9 +469,20 @@ export default function Chat(props: {
             <span class="crumb-sep" aria-hidden="true">
               /
             </span>
-            <button class="crumb-link" title={`Open ${props.agent.workspace} in Finder`} onClick={() => run(() => api.openWorkspace(props.agent.id))}>
-              {folder()}
-            </button>
+            <Show
+              when={props.agent.host}
+              fallback={
+                <button class="crumb-link" title={`Open ${props.agent.workspace} in Finder`} onClick={() => run(() => api.openWorkspace(props.agent.id))}>
+                  {folder()}
+                </button>
+              }
+            >
+              {(host) => (
+                <span class="remote-badge" title={`Runs in ${props.agent.workspace} on ${host()} over SSH, without Grimoire's tools`}>
+                  {host()}
+                </span>
+              )}
+            </Show>
           </Show>
           <span class="crumb-sep" aria-hidden="true">
             /

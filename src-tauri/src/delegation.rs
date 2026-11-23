@@ -408,6 +408,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: coven.map(String::from),
+            host: None,
             created_at: now_ms(),
         };
         db.insert_agent(&agent).unwrap();
@@ -670,6 +671,7 @@ mod tests {
                 effort: effort.map(String::from),
                 active_model: None,
                 coven_id: None,
+                host: None,
                 created_at: now_ms(),
             };
             db.insert_agent(&agent).unwrap();

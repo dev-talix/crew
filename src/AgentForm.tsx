@@ -2,7 +2,7 @@ import { createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 import AvatarStudio from "./AvatarStudio";
 import { Segmented } from "./ui";
 import { inkFor, randomAvatar, type Avatar } from "./avatar";
-import { api, createFetch, errorText, PROVIDER_NAMES, shortPath, type Access, type Agent, type Coven, type Provider } from "./api";
+import { api, createFetch, errorText, PROVIDER_NAMES, shortPath, type Access, type Agent, type Coven, type HostCheck, type Provider } from "./api";
 import { effortName, modelCatalog, modelName } from "./models";
 import { BudgetField } from "./BudgetControls";
 import { formatTokens, parseTokens, type BudgetPeriod } from "./budgets";
@@ -18,6 +18,14 @@ const ACCESS_HELP: Record<Provider, Record<Access, string>> = {
     full: "Runs any command without asking.",
   },
 };
+
+function checkSummary(result: HostCheck | string, provider: Provider): string {
+  if (typeof result === "string") return result;
+  if (!result.reachable) return result.error ?? "Could not connect.";
+  const where = (path: string | null) => path ?? "not found";
+  const missing = result[provider] ? "" : ` Install ${PROVIDER_NAMES[provider]} on that Mac before you summon this familiar.`;
+  return `Connected. Codex: ${where(result.codex)}. Claude: ${where(result.claude)}.${missing}`;
+}
 
 export default function AgentForm(props: {
   agent?: Agent;
@@ -47,6 +55,21 @@ export default function AgentForm(props: {
     setEffort("");
   };
   const [workspace, setWorkspace] = createSignal("");
+  const [remote, setRemote] = createSignal(false);
+  const [host, setHost] = createSignal("");
+  const [checking, setChecking] = createSignal(false);
+  const [check, setCheck] = createSignal<HostCheck | string | null>(null);
+  const checkConnection = async () => {
+    setChecking(true);
+    setCheck(null);
+    try {
+      setCheck(await api.checkHost(host()));
+    } catch (err) {
+      setCheck(errorText(err));
+    } finally {
+      setChecking(false);
+    }
+  };
   const [access, setAccess] = createSignal<Access>(props.agent?.access ?? "workspace");
   const [avatar, setAvatar] = createSignal<Avatar>(props.agent?.avatar ?? randomAvatar());
   const [error, setError] = createSignal("");
@@ -78,6 +101,10 @@ export default function AgentForm(props: {
       setError("Write the budget as a number of tokens, like 50000 or 50k, or leave it empty for no limit.");
       return;
     }
+    if (!editing && remote() && !host().trim()) {
+      setError("Write the other Mac's SSH destination, like me@studio.local.");
+      return;
+    }
     setSaving(true);
     try {
       const saved = props.agent
@@ -91,6 +118,7 @@ export default function AgentForm(props: {
             avatar: avatar(),
             effort: effort(),
             covenId: coven() || null,
+            host: remote() ? host() : "",
           });
       if (tokens !== null || hadBudget) await api.setBudget(saved.id, tokens === null ? null : { tokens, period: period() });
       props.onSaved(saved);
@@ -138,15 +166,16 @@ export default function AgentForm(props: {
             <div class="field">
               <span>Runs on</span>
               <p class="readonly">
-                {PROVIDER_NAMES[provider()]} in {shortPath(props.agent!.workspace)}
+                {PROVIDER_NAMES[provider()]}
+                {props.agent!.host ? ` on ${props.agent!.host}` : ""} in {shortPath(props.agent!.workspace)}
               </p>
             </div>
           }
         >
           <div class="field">
-            <span>Runs on</span>
+            <span>Provider</span>
             <Segmented
-              label="Runs on"
+              label="Provider"
               value={provider()}
               options={[
                 { value: "codex", label: "Codex" },
@@ -187,9 +216,60 @@ export default function AgentForm(props: {
         </Show>
 
         <Show when={!editing}>
+          <div class="field wide">
+            <span>Runs on</span>
+            <Segmented
+              label="Runs on"
+              value={remote() ? "ssh" : "here"}
+              options={[
+                { value: "here", label: "This Mac" },
+                { value: "ssh", label: "Another Mac over SSH" },
+              ]}
+              onChange={(next) => setRemote(next === "ssh")}
+            />
+            <Show when={remote()}>
+              <p class="hint">
+                SSH must sign in with a key, without a password prompt, and {PROVIDER_NAMES[provider()]} must be installed and signed in on
+                that Mac. Familiars there run without Grimoire's tools and can't take attachments yet.
+              </p>
+            </Show>
+          </div>
+          <Show when={remote()}>
+            <label class="field">
+              <span>SSH destination</span>
+              <input
+                value={host()}
+                onInput={(e) => {
+                  setHost(e.currentTarget.value);
+                  setCheck(null);
+                }}
+                placeholder="me@studio.local"
+                autocapitalize="off"
+                spellcheck={false}
+                required
+              />
+            </label>
+            <div class="field">
+              <span>Connection</span>
+              <button type="button" class="ghost check-button" disabled={checking() || !host().trim()} onClick={checkConnection}>
+                {checking() ? "Checking..." : "Check connection"}
+              </button>
+            </div>
+            <Show when={check()}>
+              {(result) => (
+                <p class="hint check-result" role="status">
+                  {checkSummary(result(), provider())}
+                </p>
+              )}
+            </Show>
+          </Show>
           <label class="field">
-            <span>Workspace folder</span>
-            <input value={workspace()} onInput={(e) => setWorkspace(e.currentTarget.value)} placeholder="A new folder in ~/Grimoire" />
+            <span>{remote() ? "Workspace on that Mac" : "Workspace folder"}</span>
+            <input
+              value={workspace()}
+              onInput={(e) => setWorkspace(e.currentTarget.value)}
+              placeholder={remote() ? "A new folder in ~/Grimoire there" : "A new folder in ~/Grimoire"}
+            />
           </label>
         </Show>
 

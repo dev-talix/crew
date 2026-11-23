@@ -17,6 +17,7 @@ mod memory;
 mod notify;
 mod permissions;
 mod providers;
+mod remote;
 mod routines;
 mod runtime;
 mod side;
@@ -67,6 +68,9 @@ struct NewAgent {
     effort: Option<String>,
     #[serde(default)]
     coven_id: Option<String>,
+    /// An SSH destination to run the familiar on another Mac. Empty runs it here.
+    #[serde(default)]
+    host: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -195,24 +199,38 @@ fn busy_agents(state: State<AppState>) -> Vec<String> {
 }
 
 #[tauri::command]
-fn create_agent(app: AppHandle, state: State<AppState>, input: NewAgent) -> Result<Agent, String> {
+async fn create_agent(app: AppHandle, state: State<'_, AppState>, input: NewAgent) -> Result<Agent, String> {
     let name = clean_name(&input.name)?;
     input.avatar.validate()?;
     let id = uuid::Uuid::new_v4().to_string();
-    let workspace = workspace_for(input.workspace.as_deref(), &name, &id, &home()?)?;
-    std::fs::create_dir_all(&workspace).map_err(|e| format!("Could not create {}: {e}", workspace.display()))?;
+    let host = remote::clean_host(input.host.as_deref())?;
+    let effort = clean_effort(input.effort)?;
+    let coven_id = clean_coven(&state.db, input.coven_id)?;
+    let workspace = match &host {
+        Some(host) => {
+            let workspace = remote::clean_workspace(input.workspace.as_deref(), &name, &id)?;
+            remote::make_workspace(host, &workspace).await?;
+            workspace
+        }
+        None => {
+            let workspace = workspace_for(input.workspace.as_deref(), &name, &id, &home()?)?;
+            std::fs::create_dir_all(&workspace).map_err(|e| format!("Could not create {}: {e}", workspace.display()))?;
+            workspace.to_string_lossy().into_owned()
+        }
+    };
     let agent = Agent {
         id,
         name,
         provider: input.provider,
         model: clean_model(input.model),
-        workspace: workspace.to_string_lossy().into_owned(),
+        workspace,
         access: input.access,
         session_id: None,
         avatar: input.avatar,
-        effort: clean_effort(input.effort)?,
+        effort,
         active_model: None,
-        coven_id: clean_coven(&state.db, input.coven_id)?,
+        coven_id,
+        host,
         created_at: now_ms(),
     };
     state.db.insert_agent(&agent)?;
@@ -247,6 +265,9 @@ async fn update_agent(
 #[tauri::command]
 fn open_workspace(app: AppHandle, state: State<AppState>, agent_id: String) -> Result<(), String> {
     let agent = state.db.get_agent(&agent_id)?.ok_or("That familiar no longer exists.")?;
+    if let Some(host) = &agent.host {
+        return Err(format!("This familiar's workspace is {} on {host}, so Finder can't open it here.", agent.workspace));
+    }
     app.opener().open_path(&agent.workspace, None::<&str>).map_err(|e| e.to_string())
 }
 
@@ -774,7 +795,8 @@ pub fn run() {
             memory::add_memory,
             drafts::list_drafts,
             drafts::close_draft,
-            drafts::open_draft_link
+            drafts::open_draft_link,
+            remote::check_host
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {

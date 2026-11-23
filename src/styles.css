@@ -399,6 +399,29 @@ button:disabled {
   font-size: 12.5px;
 }
 
+.check-button {
+  width: fit-content;
+  height: 34px;
+}
+
+.check-result {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+/* The host of a familiar that runs on another Mac. */
+.remote-badge {
+  max-width: 160px;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .form-actions {
   display: flex;
   align-items: center;

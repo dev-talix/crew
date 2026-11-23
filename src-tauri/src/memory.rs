@@ -651,6 +651,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: coven.map(String::from),
+            host: None,
             created_at: now_ms(),
         };
         db.insert_agent(&agent).unwrap();
@@ -906,6 +907,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: Some("live-coven".into()),
+            host: None,
             created_at: now_ms(),
         };
         let prompt = "What do you remember about me and about my coven? Answer in one short sentence and don't use any tools.";

@@ -72,6 +72,10 @@ pub struct Agent {
     /// The coven this familiar sits in, if any.
     #[serde(default)]
     pub coven_id: Option<String>,
+    /// The SSH destination of the Mac it runs on. None runs it on this Mac, and then `workspace` is a
+    /// local folder; otherwise `workspace` is a path on that Mac, maybe starting with ~/.
+    #[serde(default)]
+    pub host: Option<String>,
     pub created_at: i64,
 }
 
@@ -246,7 +250,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -488,6 +492,14 @@ impl Db {
         if version < 19 {
             crate::drafts::migrate(&conn)?;
         }
+        if version < 20 {
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE agents ADD COLUMN host TEXT;
+                 PRAGMA user_version = 20;
+                 COMMIT;",
+            )?;
+        }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
             [],
@@ -505,7 +517,7 @@ impl Db {
     pub fn list_agents(&self) -> Result<Vec<Agent>, String> {
         self.with(|c| {
             let mut stmt = c.prepare_cached(
-                "SELECT id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, active_model, coven_id
+                "SELECT id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, active_model, coven_id, host
                  FROM agents ORDER BY created_at",
             )?;
             let rows = stmt.query_map([], row_to_agent)?;
@@ -516,7 +528,7 @@ impl Db {
     pub fn get_agent(&self, id: &str) -> Result<Option<Agent>, String> {
         self.with(|c| {
             c.prepare_cached(
-                "SELECT id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, active_model, coven_id
+                "SELECT id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, active_model, coven_id, host
                  FROM agents WHERE id = ?1",
             )?
             .query_row(params![id], row_to_agent)
@@ -527,8 +539,8 @@ impl Db {
     pub fn insert_agent(&self, agent: &Agent) -> Result<(), String> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO agents (id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, coven_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO agents (id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, coven_id, host)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     agent.id,
                     agent.name,
@@ -540,7 +552,8 @@ impl Db {
                     agent.created_at,
                     agent.avatar.to_column(),
                     agent.effort,
-                    agent.coven_id
+                    agent.coven_id,
+                    agent.host
                 ],
             )
             .map(|_| ())
@@ -865,6 +878,7 @@ fn row_to_agent(r: &rusqlite::Row) -> rusqlite::Result<Agent> {
         effort: r.get(9)?,
         active_model: r.get(10)?,
         coven_id: r.get(11)?,
+        host: r.get(12)?,
     })
 }
 
@@ -885,6 +899,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: now_ms(),
         }
     }
@@ -978,6 +993,19 @@ mod tests {
         assert_eq!(db.last_messages().unwrap()[0].source.as_deref(), Some("Morning check"));
         db.delete_agent("a").unwrap();
         assert!(db.list_routines().unwrap().is_empty());
+    }
+
+    #[test]
+    fn saves_the_host_of_a_remote_familiar() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_agent(&agent("local")).unwrap();
+        let remote = Agent { host: Some("me@studio.local".into()), workspace: "~/Grimoire/r".into(), ..agent("remote") };
+        db.insert_agent(&remote).unwrap();
+        assert_eq!(db.get_agent("local").unwrap().unwrap().host, None);
+        let saved = db.get_agent("remote").unwrap().unwrap();
+        assert_eq!((saved.host.as_deref(), saved.workspace.as_str()), (Some("me@studio.local"), "~/Grimoire/r"));
+        db.update_agent(&Agent { name: "Renamed".into(), ..saved }).unwrap();
+        assert_eq!(db.list_agents().unwrap()[1].host.as_deref(), Some("me@studio.local"), "edits keep the host");
     }
 
     #[test]
