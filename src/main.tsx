@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { render } from "solid-js/web";
+import { render } from "@solidjs/web";
 import App from "./App";
 import Dock from "./Dock";
 import { applyStoredTheme } from "./SettingsPage";

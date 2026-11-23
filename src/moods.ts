@@ -1,5 +1,4 @@
-import { onCleanup } from "solid-js";
-import { createStore } from "solid-js/store";
+import { createStore, onCleanup } from "solid-js";
 import type { Message } from "./api";
 import type { Mood } from "./BotAvatar";
 
@@ -8,15 +7,25 @@ const CONCERNED_MS = 3600;
 
 export function createMoods() {
   const [flash, setFlash] = createStore<Record<string, Mood | undefined>>({});
+  // Store writes apply on the next microtask, so decisions read this plain copy instead.
+  const current = new Map<string, Mood>();
   const timers = new Map<string, number>();
   onCleanup(() => timers.forEach(clearTimeout));
 
+  const set = (agentId: string, mood: Mood | undefined) => {
+    if (mood) current.set(agentId, mood);
+    else current.delete(agentId);
+    setFlash((moods) => {
+      moods[agentId] = mood;
+    });
+  };
+
   const show = (agentId: string, mood: Mood, ms: number) => {
     clearTimeout(timers.get(agentId));
-    setFlash(agentId, mood);
+    set(agentId, mood);
     timers.set(
       agentId,
-      window.setTimeout(() => setFlash(agentId, undefined), ms),
+      window.setTimeout(() => set(agentId, undefined), ms),
     );
   };
 
@@ -26,8 +35,8 @@ export function createMoods() {
       if (message.role === "error") show(message.agentId, "concerned", CONCERNED_MS);
     },
     onStatus: (agentId: string, busy: boolean) => {
-      if (busy) setFlash(agentId, undefined);
-      else if (flash[agentId] !== "concerned") show(agentId, "happy", HAPPY_MS);
+      if (busy) set(agentId, undefined);
+      else if (current.get(agentId) !== "concerned") show(agentId, "happy", HAPPY_MS);
     },
   };
 }

@@ -1,8 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { createStore } from "solid-js/store";
+import { createMemo, createSignal, createStore, For, onCleanup, Show } from "solid-js";
 import BotAvatar, { type Mood } from "./BotAvatar";
-import { api, describeSchedule, onEvent, PROVIDER_NAMES, relativeTime, type Agent, type Message, type Routine } from "./api";
+import { api, describeSchedule, onEvent, onMountAsync, PROVIDER_NAMES, relativeTime, type Agent, type Message, type Routine } from "./api";
 import { PlusIcon } from "./icons";
 import { EmptyState, Page } from "./ui";
 
@@ -31,19 +30,23 @@ export default function HomePage(props: {
 
   const loadRoutines = () => api.listRoutines().then(setRoutines).catch(() => undefined);
 
-  onMount(async () => {
+  onMountAsync(async (keep) => {
     const messages = await api.lastMessages().catch(() => [] as Message[]);
-    messages.forEach((m) => setLast(m.agentId, m));
+    setLast((last) => {
+      for (const m of messages) last[m.agentId] = m;
+    });
     void loadRoutines();
     const stops = await Promise.all([
       listen<Message>("message", ({ payload }) => {
         if ((payload.role === "user" || payload.role === "assistant") && payload.status !== "streaming") {
-          setLast(payload.agentId, payload);
+          setLast((last) => {
+            last[payload.agentId] = payload;
+          });
         }
       }),
       onEvent("routines_changed", loadRoutines),
     ]);
-    onCleanup(() => stops.forEach((stop) => stop()));
+    stops.forEach(keep);
   });
 
   const tick = setInterval(() => setNow(Date.now()), 60_000);

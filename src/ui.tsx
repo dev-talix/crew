@@ -1,4 +1,5 @@
-import { For, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { For, onSettled, Show } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import BotAvatar from "./BotAvatar";
 import type { Agent } from "./api";
 
@@ -27,11 +28,13 @@ export function EmptyState(props: { title: string; body: string; action?: JSX.El
 
 export function Sheet(props: { label: string; onClose: () => void; children: JSX.Element; wide?: boolean }) {
   const onKey = (e: KeyboardEvent) => e.key === "Escape" && props.onClose();
-  onMount(() => window.addEventListener("keydown", onKey));
-  onCleanup(() => window.removeEventListener("keydown", onKey));
+  onSettled(() => {
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
   return (
     <div class="sheet-backdrop" onClick={(e) => e.target === e.currentTarget && props.onClose()}>
-      <div class="sheet" classList={{ narrow: !props.wide }} role="dialog" aria-modal="true" aria-label={props.label}>
+      <div class={["sheet", { narrow: !props.wide }]} role="dialog" aria-modal="true" aria-label={props.label}>
         {props.children}
       </div>
     </div>
@@ -51,8 +54,8 @@ export function Segmented<T extends string>(props: {
           <button
             type="button"
             role="radio"
-            aria-checked={props.value === option.value}
-            classList={{ on: props.value === option.value }}
+            aria-checked={props.value === option.value ? "true" : "false"}
+            class={{ on: props.value === option.value }}
             onClick={() => props.onChange(option.value)}
           >
             {option.label}
@@ -70,7 +73,7 @@ export function Toggle(props: { label: string; checked: boolean; onChange: (chec
       role="switch"
       class="toggle"
       aria-label={props.label}
-      aria-checked={props.checked}
+      aria-checked={props.checked ? "true" : "false"}
       disabled={props.disabled}
       onClick={() => props.onChange(!props.checked)}
     >

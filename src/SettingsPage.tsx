@@ -1,6 +1,6 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { createResource, createSignal, For, Show } from "solid-js";
-import { api, errorText, PROVIDER_NAMES, type DockEdge, type Provider, type ProviderStatus, type Settings } from "./api";
+import { createSignal, For, Show } from "solid-js";
+import { api, createFetch, errorText, PROVIDER_NAMES, type DockEdge, type Provider, type ProviderStatus, type Settings } from "./api";
 import { Page, Segmented } from "./ui";
 import "./settings.css";
 
@@ -113,7 +113,7 @@ export default function SettingsPage() {
     }
   };
 
-  const [appVersion] = createResource(() => getVersion().catch(() => "0.1.0"));
+  const appVersion = createFetch(() => null, getVersion);
 
   return (
     <Page title="Settings">
@@ -122,11 +122,10 @@ export default function SettingsPage() {
           <h2>Accounts</h2>
           <button
             type="button"
-            class="icon-button"
-            classList={{ spinning: checking() }}
+            class={["icon-button", { spinning: checking() }]}
             aria-label="Check again"
             title="Check again"
-            aria-busy={checking()}
+            aria-busy={checking() ? "true" : "false"}
             disabled={checking()}
             onClick={checkAccounts}
           >

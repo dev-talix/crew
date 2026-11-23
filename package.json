@@ -11,15 +11,16 @@
     "test": "bun test --conditions=browser src"
   },
   "dependencies": {
+    "@solidjs/web": "2.0.3",
     "@tauri-apps/api": "2.12.5",
     "@tauri-apps/plugin-opener": "^2",
     "marked": "18.2.1",
-    "solid-js": "1.9.20"
+    "solid-js": "2.0.3"
   },
   "devDependencies": {
+    "@solidjs/vite-plugin": "3.0.1",
     "@tauri-apps/cli": "2.12.6",
     "typescript": "^5.9.0",
-    "vite": "8.3.8",
-    "vite-plugin-solid": "2.11.17"
+    "vite": "8.3.8"
   }
 }

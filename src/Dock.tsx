@@ -1,10 +1,9 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { createStore } from "solid-js/store";
+import { createMemo, createSignal, createStore, flush, For, onCleanup, onSettled, Show } from "solid-js";
 import BotAvatar from "./BotAvatar";
 import Chat from "./Chat";
 import { createChatStore } from "./chatStore";
-import { api, onEvent, subscribe, type Agent } from "./api";
+import { api, onEvent, onMountAsync, subscribe, type Agent } from "./api";
 import { inkFor } from "./avatar";
 import { CrewIcon } from "./icons";
 import { createMoods } from "./moods";
@@ -50,7 +49,9 @@ export default function Dock() {
   };
 
   const open = async (id: string) => {
-    setUnread(id, false);
+    setUnread((u) => {
+      u[id] = false;
+    });
     if (phase() === "open" || phase() === "opening") {
       if (selected() === id) return close();
       setSelected(id);
@@ -81,16 +82,20 @@ export default function Dock() {
   const refreshAgents = async () => {
     const list = await api.listAgents().catch(() => [] as Agent[]);
     setAgents(list);
+    flush(); // closedSize() below reads the new agent count.
     if (selected() && !list.some((a) => a.id === selected())) void close();
     if (phase() === "closed") void resize(closedSize(), false);
   };
 
-  onMount(async () => {
+  onMountAsync(async (keep) => {
     const initial = await api.dockEdge().catch(() => null);
     if (initial) setEdge(initial);
     const [list, running] = await Promise.all([api.listAgents(), api.busyAgents()]);
     setAgents(list);
-    running.forEach((id) => setBusy(id, true));
+    setBusy((b) => {
+      for (const id of running) b[id] = true;
+    });
+    flush(); // closedSize() reads the agent count.
     await resize(closedSize(), false);
     await nextFrame();
     setEntered(true);
@@ -103,9 +108,15 @@ export default function Dock() {
         },
         delta: chat.onDelta,
         status: ({ agentId, busy: running }) => {
-          setBusy(agentId, running);
+          setBusy((b) => {
+            b[agentId] = running;
+          });
           moods.onStatus(agentId, running);
-          if (!running && agentId !== selected()) setUnread(agentId, true);
+          if (!running && agentId !== selected()) {
+            setUnread((u) => {
+              u[agentId] = true;
+            });
+          }
         },
       }),
       onEvent<null>("agents_changed", refreshAgents),
@@ -125,7 +136,7 @@ export default function Dock() {
         }, BLUR_GRACE_MS);
       }),
     ]);
-    onCleanup(() => stops.forEach((stop) => stop()));
+    stops.forEach(keep);
   });
 
   onCleanup(() => clearTimeout(blurTimer));
@@ -136,22 +147,23 @@ export default function Dock() {
       void close();
     }
   };
-  onMount(() => window.addEventListener("keydown", onKey));
-  onCleanup(() => window.removeEventListener("keydown", onKey));
+  onSettled(() => {
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   const status = (agent: Agent) => (busy[agent.id] ? "Working" : unread[agent.id] ? "New reply" : runningModelName(agent));
 
   return (
-    <div class="dock" data-edge={edge()} data-phase={phase()} classList={{ entered: entered() }}>
+    <div data-edge={edge()} data-phase={phase()} class={["dock", { entered: entered() }]}>
       <nav class="dock-rail" aria-label="Agents" style={{ height: `${railHeight()}px` }}>
         <For each={agents()}>
           {(agent, index) => (
             <button
-              class="dock-agent"
-              classList={{ active: selected() === agent.id && panelVisible() }}
+              class={["dock-agent", { active: selected() === agent.id && panelVisible() }]}
               style={{ "--agent": agent.avatar.color, "--stagger": `${index() * 35}ms` }}
               aria-label={`${agent.name}, ${status(agent)}`}
-              aria-pressed={selected() === agent.id && panelVisible()}
+              aria-pressed={selected() === agent.id && panelVisible() ? "true" : "false"}
               title={`${agent.name}: ${status(agent)}`}
               onClick={() => void open(agent.id)}
             >

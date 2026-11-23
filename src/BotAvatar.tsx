@@ -1,4 +1,4 @@
-import { createMemo, createSignal, Match, onCleanup, onMount, Show, Switch } from "solid-js";
+import { createMemo, createSignal, Match, onCleanup, onSettled, Show, Switch } from "solid-js";
 import { onCue } from "./animator";
 import { luminance, shade, type Avatar, type Eyes } from "./avatar";
 import { GLYPHS } from "./glyphs";
@@ -77,9 +77,9 @@ export default function BotAvatar(props: {
   let timers: number[] = [];
   const later = (fn: () => void, ms: number) => timers.push(window.setTimeout(fn, ms));
 
-  onMount(() => {
+  onSettled(() => {
     if (props.alive === false) return;
-    const stop = onCue((cue) => {
+    return onCue((cue) => {
       if (mood() === "happy" || mood() === "concerned") return;
       if (cue === "blink") {
         setBlinking(true);
@@ -97,14 +97,12 @@ export default function BotAvatar(props: {
         later(() => setGlance(0), GLANCE_MS);
       }
     });
-    onCleanup(stop);
   });
   onCleanup(() => timers.forEach(clearTimeout));
 
   return (
     <svg
-      class={`bot-avatar shape-${props.avatar.shape} mood-${mood()}`}
-      classList={{ deep: deep(), fidget: fidget(), "glance-l": glance() < 0, "glance-r": glance() > 0 }}
+      class={[`bot-avatar shape-${props.avatar.shape} mood-${mood()}`, { deep: deep(), fidget: fidget(), "glance-l": glance() < 0, "glance-r": glance() > 0 }]}
       width={size()}
       height={size()}
       viewBox="-4 -4 72 72"
@@ -127,15 +125,14 @@ export default function BotAvatar(props: {
         </Show>
         <Show when={glyph()} keyed>
           {(_shape) => (
-            <g class="bot-glyph" classList={{ pop: !!props.fluid }}>
+            <g class={["bot-glyph", { pop: !!props.fluid }]}>
               <g class="bot-body">
                 <g innerHTML={body()} />
                 <g
-                  class="bot-eyes"
-                  classList={{ scanning: mood() === "working" }}
+                  class={["bot-eyes", { scanning: mood() === "working" }]}
                   style={{ transform: `translateX(${glance() * 2.4}px)` }}
                 >
-                  <g class="bot-eye" classList={{ blink: blinking() }}>
+                  <g class={["bot-eye", { blink: blinking() }]}>
                     <Eye
                       x={glyph().eyes.left}
                       y={glyph().eyes.y}
@@ -146,7 +143,7 @@ export default function BotAvatar(props: {
                       side={-1}
                     />
                   </g>
-                  <g class="bot-eye wink-eye" classList={{ blink: blinking(), wink: winking() }}>
+                  <g class={["bot-eye wink-eye", { blink: blinking(), wink: winking() }]}>
                     <Eye
                       x={glyph().eyes.right}
                       y={glyph().eyes.y}

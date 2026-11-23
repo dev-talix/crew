@@ -1,5 +1,5 @@
-import { createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from "solid-js";
-import { createStore } from "solid-js/store";
+import { createSignal, createStore, For, Match, onSettled, Show, Switch } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import AgentForm from "./AgentForm";
 import BotAvatar from "./BotAvatar";
 import Chat from "./Chat";
@@ -8,7 +8,7 @@ import HomePage from "./HomePage";
 import RoutinesPage from "./RoutinesPage";
 import SettingsPage from "./SettingsPage";
 import WorkflowsPage from "./WorkflowsPage";
-import { api, errorText, onEvent, PROVIDER_NAMES, subscribe, type Agent } from "./api";
+import { api, errorText, onEvent, onMountAsync, PROVIDER_NAMES, subscribe, type Agent } from "./api";
 import { inkFor } from "./avatar";
 import { runningModelName } from "./models";
 import { createMoods } from "./moods";
@@ -20,8 +20,7 @@ type View = "home" | "routines" | "workflows" | "settings" | "new" | { agent: st
 function NavItem(props: { label: string; icon: JSX.Element; active: boolean; onClick: () => void; shortcut?: string }) {
   return (
     <button
-      class="nav-item"
-      classList={{ active: props.active }}
+      class={["nav-item", { active: props.active }]}
       aria-current={props.active ? "page" : undefined}
       title={props.shortcut ? `${props.label} (${props.shortcut})` : props.label}
       onClick={props.onClick}
@@ -52,16 +51,20 @@ export default function App() {
   const is = (name: Exclude<View, { agent: string }>) => view() === name;
 
   const openAgent = (id: string) => {
-    setUnread(id, false);
+    setUnread((u) => {
+      u[id] = false;
+    });
     setEditing(false);
     setView({ agent: id });
   };
 
-  onMount(async () => {
+  onMountAsync(async (keep) => {
     try {
       const [list, running] = await Promise.all([api.listAgents(), api.busyAgents()]);
       setAgents(list);
-      running.forEach((id) => setBusy(id, true));
+      setBusy((b) => {
+        for (const id of running) b[id] = true;
+      });
       if (!list.length) setView("new");
     } catch (e) {
       setLoadError(errorText(e));
@@ -71,13 +74,13 @@ export default function App() {
     const stopModels = await onEvent<{ agentId: string; model: string }>("agent_model", ({ agentId, model }) =>
       setAgents((list) => list.map((a) => (a.id === agentId ? { ...a, activeModel: model } : a))),
     );
-    onCleanup(stopModels);
+    keep(stopModels);
     const stopOpen = await onEvent<string>("open_agent", (id) => {
       if (agents().some((a) => a.id === id)) openAgent(id);
     });
-    onCleanup(stopOpen);
+    keep(stopOpen);
     const stopAgents = await onEvent<null>("agents_changed", () => api.listAgents().then(setAgents));
-    onCleanup(stopAgents);
+    keep(stopAgents);
     const stop = await subscribe({
       message: (message) => {
         chat.onMessage(message);
@@ -85,12 +88,18 @@ export default function App() {
       },
       delta: chat.onDelta,
       status: ({ agentId, busy: running }) => {
-        setBusy(agentId, running);
+        setBusy((b) => {
+          b[agentId] = running;
+        });
         moods.onStatus(agentId, running);
-        if (!running && agentId !== selected()) setUnread(agentId, true);
+        if (!running && agentId !== selected()) {
+          setUnread((u) => {
+            u[agentId] = true;
+          });
+        }
       },
     });
-    onCleanup(stop);
+    keep(stop);
   });
 
   const onKey = (e: KeyboardEvent) => {
@@ -109,8 +118,10 @@ export default function App() {
       }
     }
   };
-  onMount(() => window.addEventListener("keydown", onKey));
-  onCleanup(() => window.removeEventListener("keydown", onKey));
+  onSettled(() => {
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   const created = (agent: Agent) => {
     setAgents((list) => [...list, agent]);
@@ -125,9 +136,10 @@ export default function App() {
   };
 
   const deleted = (id: string) => {
-    setAgents((list) => list.filter((a) => a.id !== id));
+    const rest = agents().filter((a) => a.id !== id);
+    setAgents(rest);
     setEditing(false);
-    setView(agents().length ? "home" : "new");
+    setView(rest.length ? "home" : "new");
   };
 
   const status = (agent: Agent) => {
@@ -160,8 +172,7 @@ export default function App() {
           <For each={agents()}>
             {(agent, index) => (
               <button
-                class="agent-row"
-                classList={{ active: agent.id === selected() }}
+                class={["agent-row", { active: agent.id === selected() }]}
                 aria-current={agent.id === selected() ? "page" : undefined}
                 title={index() < 9 ? `${agent.name} (⌘${index() + 1})` : agent.name}
                 style={{ "--agent": agent.avatar.color }}
@@ -170,7 +181,7 @@ export default function App() {
                 <BotAvatar avatar={agent.avatar} size={28} mood={moodOf(agent.id)} />
                 <span class="agent-text">
                   <span class="agent-name">{agent.name}</span>
-                  <span class="agent-status" classList={{ live: busy[agent.id], unread: !busy[agent.id] && unread[agent.id] }}>
+                  <span class={["agent-status", { live: busy[agent.id], unread: !busy[agent.id] && unread[agent.id] }]}>
                     {status(agent)}
                   </span>
                 </span>

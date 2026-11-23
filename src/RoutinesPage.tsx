@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createMemo, createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 import BotAvatar from "./BotAvatar";
 import { AgentSelect, EmptyState, Page, Segmented, Sheet, Toggle } from "./ui";
 import { PlusIcon } from "./icons";
@@ -43,7 +43,7 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
     }
   };
 
-  onMount(() => void load());
+  onSettled(() => void load());
   const unlisten = onEvent("routines_changed", () => void load());
   const tick = window.setInterval(() => setNow(Date.now()), 60_000);
   onCleanup(() => {
@@ -187,7 +187,7 @@ function RoutineRow(props: {
   };
 
   return (
-    <div class="list-row routine-row" classList={{ paused: !props.routine.enabled }}>
+    <div class={["list-row routine-row", { paused: !props.routine.enabled }]}>
       <button type="button" class="list-main routine-open" aria-label={`Edit ${props.routine.name}`} onClick={props.onEdit}>
         <span class="list-title">{props.routine.name}</span>
         <span class="list-sub">{describeSchedule(props.routine.schedule)}</span>
@@ -322,7 +322,7 @@ function RoutineEditor(props: {
               placeholder="Morning summary"
               autofocus
               required
-              maxLength={60}
+              maxlength={60}
             />
           </label>
 
@@ -390,7 +390,7 @@ function RoutineEditor(props: {
                         type="button"
                         class="routine-day"
                         aria-label={DAY_NAMES[day - 1]}
-                        aria-pressed={days().includes(day)}
+                        aria-pressed={days().includes(day) ? "true" : "false"}
                         onClick={() => toggleDay(day)}
                       >
                         {DAY_NAMES[day - 1][0]}
@@ -398,13 +398,13 @@ function RoutineEditor(props: {
                     )}
                   </For>
                 </div>
-                <button type="button" class="ghost small" aria-pressed={sameDays(WEEKDAYS)} onClick={() => setDays(WEEKDAYS)}>
+                <button type="button" class="ghost small" aria-pressed={sameDays(WEEKDAYS) ? "true" : "false"} onClick={() => setDays(WEEKDAYS)}>
                   Weekdays
                 </button>
-                <button type="button" class="ghost small" aria-pressed={sameDays(WEEKENDS)} onClick={() => setDays(WEEKENDS)}>
+                <button type="button" class="ghost small" aria-pressed={sameDays(WEEKENDS) ? "true" : "false"} onClick={() => setDays(WEEKENDS)}>
                   Weekends
                 </button>
-                <button type="button" class="ghost small" aria-pressed={sameDays(ALL_DAYS)} onClick={() => setDays(ALL_DAYS)}>
+                <button type="button" class="ghost small" aria-pressed={sameDays(ALL_DAYS) ? "true" : "false"} onClick={() => setDays(ALL_DAYS)}>
                   Every day
                 </button>
               </div>

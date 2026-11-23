@@ -1,9 +1,8 @@
-import { createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
-import { createStore } from "solid-js/store";
-import type { UnlistenFn } from "@tauri-apps/api/event";
+import { createMemo, createSignal, createStore, flush, For, onCleanup, onSettled, Show } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import BotAvatar from "./BotAvatar";
 import { AgentSelect, EmptyState, Page, Sheet } from "./ui";
-import { api, errorText, onEvent, type Agent, type Workflow, type WorkflowProgress } from "./api";
+import { api, errorText, onEvent, onMountAsync, type Agent, type Workflow, type WorkflowProgress } from "./api";
 import "./workflows.css";
 
 type Run = Omit<WorkflowProgress, "workflowId">;
@@ -61,24 +60,20 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
   const agentById = createMemo(() => new Map(props.agents.map((a) => [a.id, a])));
   const noAgents = () => props.agents.length === 0;
 
-  let unlisten: UnlistenFn | undefined;
-  let disposed = false;
-  onCleanup(() => {
-    disposed = true;
-    unlisten?.();
-  });
+  const setRun = (id: string, run: Run | undefined) =>
+    setRuns((runs) => {
+      runs[id] = run;
+    });
 
-  onMount(async () => {
+  onMountAsync(async (keep) => {
     try {
-      const stop = await onEvent<WorkflowProgress>("workflow_progress", ({ workflowId, ...run }) => setRuns(workflowId, run));
-      if (disposed) return stop();
-      unlisten = stop;
+      keep(await onEvent<WorkflowProgress>("workflow_progress", ({ workflowId, ...run }) => setRun(workflowId, run)));
       const [list, running] = await Promise.all([api.listWorkflows(), api.runningWorkflows()]);
       setWorkflows(list);
       for (const id of running) {
         if (runs[id]?.state === "running") continue;
         const total = list.find((w) => w.id === id)?.steps.length ?? 0;
-        setRuns(id, { step: 0, total, agentId: null, state: "running", error: null });
+        setRun(id, { step: 0, total, agentId: null, state: "running", error: null });
       }
     } catch (e) {
       setError(errorText(e));
@@ -101,12 +96,12 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
   const run = async (workflow: Workflow, input: string) => {
     const previous = runs[workflow.id] && { ...runs[workflow.id]! };
     // Mark it running before the call. The first progress event can arrive before invoke resolves.
-    setRuns(workflow.id, { step: 0, total: workflow.steps.length, agentId: null, state: "running", error: null });
+    setRun(workflow.id, { step: 0, total: workflow.steps.length, agentId: null, state: "running", error: null });
     try {
       await api.runWorkflow(workflow.id, input);
       setStarting(null);
     } catch (e) {
-      setRuns(workflow.id, previous);
+      setRun(workflow.id, previous);
       throw e;
     }
   };
@@ -174,7 +169,7 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
                                   return n < r.step ? "done" : n === r.step ? "current" : "pending";
                                 };
                                 return (
-                                  <li classList={{ pending: position() === "pending" }}>
+                                  <li class={{ pending: position() === "pending" }}>
                                     <Show when={index() > 0}>
                                       <span class="wf-connector" aria-hidden="true" />
                                     </Show>
@@ -206,7 +201,7 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
                               }}
                             </For>
                           </ol>
-                          <span class="wf-status" classList={{ live: running() }} aria-live="polite">
+                          <span class={["wf-status", { live: running() }]} aria-live="polite">
                             <Show when={progress()}>{(r) => <>{runLabel(r())}</>}</Show>
                           </span>
                         </div>
@@ -278,7 +273,7 @@ function RunForm(props: { workflow: Workflow; onRun: (input: string) => Promise<
   const inputUnused = () =>
     !props.workflow.steps.some((s) => s.prompt.includes("{{input}}")) && !props.workflow.steps[0]?.prompt.includes("{{previous}}");
   let field!: HTMLTextAreaElement;
-  onMount(() => field.focus());
+  onSettled(() => field.focus());
 
   const submit = async (e?: Event) => {
     e?.preventDefault();
@@ -357,16 +352,22 @@ function WorkflowEditor(props: {
   onCleanup(() => clearTimeout(confirmTimer));
   let list!: HTMLOListElement;
   let nameField!: HTMLInputElement;
-  onMount(() => nameField.focus());
+  onSettled(() => nameField.focus());
 
-  const focusIn = (key: number, selector: string) =>
-    queueMicrotask(() => list.querySelector<HTMLElement>(`[data-step="${key}"] ${selector}`)?.focus());
+  const focusIn = (key: number, selector: string) => {
+    flush(); // Apply the step change so the target element exists.
+    list.querySelector<HTMLElement>(`[data-step="${key}"] ${selector}`)?.focus();
+  };
+  const setStep = (index: number, patch: Partial<DraftStep>) =>
+    setSteps((draft) => {
+      Object.assign(draft[index], patch);
+    });
 
   const move = (index: number, by: -1 | 1) => {
     const to = index + by;
     const next = [...steps];
     [next[index], next[to]] = [next[to], next[index]];
-    setSteps(next);
+    setSteps(() => next);
     // Moving a node drops focus. Keep it on the same button, or on its sibling once that one is disabled.
     const action = by < 0 ? (to === 0 ? "down" : "up") : to === next.length - 1 ? "up" : "down";
     focusIn(next[to].key, `[data-action="${action}"]`);
@@ -374,13 +375,16 @@ function WorkflowEditor(props: {
 
   const remove = (index: number) => {
     const next = steps.filter((_, i) => i !== index);
-    setSteps(next);
+    setSteps(() => next);
     focusIn(next[Math.min(index, next.length - 1)].key, "textarea");
   };
 
   const add = () => {
     const key = nextKey++;
-    setSteps(steps.length, { key, agentId: defaultAgent(steps[steps.length - 1]?.agentId), prompt: "" });
+    const agentId = defaultAgent(steps[steps.length - 1]?.agentId);
+    setSteps((draft) => {
+      draft.push({ key, agentId, prompt: "" });
+    });
     focusIn(key, "select");
   };
 
@@ -429,7 +433,7 @@ function WorkflowEditor(props: {
           onInput={(e) => setName(e.currentTarget.value)}
           placeholder="Weekly newsletter"
           required
-          maxLength={60}
+          maxlength={60}
         />
       </label>
 
@@ -454,7 +458,7 @@ function WorkflowEditor(props: {
                         agents={props.agents}
                         value={step.agentId}
                         label={`Step ${n()} agent`}
-                        onChange={(id) => setSteps(index(), "agentId", id)}
+                        onChange={(id) => setStep(index(), { agentId: id })}
                       />
                       <span class="spacer" />
                       <button
@@ -496,7 +500,7 @@ function WorkflowEditor(props: {
                       rows={3}
                       value={step.prompt}
                       placeholder={index() === 0 ? "Research {{input}} and list the key facts." : "Write a short post from this research."}
-                      onInput={(e) => setSteps(index(), "prompt", e.currentTarget.value)}
+                      onInput={(e) => setStep(index(), { prompt: e.currentTarget.value })}
                     />
                   </div>
                 </li>

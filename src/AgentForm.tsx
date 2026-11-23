@@ -1,8 +1,8 @@
-import { createResource, createSignal, For, onCleanup, Show } from "solid-js";
+import { createSignal, For, onCleanup, Show } from "solid-js";
 import AvatarStudio from "./AvatarStudio";
 import { Segmented } from "./ui";
 import { inkFor, randomAvatar, type Avatar } from "./avatar";
-import { api, errorText, PROVIDER_NAMES, shortPath, type Access, type Agent, type Provider } from "./api";
+import { api, createFetch, errorText, PROVIDER_NAMES, shortPath, type Access, type Agent, type Provider } from "./api";
 import { effortName, modelCatalog, modelName } from "./models";
 
 const ACCESS_HELP: Record<Provider, Record<Access, string>> = {
@@ -27,7 +27,7 @@ export default function AgentForm(props: {
   const [provider, setProvider] = createSignal<Provider>(props.agent?.provider ?? "codex");
   const [model, setModel] = createSignal(props.agent?.model ?? "");
   const [effort, setEffort] = createSignal(props.agent?.effort ?? "");
-  const [catalog] = createResource(provider, modelCatalog);
+  const catalog = createFetch(provider, modelCatalog);
   const models = () => catalog() ?? [];
   const efforts = () =>
     models().find((m) => m.id === model())?.efforts ??
@@ -92,8 +92,7 @@ export default function AgentForm(props: {
 
   return (
     <form
-      class="agent-form"
-      classList={{ editing }}
+      class={["agent-form", { editing }]}
       style={{ "--agent": avatar().color, "--agent-ink": inkFor(avatar().color) }}
       onSubmit={submit}
     >
@@ -103,7 +102,7 @@ export default function AgentForm(props: {
       <div class="form-grid">
         <label class="field">
           <span>Name</span>
-          <input value={name()} onInput={(e) => setName(e.currentTarget.value)} placeholder="Site builder" autofocus required maxLength={60} />
+          <input value={name()} onInput={(e) => setName(e.currentTarget.value)} placeholder="Site builder" autofocus required maxlength={60} />
         </label>
 
         <Show

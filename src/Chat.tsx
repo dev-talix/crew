@@ -1,4 +1,5 @@
-import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, flush, For, Match, onCleanup, Show, Switch } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import BotAvatar, { type Mood } from "./BotAvatar";
 import { api, changesFor, errorText, PROVIDER_NAMES, type Agent, type Message } from "./api";
 import type { ChatStore } from "./chatStore";
@@ -88,10 +89,10 @@ function ToolGroup(props: { messages: Message[]; workspace: string }) {
           </div>
         }
       >
-        <button class="tool-line tool-toggle" aria-expanded={open()} onClick={() => setOpen(!open())}>
+        <button class="tool-line tool-toggle" aria-expanded={open() ? "true" : "false"} onClick={() => setOpen(!open())}>
           <Icon />
           <span>{summarizeTools(entries())}</span>
-          <span class="chevron" classList={{ open: open() }}>
+          <span class={["chevron", { open: open() }]}>
             <ChevronIcon />
           </span>
         </button>
@@ -239,20 +240,19 @@ export default function Chat(props: {
     run(async () => props.onAgentUpdated(await api.updateAgent(props.agent.id, changesFor(props.agent, { model, effort }))));
 
   createEffect(
-    on(
-      () => props.agent.id,
-      () => {
-        stickToBottom = true;
-        setActionError("");
-        input?.focus();
-      },
-    ),
+    () => props.agent.id,
+    () => {
+      stickToBottom = true;
+      setActionError("");
+      input?.focus();
+    },
   );
 
   createEffect(
-    on([() => messages().length, lastText, () => props.busy], () => {
+    () => [messages().length, lastText(), props.busy],
+    () => {
       if (stickToBottom) list.scrollTop = list.scrollHeight;
-    }),
+    },
   );
 
   const run = async (action: () => Promise<unknown>) => {
@@ -265,6 +265,7 @@ export default function Chat(props: {
   };
 
   const resize = () => {
+    flush(); // Measure the textarea after the draft change reaches the DOM.
     input.style.height = "auto";
     input.style.height = `${Math.min(input.scrollHeight, 240)}px`;
   };
@@ -323,11 +324,12 @@ export default function Chat(props: {
   const loadOlder = async () => {
     const before = list.scrollHeight;
     await run(props.store.loadOlder);
+    flush();
     list.scrollTop += list.scrollHeight - before;
   };
 
   return (
-    <section class="chat" classList={{ compact: !!props.compact }}>
+    <section class={["chat", { compact: !!props.compact }]}>
       <header class="chat-bar" data-tauri-drag-region>
         <div class="crumbs" data-tauri-drag-region>
           <BotAvatar avatar={props.agent.avatar} size={20} fluid working={props.busy} mood={props.mood} />
@@ -450,7 +452,7 @@ export default function Chat(props: {
             <button
               class="chip"
               aria-haspopup="menu"
-              aria-expanded={picking()}
+              aria-expanded={picking() ? "true" : "false"}
               title={props.agent.activeModel ? `Running ${props.agent.activeModel}` : "Choose a model"}
               onClick={() => setPicking(!picking())}
             >
@@ -463,8 +465,7 @@ export default function Chat(props: {
             </Show>
             <span class="chip-sep" aria-hidden="true" />
             <button
-              class="chip access-chip"
-              classList={{ warn: props.agent.access === "full" }}
+              class={["chip access-chip", { warn: props.agent.access === "full" }]}
               title={props.agent.access === "full" ? "Full access. Click for workspace only." : "Workspace only. Click for full access."}
               disabled={props.busy}
               onClick={toggleAccess}
@@ -475,10 +476,9 @@ export default function Chat(props: {
             <span class="spacer" />
             <Show when={SpeechRecognition}>
               <button
-                class="icon-button mic"
-                classList={{ listening: listening() }}
+                class={["icon-button mic", { listening: listening() }]}
                 aria-label={listening() ? "Stop dictation" : "Dictate a message"}
-                aria-pressed={listening()}
+                aria-pressed={listening() ? "true" : "false"}
                 title={listening() ? "Stop dictation" : "Dictate a message"}
                 onClick={toggleDictation}
               >

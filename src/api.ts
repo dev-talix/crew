@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { createEffect, createSignal, onSettled, type Accessor } from "solid-js";
 import type { Avatar } from "./avatar";
 
 export type Provider = "codex" | "claude";
@@ -169,6 +170,42 @@ export const api = {
   runWorkflow: (id: string, input: string) => invoke<void>("run_workflow", { id, input }),
   stopWorkflow: (id: string) => invoke<void>("stop_workflow", { id }),
 };
+
+/**
+ * Runs async setup once the component has mounted. Unlisten functions passed to `keep` run when the
+ * component is disposed, including ones that resolve after disposal.
+ */
+export function onMountAsync(setup: (keep: (stop: () => void) => void) => Promise<void>) {
+  onSettled(() => {
+    let disposed = false;
+    const stops: (() => void)[] = [];
+    void setup((stop) => (disposed ? stop() : void stops.push(stop)));
+    return () => {
+      disposed = true;
+      stops.forEach((stop) => stop());
+    };
+  });
+}
+
+/**
+ * Loads `fetch(source())` whenever the source changes. It stays outside Solid's async tracking, so the
+ * change that triggered it renders at once. Reads `undefined` while loading and `null` if it failed.
+ */
+export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise<T>): Accessor<T | null | undefined> {
+  const [value, setValue] = createSignal<T | null | undefined>();
+  createEffect(source, (current) => {
+    let live = true;
+    setValue(undefined);
+    fetch(current).then(
+      (result) => live && setValue(() => result),
+      () => live && setValue(null),
+    );
+    return () => {
+      live = false;
+    };
+  });
+  return value;
+}
 
 export function onEvent<T>(
   name: "routines_changed" | "workflow_progress" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge",

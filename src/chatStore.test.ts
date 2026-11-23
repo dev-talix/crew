@@ -76,6 +76,19 @@ test("a finished message replaces its streamed copy", async () => {
   dispose();
 });
 
+test("a finished message updates the item rows already hold", async () => {
+  const { store, dispose } = setup();
+  await settle();
+  store.onMessage({ ...msg(12, ""), status: "streaming" });
+  await settle();
+  const held = store.messages[2]; // Chat's row cache keeps this reference across renders.
+  store.onDelta({ agentId: "a", messageId: 12, chunk: "draft" });
+  store.onMessage(msg(12, "final"));
+  await settle();
+  expect([held.text, held.status]).toEqual(["final", "done"]);
+  dispose();
+});
+
 test("an out-of-order message is sorted into place", async () => {
   const { store, dispose } = setup();
   await settle();
@@ -90,6 +103,7 @@ test("events during a load apply after the page arrives", async () => {
   let release!: () => void;
   gate = new Promise((resolve) => (release = resolve));
   const { store, dispose } = setup();
+  await Promise.resolve(); // Tauri events arrive in a later task, after the load has started.
   store.onMessage(msg(12, ""));
   store.onDelta({ agentId: "a", messageId: 12, chunk: "queued" });
   release();

@@ -1,5 +1,5 @@
-import { createResource, For, onCleanup, onMount, Show } from "solid-js";
-import { PROVIDER_NAMES, type Agent, type ModelOption } from "./api";
+import { For, onSettled, Show } from "solid-js";
+import { createFetch, PROVIDER_NAMES, type Agent, type ModelOption } from "./api";
 import { CheckIcon } from "./icons";
 import { effortName, modelCatalog, modelName } from "./models";
 
@@ -8,7 +8,7 @@ export default function ModelPicker(props: {
   onPick: (model: string, effort: string) => void;
   onClose: () => void;
 }) {
-  const [catalog] = createResource(() => props.agent.provider, modelCatalog);
+  const catalog = createFetch(() => props.agent.provider, modelCatalog);
   let panel!: HTMLDivElement;
 
   const models = () => catalog() ?? [];
@@ -39,14 +39,16 @@ export default function ModelPicker(props: {
       props.onClose();
     }
   };
-  onMount(() => {
-    setTimeout(() => document.addEventListener("pointerdown", onPointer));
+  onSettled(() => {
+    // Defer so the click that opened the picker does not close it.
+    const listenTimer = setTimeout(() => document.addEventListener("pointerdown", onPointer));
     document.addEventListener("keydown", onKey, true);
     panel.querySelector<HTMLButtonElement>("[aria-checked='true']")?.focus();
-  });
-  onCleanup(() => {
-    document.removeEventListener("pointerdown", onPointer);
-    document.removeEventListener("keydown", onKey, true);
+    return () => {
+      clearTimeout(listenTimer);
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey, true);
+    };
   });
 
   const Row = (row: { id: string; name: string; note: string }) => (
@@ -54,7 +56,7 @@ export default function ModelPicker(props: {
       type="button"
       role="menuitemradio"
       class="picker-item"
-      aria-checked={selected() === row.id}
+      aria-checked={selected() === row.id ? "true" : "false"}
       onClick={() => pickModel(row.id)}
     >
       <span class="picker-text">
@@ -74,15 +76,15 @@ export default function ModelPicker(props: {
       <div class="picker-section">{PROVIDER_NAMES[props.agent.provider]} model</div>
       <div class="picker-list">
         <Row id="" name="Default" note={defaultNote()} />
-        <Show when={!catalog.loading} fallback={<div class="picker-status">Loading models…</div>}>
-          <Show when={!catalog.error} fallback={<div class="picker-status">Could not load the model list. Default still works.</div>}>
+        <Show when={catalog() !== undefined} fallback={<div class="picker-status">Loading models…</div>}>
+          <Show when={catalog() !== null} fallback={<div class="picker-status">Could not load the model list. Default still works.</div>}>
             <For each={models()}>{(model) => <Row id={model.id} name={model.name} note={model.description} />}</For>
           </Show>
         </Show>
       </div>
       <div class="picker-section">Effort</div>
       <div class="effort-row" role="radiogroup" aria-label="Effort">
-        <button type="button" role="radio" aria-checked={!effort()} classList={{ on: !effort() }} onClick={() => props.onPick(selected(), "")}>
+        <button type="button" role="radio" aria-checked={!effort() ? "true" : "false"} class={{ on: !effort() }} onClick={() => props.onPick(selected(), "")}>
           Default
         </button>
         <For each={efforts()}>
@@ -90,8 +92,8 @@ export default function ModelPicker(props: {
             <button
               type="button"
               role="radio"
-              aria-checked={effort() === level}
-              classList={{ on: effort() === level }}
+              aria-checked={effort() === level ? "true" : "false"}
+              class={{ on: effort() === level }}
               onClick={() => props.onPick(selected(), level)}
             >
               {effortName(level)}

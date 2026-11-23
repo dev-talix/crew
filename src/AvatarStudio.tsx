@@ -24,9 +24,8 @@ function PartRow<K extends PartKey>(props: {
               <button
                 type="button"
                 role="radio"
-                class="studio-option"
-                classList={{ selected: selected() }}
-                aria-checked={selected()}
+                class={["studio-option", { selected: selected() }]}
+                aria-checked={selected() ? "true" : "false"}
                 aria-label={`${props.title}: ${option.label}`}
                 title={option.label}
                 onClick={() => props.onChange(variant())}
@@ -70,9 +69,8 @@ export default function AvatarStudio(props: { avatar: Avatar; name: string; onCh
                 <button
                   type="button"
                   role="radio"
-                  class="swatch"
-                  classList={{ selected: props.avatar.color === swatch.value }}
-                  aria-checked={props.avatar.color === swatch.value}
+                  class={["swatch", { selected: props.avatar.color === swatch.value }]}
+                  aria-checked={props.avatar.color === swatch.value ? "true" : "false"}
                   aria-label={`Color: ${swatch.label}`}
                   title={swatch.label}
                   style={{ "--swatch": swatch.value }}
@@ -81,8 +79,7 @@ export default function AvatarStudio(props: { avatar: Avatar; name: string; onCh
               )}
             </For>
             <label
-              class="swatch custom"
-              classList={{ selected: custom() }}
+              class={["swatch custom", { selected: custom() }]}
               title="Pick any color"
               style={{ "--swatch": custom() ? props.avatar.color : "transparent" }}
             >

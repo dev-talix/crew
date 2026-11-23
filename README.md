@@ -1,7 +1,7 @@
 # Crew
 
 A small desktop app for persistent AI agents. Each agent has a name, a workspace folder, and runs on
-Codex or Claude. Built with Tauri 2, Rust, SolidJS, and SQLite.
+Codex or Claude. Built with Tauri 2, Rust, SolidJS 2, and SQLite.
 
 ## Run
 
