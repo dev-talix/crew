@@ -20,6 +20,8 @@ pub struct Route {
     turn_id: Option<String>,
     last_item: Option<String>,
     has_text: bool,
+    /// The thread's token totals before this turn, from its first usage update.
+    usage_base: Option<(u64, u64)>,
 }
 
 struct CodexProcess {
@@ -171,6 +173,14 @@ impl Codex {
                 .map(|_| ()),
             None => Ok(()),
         }
+    }
+
+    /// The account's plan limits, from `account/rateLimits/read`.
+    pub async fn rate_limits(self: &Arc<Self>, cwd: &str) -> Result<Value, String> {
+        let process = self.ensure_process(cwd).await?;
+        let result = process.request("account/rateLimits/read", json!({ "excludeResetCreditDetails": true })).await;
+        self.arm_idle_if_unused(&process);
+        result
     }
 
     pub async fn reload_thread(&self, agent_id: &str) {
@@ -428,6 +438,14 @@ pub fn map_notification(method: &str, params: &Value, route: &mut Route) -> (Vec
             (events, false)
         }
         "item/started" => (tool_label(&params["item"]).map(ProviderEvent::Tool).into_iter().collect(), false),
+        "thread/tokenUsage/updated" => {
+            // `total` covers the whole thread and `last` the latest model call, so the first update of a
+            // turn tells where the turn started.
+            let tokens = |b: &Value| (b["inputTokens"].as_u64().unwrap_or(0), b["outputTokens"].as_u64().unwrap_or(0));
+            let (total, last) = (tokens(&params["tokenUsage"]["total"]), tokens(&params["tokenUsage"]["last"]));
+            let base = *route.usage_base.get_or_insert((total.0.saturating_sub(last.0), total.1.saturating_sub(last.1)));
+            (vec![ProviderEvent::Usage { input: total.0.saturating_sub(base.0), output: total.1.saturating_sub(base.1) }], false)
+        }
         "turn/completed" => {
             let turn = &params["turn"];
             let event = match turn["status"].as_str() {
@@ -457,6 +475,18 @@ mod tests {
             finished = done;
         }
         (events, finished)
+    }
+
+    #[test]
+    fn counts_only_this_turns_tokens() {
+        let usage = |total: (u64, u64), last: (u64, u64)| {
+            json!({ "threadId": "t", "turnId": "u", "tokenUsage": {
+                "total": { "inputTokens": total.0, "outputTokens": total.1 },
+                "last": { "inputTokens": last.0, "outputTokens": last.1 } } })
+        };
+        // The thread had 1000 in and 200 out before this turn; the turn makes two model calls.
+        let (events, _) = run(&[("thread/tokenUsage/updated", usage((1300, 250), (300, 50))), ("thread/tokenUsage/updated", usage((1700, 300), (400, 50)))]);
+        assert_eq!(events.last(), Some(&ProviderEvent::Usage { input: 700, output: 100 }));
     }
 
     #[test]

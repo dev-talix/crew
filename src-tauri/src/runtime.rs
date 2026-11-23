@@ -38,7 +38,20 @@ type Reply = oneshot::Sender<TurnOutcome>;
 struct Job {
     message_id: i64,
     text: String,
+    source: Option<String>,
     reply: Option<Reply>,
+}
+
+pub const RITUAL_SOURCE: &str = "Ritual: ";
+pub const SPELL_SOURCE: &str = "Spell: ";
+
+/// Who started a turn, for usage: the person, a ritual, or a spell, from the message's source label.
+pub fn origin_of(source: Option<&str>) -> &'static str {
+    match source {
+        Some(s) if s.starts_with(RITUAL_SOURCE) => "ritual",
+        Some(s) if s.starts_with(SPELL_SOURCE) => "spell",
+        _ => "you",
+    }
 }
 
 #[derive(Default)]
@@ -125,7 +138,7 @@ impl Runtime {
         let status = if state.busy { "queued" } else { "done" };
         let message = self.db.insert_message_from(agent_id, "user", &text, status, source)?;
         self.app.message(&message);
-        let job = Job { message_id: message.id, text, reply };
+        let job = Job { message_id: message.id, text, source: source.map(String::from), reply };
         if state.busy {
             state.queue.push_back(job);
         } else {
@@ -160,6 +173,12 @@ impl Runtime {
 
     pub fn is_busy(&self, agent_id: &str) -> bool {
         self.agents.lock().map(|a| a.get(agent_id).is_some_and(|s| s.busy)).unwrap_or(false)
+    }
+
+    /// Codex's plan limits. Starts the app server if it isn't running, which stops again when idle.
+    pub async fn codex_rate_limits(&self) -> Result<serde_json::Value, String> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        self.codex.rate_limits(&home).await
     }
 
     pub async fn list_models(&self, provider: &Provider) -> Result<Vec<crate::providers::ModelOption>, String> {
@@ -210,7 +229,7 @@ impl Runtime {
     fn spawn_turn(self: &Arc<Self>, agent_id: String, job: Job) {
         let runtime = self.clone();
         tauri::async_runtime::spawn(async move {
-            let outcome = runtime.run_turn(&agent_id, &job.text).await;
+            let outcome = runtime.run_turn(&agent_id, &job.text, job.source.as_deref()).await;
             if let Some(reply) = job.reply {
                 let _ = reply.send(outcome);
             }
@@ -235,7 +254,7 @@ impl Runtime {
         }
     }
 
-    async fn run_turn(self: &Arc<Self>, agent_id: &str, text: &str) -> TurnOutcome {
+    async fn run_turn(self: &Arc<Self>, agent_id: &str, text: &str, source: Option<&str>) -> TurnOutcome {
         let agent = match self.db.get_agent(agent_id) {
             Ok(Some(agent)) => agent,
             _ => return TurnOutcome::Failed("That familiar no longer exists.".into()),
@@ -246,6 +265,7 @@ impl Runtime {
             Provider::Claude => self.claude.start_turn(&agent, text, tx).await,
         };
         let mut writer = TurnWriter::new(&self.db, &self.app, &agent);
+        writer.origin = origin_of(source);
         match started {
             Ok(()) => stream_turn(&mut writer, rx).await,
             Err(e) => writer.fail(&e),
@@ -272,6 +292,11 @@ pub async fn stream_turn(writer: &mut TurnWriter<'_>, mut rx: mpsc::UnboundedRec
             Some(ProviderEvent::Tool(label)) => writer.tool(&label),
             Some(ProviderEvent::Session(id)) => writer.session(&id),
             Some(ProviderEvent::Model(model)) => writer.model(&model),
+            Some(ProviderEvent::Usage { input, output }) => writer.usage = Some((input, output)),
+            Some(ProviderEvent::Limits(info)) => {
+                let snapshot = serde_json::json!({ "info": info, "at": crate::db::now_ms() });
+                let _ = writer.db.set_setting(CLAUDE_LIMITS, &snapshot.to_string());
+            }
             Some(ProviderEvent::Done) => return writer.close("done"),
             Some(ProviderEvent::Stopped) => return writer.close("stopped"),
             Some(ProviderEvent::Failed(reason)) => return writer.fail(&reason),
@@ -300,7 +325,14 @@ pub struct TurnWriter<'a> {
     active_model: Option<String>,
     segment: Option<Segment>,
     last_text: String,
+    provider: Provider,
+    /// "you", "ritual", or "spell".
+    pub origin: &'static str,
+    usage: Option<(u64, u64)>,
 }
+
+/// The settings key for Claude's latest plan limit snapshot.
+pub const CLAUDE_LIMITS: &str = "claude_limits";
 
 impl<'a> TurnWriter<'a> {
     pub fn new(db: &'a Db, sink: &'a dyn Sink, agent: &Agent) -> Self {
@@ -312,6 +344,15 @@ impl<'a> TurnWriter<'a> {
             active_model: agent.active_model.clone(),
             segment: None,
             last_text: String::new(),
+            provider: agent.provider.clone(),
+            origin: "you",
+            usage: None,
+        }
+    }
+
+    fn record_usage(&mut self) {
+        if let Some((input, output)) = self.usage.take() {
+            let _ = self.db.insert_usage(&self.agent_id, &self.provider, self.origin, input, output);
         }
     }
 
@@ -381,6 +422,7 @@ impl<'a> TurnWriter<'a> {
 
     fn close(&mut self, status: &str) -> TurnOutcome {
         self.end_segment(status);
+        self.record_usage();
         if status == "stopped" {
             TurnOutcome::Stopped
         } else {
@@ -390,6 +432,7 @@ impl<'a> TurnWriter<'a> {
 
     fn fail(&mut self, reason: &str) -> TurnOutcome {
         self.end_segment("done");
+        self.record_usage();
         if let Ok(message) = self.db.insert_message(&self.agent_id, "error", reason.trim(), "done") {
             self.sink.message(&message);
         }
@@ -416,6 +459,30 @@ mod tests {
             self.deltas.lock().unwrap().push((message_id, chunk.to_string()));
         }
         fn model(&self, _agent_id: &str, _model: &str) {}
+    }
+
+    #[test]
+    fn tells_who_started_a_turn() {
+        assert_eq!(origin_of(None), "you");
+        assert_eq!(origin_of(Some(&format!("{RITUAL_SOURCE}Morning summary"))), "ritual");
+        assert_eq!(origin_of(Some(&format!("{SPELL_SOURCE}Topic brief"))), "spell");
+        assert_eq!(origin_of(Some("Something else")), "you");
+    }
+
+    #[tokio::test]
+    async fn records_a_turns_usage_once_it_ends() {
+        let (db, agent) = setup();
+        let sink = Recorder::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(ProviderEvent::Usage { input: 10, output: 2 }).unwrap();
+        tx.send(ProviderEvent::Usage { input: 30, output: 5 }).unwrap();
+        tx.send(ProviderEvent::Done).unwrap();
+        let mut writer = TurnWriter::new(&db, &sink, &agent);
+        writer.origin = "spell";
+        stream_turn(&mut writer, rx).await;
+        let rows = db.usage_since(0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].input, rows[0].output, rows[0].origin.as_str()), (30, 5, "spell"));
     }
 
     fn setup() -> (Db, Agent) {

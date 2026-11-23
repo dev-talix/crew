@@ -490,6 +490,30 @@ fn revoke_vault_grant(app: AppHandle, state: State<AppState>, id: String, agent_
 }
 
 #[tauri::command]
+fn usage_since(state: State<AppState>, since: i64) -> Result<Vec<db::UsageRow>, String> {
+    state.db.usage_since(since)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanLimits {
+    codex: Option<serde_json::Value>,
+    codex_error: Option<String>,
+    /// Claude's latest `rate_limit_event`, with when it arrived. Claude only reports it during a turn.
+    claude: Option<serde_json::Value>,
+}
+
+#[tauri::command]
+async fn plan_limits(state: State<'_, AppState>) -> Result<PlanLimits, String> {
+    let (codex, codex_error) = match state.runtime.codex_rate_limits().await {
+        Ok(limits) => (Some(limits), None),
+        Err(e) => (None, Some(e)),
+    };
+    let claude = state.db.setting(runtime::CLAUDE_LIMITS)?.and_then(|text| serde_json::from_str(&text).ok());
+    Ok(PlanLimits { codex, codex_error, claude })
+}
+
+#[tauri::command]
 fn get_permissions(state: State<AppState>) -> permissions::Permissions {
     permissions::load(&state.db)
 }
@@ -595,7 +619,9 @@ pub fn run() {
             answer_approval,
             waiting_approvals,
             get_permissions,
-            save_permissions
+            save_permissions,
+            usage_since,
+            plan_limits
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

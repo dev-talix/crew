@@ -11,6 +11,10 @@ use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderEvent {
+    /// Tokens the turn has used so far; a later event replaces an earlier one.
+    Usage { input: u64, output: u64 },
+    /// Claude's latest plan limit snapshot, as its rate_limit_event reports it.
+    Limits(serde_json::Value),
     Session(String),
     Model(String),
     Delta(String),

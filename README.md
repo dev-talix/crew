@@ -121,6 +121,17 @@ command. Codex asks through its approval requests (Grimoire sets its approval po
 `untrusted`, so commands it knows only read run without asking); Claude asks through a `PreToolUse`
 hook on Bash that Grimoire registers, which runs even for commands your own Claude settings allow.
 
+## Usage
+
+Settings, Usage shows your plan limits and what Grimoire itself used:
+
+- **Codex**: the 5-hour and weekly limits from `account/rateLimits/read`. Opening the page starts
+  `codex app-server` if it isn't running; it stops again after 10 idle minutes.
+- **Claude**: Claude only reports limits while it replies (`rate_limit_event`), so the page shows the
+  latest snapshot and how old it is.
+- **Grimoire, last 7 days**: tokens per turn, input and output together, by source (you, rituals,
+  spells) or by familiar, with a daily chart and a table of the numbers.
+
 ## Themes
 
 Pick a theme in Settings. The seven built-ins are named for old inks and pigments: Tyrian (the

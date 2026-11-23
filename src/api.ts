@@ -197,6 +197,14 @@ export interface ApprovalRequest {
 
 export type ApprovalDecision = "once" | "always" | "deny";
 
+export interface PlanLimits {
+  /** Codex's `account/rateLimits/read` reply. */
+  codex: Record<string, unknown> | null;
+  codexError: string | null;
+  /** Claude's latest `rate_limit_event` info and when it arrived. */
+  claude: { info: Record<string, unknown>; at: number } | null;
+}
+
 export type PermissionMode = "off" | "rules" | "always";
 export type RuleKind = "ask" | "allow";
 
@@ -250,6 +258,8 @@ export const api = {
   answerApproval: (id: string, decision: ApprovalDecision) => invoke<void>("answer_approval", { id, decision }),
   waitingApprovals: () => invoke<ApprovalRequest[]>("waiting_approvals"),
   getPermissions: () => invoke<Permissions>("get_permissions"),
+  usageSince: (since: number) => invoke<import("./usage").UsageRow[]>("usage_since", { since }),
+  planLimits: () => invoke<PlanLimits>("plan_limits"),
   savePermissions: (permissions: Permissions) => invoke<Permissions>("save_permissions", { permissions }),
 };
 

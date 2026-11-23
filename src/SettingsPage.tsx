@@ -7,7 +7,8 @@ import { ThemePicker } from "./ThemeEditor";
 import { appIcon, readMode, setAppIcon, setMode, type AppIconSetting, type ModeSetting } from "./themeStore";
 import nightIcon from "./assets/icon-night.svg";
 import paperIcon from "./assets/icon-paper.svg";
-import { GearIcon, PaletteIcon, ShieldIcon, VaultIcon } from "./icons";
+import { BarsIcon, GearIcon, PaletteIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
+import UsagePage from "./UsagePage";
 import PermissionsPage from "./PermissionsPage";
 import VaultPage from "./VaultPage";
 import "./settings.css";
@@ -40,13 +41,6 @@ function WithCode(props: { text: string }) {
   return <For each={props.text.split("`")}>{(part, i) => (i() % 2 ? <code>{part}</code> : part)}</For>;
 }
 
-function RefreshIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3" />
-    </svg>
-  );
-}
 
 function GeneralSettings() {
   const [statuses, setStatuses] = createSignal<ProviderStatus[]>();
@@ -264,13 +258,14 @@ function AppearanceSettings() {
   );
 }
 
-export type SettingsSection = "general" | "appearance" | "vault" | "permissions";
+export type SettingsSection = "general" | "appearance" | "vault" | "permissions" | "usage";
 
 const SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element }[] = [
   { id: "general", label: "General", icon: GearIcon },
   { id: "appearance", label: "Appearance", icon: PaletteIcon },
   { id: "vault", label: "Vault", icon: VaultIcon },
   { id: "permissions", label: "Permissions", icon: ShieldIcon },
+  { id: "usage", label: "Usage", icon: BarsIcon },
 ];
 
 export default function SettingsPage(props: { section?: SettingsSection; agents: Agent[] }) {
@@ -304,6 +299,9 @@ export default function SettingsPage(props: { section?: SettingsSection; agents:
         </Match>
         <Match when={section() === "permissions"}>
           <PermissionsPage onOpenVault={() => setSection("vault")} />
+        </Match>
+        <Match when={section() === "usage"}>
+          <UsagePage agents={props.agents} />
         </Match>
       </Switch>
     </div>

@@ -347,8 +347,15 @@ impl ClaudeParser {
                         .collect()
                 })
                 .unwrap_or_default(),
+            "rate_limit_event" => vec![ProviderEvent::Limits(value["rate_limit_info"].clone())],
             "result" => {
                 self.has_text = false;
+                let mut events = Vec::new();
+                if let Some(usage) = value.get("usage").filter(|u| u.is_object()) {
+                    let n = |key: &str| usage[key].as_u64().unwrap_or(0);
+                    let input = n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
+                    events.push(ProviderEvent::Usage { input, output: n("output_tokens") });
+                }
                 let failed = value["is_error"].as_bool().unwrap_or(false)
                     || value.get("subtype").and_then(Value::as_str) != Some("success");
                 if failed {
@@ -360,10 +367,11 @@ impl ClaudeParser {
                         }))
                         .filter(|r| !r.is_empty())
                         .unwrap_or_else(|| format!("claude ended the turn: {}", value["subtype"].as_str().unwrap_or("error")));
-                    vec![ProviderEvent::Failed(reason)]
+                    events.push(ProviderEvent::Failed(reason));
                 } else {
-                    vec![ProviderEvent::Done]
+                    events.push(ProviderEvent::Done);
                 }
+                events
             }
             _ => vec![],
         }
@@ -426,6 +434,14 @@ mod tests {
 
     #[test]
     fn reports_failed_results() {
+        let events = parse_all(&[
+            json!({"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"seven_day"}}),
+            json!({"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":4,"cache_creation_input_tokens":100,"cache_read_input_tokens":900,"output_tokens":88}}),
+        ]);
+        assert_eq!(events[0], ProviderEvent::Limits(json!({"status":"allowed","rateLimitType":"seven_day"})));
+        assert_eq!(events[1], ProviderEvent::Usage { input: 1004, output: 88 });
+        assert_eq!(events[2], ProviderEvent::Done);
+
         let events = parse_all(&[json!({"type":"result","subtype":"error_max_turns","is_error":true})]);
         assert_eq!(events, vec![ProviderEvent::Failed("claude ended the turn: error_max_turns".into())]);
         let events = parse_all(&[json!({"type":"result","subtype":"success","is_error":true,"result":"Credit balance is too low"})]);

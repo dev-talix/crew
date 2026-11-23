@@ -179,7 +179,20 @@ pub struct Db {
     conn: Mutex<Connection>,
 }
 
-const SCHEMA_VERSION: i64 = 7;
+/// One turn's tokens, for the Usage page.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageRow {
+    pub agent_id: String,
+    pub provider: String,
+    /// "you", "ritual", or "spell".
+    pub origin: String,
+    pub input: i64,
+    pub output: i64,
+    pub at: i64,
+}
+
+const SCHEMA_VERSION: i64 = 8;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -319,6 +332,23 @@ impl Db {
                    PRIMARY KEY (agent_id, scope)
                  );
                  PRAGMA user_version = 7;
+                 COMMIT;",
+            )?;
+        }
+        if version < 8 {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE usage (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   agent_id TEXT NOT NULL,
+                   provider TEXT NOT NULL,
+                   origin TEXT NOT NULL,
+                   input_tokens INTEGER NOT NULL,
+                   output_tokens INTEGER NOT NULL,
+                   at INTEGER NOT NULL
+                 );
+                 CREATE INDEX usage_by_time ON usage(at);
+                 PRAGMA user_version = 8;
                  COMMIT;",
             )?;
         }
@@ -540,6 +570,29 @@ impl Db {
 
     pub fn delete_workflow(&self, id: &str) -> Result<(), String> {
         self.with(|c| c.execute("DELETE FROM workflows WHERE id = ?1", params![id]).map(|_| ()))
+    }
+
+    pub fn insert_usage(&self, agent_id: &str, provider: &Provider, origin: &str, input: u64, output: u64) -> Result<(), String> {
+        let provider = serde_json::to_value(provider).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO usage (agent_id, provider, origin, input_tokens, output_tokens, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![agent_id, provider, origin, input as i64, output as i64, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn usage_since(&self, since: i64) -> Result<Vec<UsageRow>, String> {
+        self.with(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT agent_id, provider, origin, input_tokens, output_tokens, at FROM usage WHERE at >= ?1 ORDER BY at",
+            )?;
+            let rows = stmt.query_map(params![since], |r| {
+                Ok(UsageRow { agent_id: r.get(0)?, provider: r.get(1)?, origin: r.get(2)?, input: r.get(3)?, output: r.get(4)?, at: r.get(5)? })
+            })?;
+            rows.collect()
+        })
     }
 
     /// Whether `agent_id` may do what `scope` names without asking, like "vault:<item id>".

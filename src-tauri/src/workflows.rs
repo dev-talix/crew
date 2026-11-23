@@ -118,7 +118,7 @@ impl WorkflowRunner {
     async fn run(self: Arc<Self>, workflow: Workflow, input: String) {
         let total = workflow.steps.len();
         let mut previous: Option<String> = None;
-        let source = format!("Spell: {}", workflow.name);
+        let source = format!("{}{}", crate::runtime::SPELL_SOURCE, workflow.name);
         for (index, step) in workflow.steps.iter().enumerate() {
             if let Ok(mut running) = self.running.lock() {
                 running.insert(workflow.id.clone(), Some(step.agent_id.clone()));

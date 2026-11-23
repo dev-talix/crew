@@ -110,6 +110,18 @@ export const CardIcon = () => (
   </Icon>
 );
 
+export const RefreshIcon = () => (
+  <Icon size={14}>
+    <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3" />
+  </Icon>
+);
+
+export const BarsIcon = () => (
+  <Icon>
+    <path d="M3 13.5V9M8 13.5V3M13 13.5V6.5" />
+  </Icon>
+);
+
 export const ShieldIcon = () => (
   <Icon>
     <path d="M8 1.8 13 3.7v4c0 3.1-2.1 5.5-5 6.5-2.9-1-5-3.4-5-6.5v-4z" />
