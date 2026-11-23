@@ -2,32 +2,13 @@ import { getVersion } from "@tauri-apps/api/app";
 import { createSignal, For, Show } from "solid-js";
 import { api, createFetch, errorText, PROVIDER_NAMES, type DockEdge, type Provider, type ProviderStatus, type Settings } from "./api";
 import { Page, Segmented } from "./ui";
+import { ThemePicker } from "./ThemeEditor";
+import { readMode, setMode, type ModeSetting } from "./themeStore";
 import "./settings.css";
 
-type Theme = "system" | "light" | "dark";
 type Billing = Settings["claudeBilling"];
 
-const THEME_KEY = "crew-theme";
 const PROVIDERS: Provider[] = ["codex", "claude"];
-
-function readTheme(): Theme {
-  try {
-    const stored = localStorage.getItem(THEME_KEY);
-    if (stored === "light" || stored === "dark") return stored;
-  } catch {
-    // Storage can be unavailable. Fall back to the system appearance.
-  }
-  return "system";
-}
-
-function applyTheme(theme: Theme) {
-  if (theme === "system") delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = theme;
-}
-
-export function applyStoredTheme(): void {
-  applyTheme(readTheme());
-}
 
 function accountState(status: ProviderStatus | undefined): "loading" | "ok" | "unknown" | "off" {
   if (!status) return "loading";
@@ -102,16 +83,12 @@ export default function SettingsPage() {
     if (next !== settings().dockEdge) void saveSetting({ dockEdge: next }, setDockError);
   };
 
-  const [theme, setTheme] = createSignal<Theme>(readTheme());
-  const changeTheme = (next: Theme) => {
-    setTheme(next);
-    applyTheme(next);
-    try {
-      localStorage.setItem(THEME_KEY, next);
-    } catch {
-      // The choice still applies for this session.
-    }
+  const [mode, setModeSignal] = createSignal<ModeSetting>(readMode());
+  const changeMode = (next: ModeSetting) => {
+    setModeSignal(next);
+    setMode(next);
   };
+  const agents = createFetch(() => null, api.listAgents);
 
   const appVersion = createFetch(() => null, getVersion);
 
@@ -174,12 +151,12 @@ export default function SettingsPage() {
         <p class="hint settings-footnote">
           <Show
             when={billing() === "api"}
-            fallback="Recommended. Claude uses your claude.ai Pro or Max sign-in, and Crew hides any Anthropic API key from it."
+            fallback="Recommended. Claude uses your claude.ai Pro or Max sign-in, and Grimoire hides any Anthropic API key from it."
           >
             Claude uses the Anthropic API key in your environment, and that key is billed.
           </Show>
           <br />
-          Changing this restarts idle Claude agents.
+          Changing this restarts idle Claude familiars.
         </p>
         <Show when={billingError()}>
           <div class="error-box settings-error">{billingError()}</div>
@@ -189,7 +166,7 @@ export default function SettingsPage() {
         <div class="list">
           <div class="list-row">
             <div class="list-main">
-              <div class="list-title">Show agents on the screen edge</div>
+              <div class="list-title">Show familiars on the screen edge</div>
             </div>
             <Segmented
               label="Dock position"
@@ -204,7 +181,7 @@ export default function SettingsPage() {
           </div>
         </div>
         <p class="hint settings-footnote">
-          Click an agent in the dock to chat without opening Crew. While the dock is on, closing the Crew window keeps your agents running.
+          Click a familiar in the dock to chat without opening Grimoire. While the dock is on, closing the Grimoire window keeps your familiars running.
         </p>
         <Show when={dockError()}>
           <div class="error-box settings-error">{dockError()}</div>
@@ -214,28 +191,29 @@ export default function SettingsPage() {
         <div class="list">
           <div class="list-row">
             <div class="list-main">
-              <div class="list-title">Theme</div>
+              <div class="list-title">Mode</div>
             </div>
             <Segmented
-              label="Theme"
-              value={theme()}
+              label="Mode"
+              value={mode()}
               options={[
                 { value: "system", label: "System" },
                 { value: "light", label: "Light" },
                 { value: "dark", label: "Dark" },
               ]}
-              onChange={changeTheme}
+              onChange={changeMode}
             />
           </div>
         </div>
+        <ThemePicker mode={mode()} agents={agents() ?? []} />
 
         <h2 class="section-title">About</h2>
         <div class="list">
           <div class="list-row">
             <div class="list-main">
-              <div class="list-title">Crew</div>
+              <div class="list-title">Grimoire</div>
               <p class="settings-detail">
-                Crew keeps its data on this Mac in <code>~/Library/Application Support/dev.talix.crew</code>.
+                Grimoire keeps its data on this Mac in <code>~/Library/Application Support/dev.talix.grimoire</code>.
               </p>
             </div>
             <span class="settings-value">Version {appVersion() ?? "0.1.0"}</span>

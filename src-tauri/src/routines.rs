@@ -75,8 +75,8 @@ impl Scheduler {
     }
 
     pub fn run_now(&self, routine: &Routine) -> Result<(), String> {
-        let runtime = self.runtime.upgrade().ok_or("Crew is shutting down.")?;
-        runtime.send(&routine.agent_id, routine.prompt.clone(), Some(&format!("Routine: {}", routine.name)))?;
+        let runtime = self.runtime.upgrade().ok_or("Grimoire is shutting down.")?;
+        runtime.send(&routine.agent_id, routine.prompt.clone(), Some(&format!("Ritual: {}", routine.name)))?;
         let mut updated = routine.clone();
         updated.last_run_at = Some(now_ms());
         self.db.save_routine(&updated)?;
@@ -118,7 +118,7 @@ impl Scheduler {
             };
             if due <= now {
                 if let Some(runtime) = self.runtime.upgrade() {
-                    let _ = runtime.send(&routine.agent_id, routine.prompt.clone(), Some(&format!("Routine: {}", routine.name)));
+                    let _ = runtime.send(&routine.agent_id, routine.prompt.clone(), Some(&format!("Ritual: {}", routine.name)));
                 }
                 routine.last_run_at = Some(now);
                 routine.next_run_at = next_run_ms(&routine.schedule, now);

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "Moonstone",
+  "variants": {
+    "dark": {
+      "canvas": "#1a1b1e",
+      "accent": "#c3cde0"
+    },
+    "light": {
+      "canvas": "#f6f7f9",
+      "accent": "#3f4b63"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "Lapis",
+  "variants": {
+    "dark": {
+      "canvas": "#13152a",
+      "accent": "#7d8cff"
+    },
+    "light": {
+      "canvas": "#f4f5fc",
+      "accent": "#2f3fc4"
+    }
+  }
+}

@@ -1,4 +1,4 @@
-import { createMemo, createSignal, createStore, flush, For, onCleanup, onSettled, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createStore, flush, For, onCleanup, onSettled, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import BotAvatar from "./BotAvatar";
 import { AgentSelect, EmptyState, Page, Sheet } from "./ui";
@@ -46,11 +46,19 @@ const RemoveIcon = () => (
 
 function runLabel(run: Run): string {
   if (run.state === "done") return "Finished";
-  if (run.state === "running") return run.step > 0 ? `Step ${run.step} of ${run.total}` : "Running";
+  if (run.state === "running") return run.step > 0 ? `Step ${run.step} of ${run.total}` : "Casting";
   return `${run.state === "stopped" ? "Stopped" : "Failed"} at step ${run.step} of ${run.total}`;
 }
 
-export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id: string) => void }) {
+/** What the sidebar asked for when it opened this page: cast one spell, or start a new one. */
+export type SpellIntent = { cast: string } | { create: true };
+
+export default function WorkflowsPage(props: {
+  agents: Agent[];
+  onOpenAgent: (id: string) => void;
+  intent?: SpellIntent | null;
+  onIntentDone?: () => void;
+}) {
   const [workflows, setWorkflows] = createSignal<Workflow[]>([]);
   const [runs, setRuns] = createStore<Record<string, Run | undefined>>({});
   const [loaded, setLoaded] = createSignal(false);
@@ -59,6 +67,7 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
   const [starting, setStarting] = createSignal<Workflow | null>(null);
   const agentById = createMemo(() => new Map(props.agents.map((a) => [a.id, a])));
   const noAgents = () => props.agents.length === 0;
+
 
   const setRun = (id: string, run: Run | undefined) =>
     setRuns((runs) => {
@@ -84,6 +93,19 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
   });
 
   const isRunning = (id: string) => runs[id]?.state === "running";
+
+  // Acts on the sidebar's request once the spells have loaded, and again for each new request.
+  createEffect(
+    () => (loaded() ? props.intent : null),
+    (intent) => {
+      if (!intent) return;
+      if ("cast" in intent) {
+        const spell = workflows().find((w) => w.id === intent.cast);
+        if (spell && !isRunning(spell.id)) setStarting(spell);
+      } else if (!noAgents()) setEditing("new");
+      props.onIntentDone?.();
+    },
+  );
 
   const stop = async (id: string) => {
     setError("");
@@ -122,17 +144,17 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
   const newButton = () => (
     <>
       <Show when={noAgents()}>
-        <span class="hint">Create an agent first.</span>
+        <span class="hint">Summon a familiar first.</span>
       </Show>
       <button class="primary" disabled={noAgents()} onClick={() => setEditing("new")}>
-        New workflow
+        New spell
       </button>
     </>
   );
 
   return (
     <>
-      <Page title="Workflows" actions={<Show when={workflows().length > 0}>{newButton()}</Show>}>
+      <Page title="Spells" actions={<Show when={workflows().length > 0}>{newButton()}</Show>}>
         <Show when={error()}>
           <p class="error-box wf-page-error" role="alert">
             {error()}
@@ -143,8 +165,8 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
             when={workflows().length > 0}
             fallback={
               <EmptyState
-                title="No workflows yet"
-                body="Chain agents into steps, like research, then write, then review. Each step gets the previous reply."
+                title="No spells yet"
+                body="Chain familiars into steps, like research, then write, then review. Each step gets the previous reply."
                 action={<div class="wf-empty-action">{newButton()}</div>}
               />
             }
@@ -159,7 +181,7 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
                       <div class="list-main">
                         <div class="list-title">{workflow.name}</div>
                         <Show when={workflow.createdBy}>
-                          {(id) => <div class="list-sub">Made by {agentById().get(id())?.name ?? "a deleted agent"}</div>}
+                          {(id) => <div class="list-sub">Made by {agentById().get(id())?.name ?? "a deleted familiar"}</div>}
                         </Show>
                         <div class="wf-meta">
                           <ol class="wf-chain" aria-label="Steps">
@@ -183,8 +205,8 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
                                         <span
                                           class="wf-missing"
                                           role="img"
-                                          aria-label={`Step ${index() + 1} has no agent`}
-                                          title="Agent deleted"
+                                          aria-label={`Step ${index() + 1} has no familiar`}
+                                          title="Familiar deleted"
                                         />
                                       }
                                     >
@@ -220,7 +242,7 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
                           when={running()}
                           fallback={
                             <button class="ghost small" disabled={noAgents()} onClick={() => setStarting(workflow)}>
-                              Run
+                              Cast
                             </button>
                           }
                         >
@@ -245,7 +267,7 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
         {(target) => {
           const workflow = target() === "new" ? undefined : (target() as Workflow);
           return (
-            <Sheet label={workflow ? "Edit workflow" : "New workflow"} wide onClose={() => setEditing(null)}>
+            <Sheet label={workflow ? "Edit spell" : "New spell"} wide onClose={() => setEditing(null)}>
               <WorkflowEditor
                 workflow={workflow}
                 agents={props.agents}
@@ -260,7 +282,7 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
 
       <Show when={starting()}>
         {(workflow) => (
-          <Sheet label={`Run ${workflow().name}`} onClose={() => setStarting(null)}>
+          <Sheet label={`Cast ${workflow().name}`} onClose={() => setStarting(null)}>
             <RunForm workflow={workflow()} onRun={(input) => run(workflow(), input)} onCancel={() => setStarting(null)} />
           </Sheet>
         )}
@@ -295,7 +317,7 @@ function RunForm(props: { workflow: Workflow; onRun: (input: string) => Promise<
 
   return (
     <form class="wf-form" onSubmit={submit}>
-      <h1>Run {props.workflow.name}</h1>
+      <h1>Cast {props.workflow.name}</h1>
       <div class="field">
         <label class="field">
           <span>Starting text</span>
@@ -325,7 +347,7 @@ function RunForm(props: { workflow: Workflow; onRun: (input: string) => Promise<
           Cancel
         </button>
         <button class="primary" type="submit" disabled={busy()}>
-          Start workflow
+          Cast spell
         </button>
       </div>
     </form>
@@ -428,7 +450,7 @@ function WorkflowEditor(props: {
 
   return (
     <form class="wf-form" onSubmit={submit}>
-      <h1>{props.workflow ? "Edit workflow" : "New workflow"}</h1>
+      <h1>{props.workflow ? "Edit spell" : "New spell"}</h1>
       <label class="field">
         <span>Name</span>
         <input
@@ -461,7 +483,7 @@ function WorkflowEditor(props: {
                       <AgentSelect
                         agents={props.agents}
                         value={step.agentId}
-                        label={`Step ${n()} agent`}
+                        label={`Step ${n()} familiar`}
                         onChange={(id) => setStep(index(), { agentId: id })}
                       />
                       <span class="spacer" />
@@ -526,7 +548,7 @@ function WorkflowEditor(props: {
       <div class="form-actions">
         <Show when={props.workflow}>
           <button type="button" class="ghost danger" onClick={destroy}>
-            {confirmDelete() ? "Click again to delete" : "Delete workflow"}
+            {confirmDelete() ? "Click again to delete" : "Delete spell"}
           </button>
         </Show>
         <span class="spacer" />
@@ -534,7 +556,7 @@ function WorkflowEditor(props: {
           Cancel
         </button>
         <button class="primary" type="submit" disabled={saving() || !name().trim()}>
-          Save workflow
+          Save spell
         </button>
       </div>
     </form>

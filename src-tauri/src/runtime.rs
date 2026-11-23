@@ -118,7 +118,7 @@ impl Runtime {
 
     fn enqueue(self: &Arc<Self>, agent_id: &str, text: String, source: Option<&str>, reply: Option<Reply>) -> Result<Message, String> {
         if self.db.get_agent(agent_id)?.is_none() {
-            return Err("That agent no longer exists.".into());
+            return Err("That familiar no longer exists.".into());
         }
         let mut agents = self.agents.lock().map_err(|_| "runtime state poisoned")?;
         let state = agents.entry(agent_id.to_string()).or_default();
@@ -238,7 +238,7 @@ impl Runtime {
     async fn run_turn(self: &Arc<Self>, agent_id: &str, text: &str) -> TurnOutcome {
         let agent = match self.db.get_agent(agent_id) {
             Ok(Some(agent)) => agent,
-            _ => return TurnOutcome::Failed("That agent no longer exists.".into()),
+            _ => return TurnOutcome::Failed("That familiar no longer exists.".into()),
         };
         let (tx, rx) = mpsc::unbounded_channel();
         let started = match agent.provider {
@@ -275,7 +275,7 @@ pub async fn stream_turn(writer: &mut TurnWriter<'_>, mut rx: mpsc::UnboundedRec
             Some(ProviderEvent::Done) => return writer.close("done"),
             Some(ProviderEvent::Stopped) => return writer.close("stopped"),
             Some(ProviderEvent::Failed(reason)) => return writer.fail(&reason),
-            None => return writer.fail("The agent stopped without finishing its reply."),
+            None => return writer.fail("The familiar stopped without finishing its reply."),
         }
     }
 }
@@ -492,7 +492,7 @@ mod tests {
     }
 
     async fn live_turn(provider: Provider, prompt: &str) -> (Db, Vec<Message>) {
-        let workspace = std::env::temp_dir().join(format!("crew-live-{}", uuid::Uuid::new_v4()));
+        let workspace = std::env::temp_dir().join(format!("grimoire-live-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&workspace).unwrap();
         let db = Db::open_in_memory().unwrap();
         let agent = Agent {

@@ -92,7 +92,7 @@ fn thread_params(agent: &Agent) -> Value {
         params["model"] = json!(model);
     }
     if let Some((command, args)) = crate::tools::server_command(&agent.id) {
-        // Codex refuses MCP calls that need approval under approvalPolicy "never", so pre-approve Crew's own tools.
+        // Codex refuses MCP calls that need approval under approvalPolicy "never", so pre-approve Grimoire's own tools.
         let server = json!({ "command": command, "args": args, "default_tools_approval_mode": "approve" });
         params["config"] = json!({ "mcp_servers": { (crate::tools::SERVER_NAME): server } });
     }
@@ -276,7 +276,7 @@ impl Codex {
             }
         });
 
-        let init = json!({ "clientInfo": { "name": "crew", "title": "Crew", "version": env!("CARGO_PKG_VERSION") }, "capabilities": null });
+        let init = json!({ "clientInfo": { "name": "grimoire", "title": "Grimoire", "version": env!("CARGO_PKG_VERSION") }, "capabilities": null });
         process.request("initialize", init).await?;
         process.write(&json!({ "method": "initialized" })).await?;
         *slot = Some(process.clone());
@@ -291,7 +291,7 @@ impl Codex {
                     "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
                         json!({ "id": id, "result": { "decision": "decline" } })
                     }
-                    _ => json!({ "id": id, "error": { "code": -32601, "message": "Crew does not support this request." } }),
+                    _ => json!({ "id": id, "error": { "code": -32601, "message": "Grimoire does not support this request." } }),
                 };
                 let _ = process.write(&reply).await;
             }

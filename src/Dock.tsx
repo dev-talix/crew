@@ -5,7 +5,7 @@ import Chat from "./Chat";
 import { createChatStore } from "./chatStore";
 import { api, onEvent, onMountAsync, subscribe, type Agent } from "./api";
 import { inkFor } from "./avatar";
-import { CrewIcon } from "./icons";
+import { GrimoireIcon } from "./icons";
 import { createMoods } from "./moods";
 import { runningModelName } from "./models";
 import "./dock.css";
@@ -74,7 +74,7 @@ export default function Dock() {
     setSelected(null);
   };
 
-  const openInCrew = async (id?: string) => {
+  const openInGrimoire = async (id?: string) => {
     await api.showMain(id).catch(() => undefined);
     void close();
   };
@@ -156,7 +156,7 @@ export default function Dock() {
 
   return (
     <div data-edge={edge()} data-phase={phase()} class={["dock", { entered: entered() }]}>
-      <nav class="dock-rail" aria-label="Agents" style={{ height: `${railHeight()}px` }}>
+      <nav class="dock-rail" data-slot="dock" aria-label="Familiars" style={{ height: `${railHeight()}px` }}>
         <For each={agents()}>
           {(agent, index) => (
             <button
@@ -177,8 +177,8 @@ export default function Dock() {
         <Show when={agents().length}>
           <span class="dock-sep" aria-hidden="true" />
         </Show>
-        <button class="dock-agent dock-home" aria-label="Open Crew" title="Open Crew" onClick={() => void openInCrew()}>
-          <CrewIcon />
+        <button class="dock-agent dock-home" aria-label="Open Grimoire" title="Open Grimoire" onClick={() => void openInGrimoire()}>
+          <GrimoireIcon />
         </button>
       </nav>
 
@@ -193,9 +193,9 @@ export default function Dock() {
               busy={!!busy[agent().id]}
               mood={moods.mood(agent().id, !!busy[agent().id])}
               store={chat}
-              onEdit={() => void openInCrew(agent().id)}
+              onEdit={() => void openInGrimoire(agent().id)}
               onAgentUpdated={(updated) => setAgents((list) => list.map((a) => (a.id === updated.id ? updated : a)))}
-              compact={{ onClose: () => void close(), onOpenMain: () => void openInCrew(agent().id) }}
+              compact={{ onClose: () => void close(), onOpenMain: () => void openInGrimoire(agent().id) }}
             />
           </div>
         )}

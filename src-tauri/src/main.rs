@@ -3,7 +3,7 @@
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("mcp") {
-        std::process::exit(crew_lib::mcp_main(&args[2..]));
+        std::process::exit(grimoire_lib::mcp_main(&args[2..]));
     }
-    crew_lib::run()
+    grimoire_lib::run()
 }

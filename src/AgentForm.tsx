@@ -96,7 +96,7 @@ export default function AgentForm(props: {
       style={{ "--agent": avatar().color, "--agent-ink": inkFor(avatar().color) }}
       onSubmit={submit}
     >
-      <h1>{editing ? "Agent settings" : "New agent"}</h1>
+      <h1>{editing ? "Familiar settings" : "Summon a familiar"}</h1>
       <AvatarStudio avatar={avatar()} name={name()} onChange={setAvatar} />
 
       <div class="form-grid">
@@ -152,7 +152,7 @@ export default function AgentForm(props: {
         <Show when={!editing}>
           <label class="field">
             <span>Workspace folder</span>
-            <input value={workspace()} onInput={(e) => setWorkspace(e.currentTarget.value)} placeholder="A new folder in ~/Crew" />
+            <input value={workspace()} onInput={(e) => setWorkspace(e.currentTarget.value)} placeholder="A new folder in ~/Grimoire" />
           </label>
         </Show>
 
@@ -180,7 +180,7 @@ export default function AgentForm(props: {
       <div class="form-actions">
         <Show when={editing}>
           <button type="button" class="ghost danger" onClick={remove}>
-            {confirmDelete() ? "Click again to delete" : "Delete agent"}
+            {confirmDelete() ? "Click again to delete" : "Delete familiar"}
           </button>
         </Show>
         <span class="spacer" />
@@ -190,7 +190,7 @@ export default function AgentForm(props: {
           </button>
         </Show>
         <button class="primary" type="submit" disabled={saving() || !name().trim()}>
-          {editing ? "Save changes" : "Create agent"}
+          {editing ? "Save changes" : "Summon familiar"}
         </button>
       </div>
     </form>

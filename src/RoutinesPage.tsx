@@ -78,16 +78,16 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
       type="button"
       class={primary ? "primary" : "ghost"}
       disabled={noAgents()}
-      title={noAgents() ? "Create an agent first" : undefined}
+      title={noAgents() ? "Summon a familiar first" : undefined}
       onClick={() => setEditing("new")}
     >
       <PlusIcon />
-      New routine
+      New ritual
     </button>
   );
 
   return (
-    <Page title="Routines" actions={newButton(true)}>
+    <Page title="Rituals" actions={newButton(true)}>
       <div class="routines">
         <Show when={error()}>
           <p class="error-box" role="alert">
@@ -97,11 +97,11 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
 
         <Show when={loaded() && groups().length === 0}>
           <EmptyState
-            title="No routines yet"
+            title="No rituals yet"
             body={
               noAgents()
-                ? "Create an agent first. A routine sends it a message on a schedule."
-                : "A routine sends an agent the same message on a schedule, like a morning summary or an hourly check."
+                ? "Summon a familiar first. A ritual sends it a message on a schedule."
+                : "A ritual sends a familiar the same message on a schedule, like a morning summary or an hourly check."
             }
             action={newButton(false)}
           />
@@ -301,7 +301,7 @@ function RoutineEditor(props: {
     }
   };
 
-  const title = props.routine ? "Edit routine" : "New routine";
+  const title = props.routine ? "Edit ritual" : "New ritual";
 
   return (
     <Sheet label={title} onClose={props.onClose}>
@@ -310,8 +310,8 @@ function RoutineEditor(props: {
 
         <div class="form-grid">
           <div class="field">
-            <span>Agent</span>
-            <AgentSelect label="Agent" agents={props.agents} value={agentId()} onChange={setAgentId} />
+            <span>Familiar</span>
+            <AgentSelect label="Familiar" agents={props.agents} value={agentId()} onChange={setAgentId} />
           </div>
 
           <label class="field">
@@ -335,7 +335,7 @@ function RoutineEditor(props: {
               rows={4}
               required
             />
-            <p class="hint">Crew sends this message to the agent on each run.</p>
+            <p class="hint">Grimoire sends this message to the familiar on each run.</p>
           </label>
 
           <div class="field wide">
@@ -425,7 +425,7 @@ function RoutineEditor(props: {
         <div class="form-actions">
           <Show when={props.routine}>
             <button type="button" class="ghost danger" onClick={() => void remove()}>
-              {confirmDelete() ? "Click again to delete" : "Delete routine"}
+              {confirmDelete() ? "Click again to delete" : "Delete ritual"}
             </button>
           </Show>
           <span class="spacer" />
@@ -433,7 +433,7 @@ function RoutineEditor(props: {
             Cancel
           </button>
           <button class="primary" type="submit" disabled={!canSave()}>
-            Save routine
+            Save ritual
           </button>
         </div>
       </form>

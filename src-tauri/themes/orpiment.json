@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "Orpiment",
+  "variants": {
+    "dark": {
+      "canvas": "#1b1914",
+      "accent": "#e2b84f"
+    },
+    "light": {
+      "canvas": "#f8f5ec",
+      "accent": "#8a6512"
+    }
+  }
+}

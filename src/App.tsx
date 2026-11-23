@@ -7,12 +7,12 @@ import { createChatStore } from "./chatStore";
 import HomePage from "./HomePage";
 import RoutinesPage from "./RoutinesPage";
 import SettingsPage from "./SettingsPage";
-import WorkflowsPage from "./WorkflowsPage";
-import { api, errorText, onEvent, onMountAsync, PROVIDER_NAMES, subscribe, type Agent } from "./api";
+import WorkflowsPage, { type SpellIntent } from "./WorkflowsPage";
+import { api, errorText, onEvent, onMountAsync, PROVIDER_NAMES, subscribe, type Agent, type Workflow } from "./api";
 import { inkFor } from "./avatar";
 import { runningModelName } from "./models";
 import { createMoods } from "./moods";
-import { ClockIcon, FlowIcon, GearIcon, HomeIcon, PlusIcon } from "./icons";
+import { ClockIcon, GearIcon, HomeIcon, PlusIcon } from "./icons";
 import { Sheet } from "./ui";
 
 type View = "home" | "routines" | "workflows" | "settings" | "new" | { agent: string };
@@ -39,6 +39,14 @@ export default function App() {
   const [editing, setEditing] = createSignal(false);
   const [loaded, setLoaded] = createSignal(false);
   const [loadError, setLoadError] = createSignal("");
+  const [spells, setSpells] = createSignal<Workflow[]>([]);
+  const [spellIntent, setSpellIntent] = createSignal<SpellIntent | null>(null);
+  const agentById = (id: string) => agents().find((a) => a.id === id);
+  const loadSpells = () => api.listWorkflows().then(setSpells, () => {});
+  const openSpells = (intent: SpellIntent | null) => {
+    setSpellIntent(intent);
+    setView("workflows");
+  };
 
   const selected = () => {
     const v = view();
@@ -75,6 +83,8 @@ export default function App() {
       setAgents((list) => list.map((a) => (a.id === agentId ? { ...a, activeModel: model } : a))),
     );
     keep(stopModels);
+    keep(await onEvent("workflows_changed", () => void loadSpells()));
+    void loadSpells();
     const stopOpen = await onEvent<string>("open_agent", (id) => {
       if (agents().some((a) => a.id === id)) openAgent(id);
     });
@@ -151,28 +161,28 @@ export default function App() {
 
   return (
     <div class="app">
-      <aside class="sidebar">
+      <aside class="sidebar" data-slot="sidebar">
         <div class="sidebar-top" data-tauri-drag-region>
           <span class="brand" data-tauri-drag-region>
-            Crew
+            Grimoire
           </span>
         </div>
         <nav class="nav" aria-label="Sections">
           <NavItem label="Home" icon={<HomeIcon />} active={is("home")} onClick={() => setView("home")} />
-          <NavItem label="Routines" icon={<ClockIcon />} active={is("routines")} onClick={() => setView("routines")} />
-          <NavItem label="Workflows" icon={<FlowIcon />} active={is("workflows")} onClick={() => setView("workflows")} />
+          <NavItem label="Rituals" icon={<ClockIcon />} active={is("routines")} onClick={() => setView("routines")} />
         </nav>
         <div class="sidebar-caption">
-          <span>Agents</span>
-          <button class="icon-button" aria-label="New agent" title="New agent (⌘N)" onClick={() => setView("new")}>
+          <span>Familiars</span>
+          <button class="icon-button" aria-label="Summon a familiar" title="Summon a familiar (⌘N)" onClick={() => setView("new")}>
             <PlusIcon />
           </button>
         </div>
-        <nav class="agent-list" aria-label="Agents">
+        <nav class="agent-list" aria-label="Familiars and spells">
           <For each={agents()}>
             {(agent, index) => (
               <button
                 class={["agent-row", { active: agent.id === selected() }]}
+                data-slot="sidebar-row"
                 aria-current={agent.id === selected() ? "page" : undefined}
                 title={index() < 9 ? `${agent.name} (⌘${index() + 1})` : agent.name}
                 style={{ "--agent": agent.avatar.color }}
@@ -188,6 +198,26 @@ export default function App() {
                 <Show when={!busy[agent.id] && unread[agent.id]}>
                   <span class="unread-dot" aria-hidden="true" />
                 </Show>
+              </button>
+            )}
+          </For>
+          <div class="sidebar-caption">
+            <button class={["caption-link", { active: is("workflows") }]} aria-current={is("workflows") ? "page" : undefined} onClick={() => openSpells(null)}>
+              Spells
+            </button>
+            <button class="icon-button" aria-label="New spell" title="New spell" disabled={!agents().length} onClick={() => openSpells({ create: true })}>
+              <PlusIcon />
+            </button>
+          </div>
+          <For each={spells()}>
+            {(spell) => (
+              <button class="spell-row" data-slot="sidebar-row" title={`Cast ${spell.name}`} onClick={() => openSpells({ cast: spell.id })}>
+                <span class="spell-name">{spell.name}</span>
+                <span class="spell-chain" aria-hidden="true">
+                  <For each={spell.steps.slice(0, 4)}>
+                    {(step) => <Show when={agentById(step.agentId)}>{(a) => <BotAvatar avatar={a().avatar} size={14} alive={false} />}</Show>}
+                  </For>
+                </span>
               </button>
             )}
           </For>
@@ -217,7 +247,7 @@ export default function App() {
                     onAgentUpdated={replaceAgent}
                   />
                   <Show when={editing()}>
-                    <Sheet label="Agent settings" wide onClose={() => setEditing(false)}>
+                    <Sheet label="Familiar settings" wide onClose={() => setEditing(false)}>
                       <AgentForm agent={agent()} onSaved={updated} onCancel={() => setEditing(false)} onDeleted={deleted} />
                     </Sheet>
                   </Show>
@@ -233,7 +263,7 @@ export default function App() {
               <RoutinesPage agents={agents()} onOpenAgent={openAgent} />
             </Match>
             <Match when={is("workflows")}>
-              <WorkflowsPage agents={agents()} onOpenAgent={openAgent} />
+              <WorkflowsPage agents={agents()} onOpenAgent={openAgent} intent={spellIntent()} onIntentDone={() => setSpellIntent(null)} />
             </Match>
             <Match when={is("settings")}>
               <SettingsPage />

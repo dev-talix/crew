@@ -1,14 +1,12 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { render } from "@solidjs/web";
+import "@fontsource-variable/newsreader";
 import App from "./App";
 import Dock from "./Dock";
-import { applyStoredTheme } from "./SettingsPage";
+import { startThemes } from "./themeStore";
 import "./styles.css";
 
-applyStoredTheme();
-window.addEventListener("storage", (event) => {
-  if (event.key === "crew-theme") applyStoredTheme();
-});
+startThemes();
 
 const isDock = getCurrentWindow().label === "dock";
 document.documentElement.classList.toggle("dock-window", isDock);

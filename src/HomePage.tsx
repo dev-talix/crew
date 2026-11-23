@@ -63,7 +63,7 @@ export default function HomePage(props: {
   const summary = () => {
     const count = props.agents.length;
     const busy = working();
-    const agents = `${count} ${count === 1 ? "agent" : "agents"}`;
+    const agents = `${count} ${count === 1 ? "familiar" : "familiars"}`;
     return busy ? `${agents}, ${busy} working now` : `${agents}, all idle`;
   };
 
@@ -72,7 +72,7 @@ export default function HomePage(props: {
       title="Home"
       actions={
         <button class="ghost small" onClick={props.onNewAgent}>
-          <PlusIcon /> New agent
+          <PlusIcon /> Summon a familiar
         </button>
       }
     >
@@ -80,11 +80,11 @@ export default function HomePage(props: {
         when={props.agents.length}
         fallback={
           <EmptyState
-            title="Build your crew"
-            body="Each agent gets its own workspace folder and runs on Codex or Claude."
+            title="Summon your first familiar"
+            body="Each familiar gets its own workspace folder and runs on Codex or Claude."
             action={
               <button class="primary" onClick={props.onNewAgent}>
-                Create your first agent
+                Summon a familiar
               </button>
             }
           />
@@ -116,9 +116,9 @@ export default function HomePage(props: {
               when={upcoming().length}
               fallback={
                 <div class="list-row">
-                  <span class="list-main list-sub">No routines scheduled.</span>
+                  <span class="list-main list-sub">No rituals scheduled.</span>
                   <button class="ghost small" onClick={props.onOpenRoutines}>
-                    Set up a routine
+                    Set up a ritual
                   </button>
                 </div>
               }

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "Dragon's blood",
+  "variants": {
+    "dark": {
+      "canvas": "#1d1617",
+      "accent": "#e5676f"
+    },
+    "light": {
+      "canvas": "#faf5f3",
+      "accent": "#a8303b"
+    }
+  }
+}

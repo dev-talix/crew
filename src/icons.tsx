@@ -74,14 +74,6 @@ export const ClockIcon = () => (
   </Icon>
 );
 
-export const FlowIcon = () => (
-  <Icon>
-    <rect x="1.8" y="2.5" width="4.2" height="3.6" rx="1" />
-    <rect x="10" y="9.9" width="4.2" height="3.6" rx="1" />
-    <path d="M6 4.3h2.2c.9 0 1.6.7 1.6 1.6v3.2c0 .9.7 1.6 1.6 1.6h.6" />
-  </Icon>
-);
-
 export const MicIcon = () => (
   <Icon>
     <rect x="5.8" y="1.8" width="4.4" height="7.6" rx="2.2" />
@@ -172,7 +164,7 @@ export const ExpandIcon = () => (
   </Icon>
 );
 
-export const CrewIcon = () => (
+export const GrimoireIcon = () => (
   <Icon>
     <circle cx="5.5" cy="7" r="2.2" />
     <circle cx="10.5" cy="7" r="2.2" />

@@ -5,6 +5,7 @@ mod providers;
 mod routines;
 mod runtime;
 mod status;
+mod themes;
 mod tools;
 mod workflows;
 
@@ -25,6 +26,7 @@ struct AppState {
     scheduler: Arc<Scheduler>,
     workflows: Arc<WorkflowRunner>,
     dock: dock::Dock,
+    themes_dir: PathBuf,
 }
 
 const CLAUDE_BILLING: &str = "claude_billing";
@@ -63,7 +65,7 @@ fn clean_effort(effort: Option<String>) -> Result<Option<String>, String> {
 fn clean_name(name: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 60 {
-        return Err("Give the agent a name of 1 to 60 characters.".into());
+        return Err("Give the familiar a name of 1 to 60 characters.".into());
     }
     Ok(name.to_string())
 }
@@ -76,13 +78,13 @@ fn home() -> Result<PathBuf, String> {
     std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| "HOME is not set.".into())
 }
 
-fn slug(name: &str) -> String {
+fn slug(name: &str, fallback: &str) -> String {
     let slug: String = name
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
         .collect();
     let slug = slug.trim_matches('-').to_string();
-    if slug.is_empty() { "agent".into() } else { slug }
+    if slug.is_empty() { fallback.into() } else { slug }
 }
 
 fn expand(path: &str, home: &Path) -> PathBuf {
@@ -96,7 +98,7 @@ fn expand(path: &str, home: &Path) -> PathBuf {
 fn workspace_for(requested: Option<&str>, name: &str, id: &str, home: &Path) -> Result<PathBuf, String> {
     let path = match requested.map(str::trim).filter(|p| !p.is_empty()) {
         Some(path) => expand(path, home),
-        None => home.join("Crew").join(format!("{}-{}", slug(name), &id[..6])),
+        None => home.join("Grimoire").join(format!("{}-{}", slug(name, "agent"), &id[..6])),
     };
     if !path.is_absolute() {
         return Err("The workspace must be a full path, like ~/Projects/site.".into());
@@ -149,7 +151,7 @@ async fn update_agent(
     agent_id: String,
     changes: AgentChanges,
 ) -> Result<Agent, String> {
-    let mut agent = state.db.get_agent(&agent_id)?.ok_or("That agent no longer exists.")?;
+    let mut agent = state.db.get_agent(&agent_id)?.ok_or("That familiar no longer exists.")?;
     changes.avatar.validate()?;
     let settings_changed = agent.model != clean_model(changes.model.clone()) || agent.access != changes.access;
     agent.name = clean_name(&changes.name)?;
@@ -167,7 +169,7 @@ async fn update_agent(
 
 #[tauri::command]
 fn open_workspace(app: AppHandle, state: State<AppState>, agent_id: String) -> Result<(), String> {
-    let agent = state.db.get_agent(&agent_id)?.ok_or("That agent no longer exists.")?;
+    let agent = state.db.get_agent(&agent_id)?.ok_or("That familiar no longer exists.")?;
     app.opener().open_path(&agent.workspace, None::<&str>).map_err(|e| e.to_string())
 }
 
@@ -206,7 +208,7 @@ async fn stop_turn(state: State<'_, AppState>, agent_id: String) -> Result<(), S
 #[tauri::command]
 fn new_chat(state: State<AppState>, agent_id: String) -> Result<Message, String> {
     if state.runtime.is_busy(&agent_id) {
-        return Err("Wait for the agent to finish, or stop it first.".into());
+        return Err("Wait for the familiar to finish, or stop it first.".into());
     }
     state.runtime.reset_session(&agent_id);
     state.db.set_session(&agent_id, None)?;
@@ -299,10 +301,10 @@ fn save_routine(state: State<AppState>, input: RoutineInput) -> Result<Routine, 
     let name = clean_name(&input.name)?;
     let prompt = input.prompt.trim().to_string();
     if prompt.is_empty() {
-        return Err("Tell the agent what to do on each run.".into());
+        return Err("Tell the familiar what to do on each run.".into());
     }
     if state.db.get_agent(&input.agent_id)?.is_none() {
-        return Err("Pick an agent for this routine.".into());
+        return Err("Pick a familiar for this ritual.".into());
     }
     routines::validate(&input.schedule)?;
     let existing = match input.id.as_deref() {
@@ -335,7 +337,7 @@ fn delete_routine(state: State<AppState>, id: String) -> Result<(), String> {
 
 #[tauri::command]
 fn run_routine(state: State<AppState>, id: String) -> Result<(), String> {
-    let routine = state.db.list_routines()?.into_iter().find(|r| r.id == id).ok_or("That routine no longer exists.")?;
+    let routine = state.db.list_routines()?.into_iter().find(|r| r.id == id).ok_or("That ritual no longer exists.")?;
     state.scheduler.run_now(&routine)
 }
 
@@ -358,13 +360,17 @@ fn running_workflows(state: State<AppState>) -> Vec<String> {
 }
 
 #[tauri::command]
-fn save_workflow(state: State<AppState>, input: WorkflowInput) -> Result<Workflow, String> {
-    workflows::save(&state.db, input.id.as_deref(), &input.name, input.steps, None)
+fn save_workflow(app: AppHandle, state: State<AppState>, input: WorkflowInput) -> Result<Workflow, String> {
+    let saved = workflows::save(&state.db, input.id.as_deref(), &input.name, input.steps, None)?;
+    let _ = app.emit("workflows_changed", ());
+    Ok(saved)
 }
 
 #[tauri::command]
-fn delete_workflow(state: State<AppState>, id: String) -> Result<(), String> {
-    state.db.delete_workflow(&id)
+fn delete_workflow(app: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
+    state.db.delete_workflow(&id)?;
+    let _ = app.emit("workflows_changed", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -377,7 +383,39 @@ async fn stop_workflow(state: State<'_, AppState>, id: String) -> Result<(), Str
     state.workflows.stop(&id).await
 }
 
-/// Entry point for `crew mcp`, the tool server a CLI starts for an agent.
+#[tauri::command]
+fn list_themes(state: State<AppState>) -> Result<themes::ThemeList, String> {
+    themes::list(&state.db, &state.themes_dir)
+}
+
+#[tauri::command]
+fn save_theme(app: AppHandle, state: State<AppState>, id: Option<String>, theme: serde_json::Value) -> Result<themes::ThemeEntry, String> {
+    let saved = themes::save(&state.themes_dir, id.as_deref(), &theme, None)?;
+    let _ = app.emit("themes_changed", ());
+    Ok(saved)
+}
+
+#[tauri::command]
+fn delete_theme(app: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
+    themes::delete(&state.db, &state.themes_dir, &id)?;
+    let _ = app.emit("themes_changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn set_theme(app: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
+    themes::set_active(&state.db, &state.themes_dir, &id)?;
+    let _ = app.emit("themes_changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn open_themes_folder(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    std::fs::create_dir_all(&state.themes_dir).map_err(|e| e.to_string())?;
+    app.opener().open_path(state.themes_dir.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Entry point for `grimoire mcp`, the tool server a CLI starts for an agent.
 pub fn mcp_main(args: &[String]) -> i32 {
     mcp::main(args)
 }
@@ -388,18 +426,19 @@ pub fn run() {
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
-            let db = Arc::new(Db::open(&dir.join("crew.db"))?);
+            let db = Arc::new(Db::open(&dir.join("grimoire.db"))?);
             let billing = db.setting(CLAUDE_BILLING).ok().flatten();
             providers::USE_CLAUDE_SUBSCRIPTION.store(billing.as_deref() != Some("api"), Ordering::Relaxed);
             let runtime = Runtime::new(db.clone(), app.handle().clone());
             let scheduler = Scheduler::start(db.clone(), &runtime, app.handle().clone());
             let workflows = WorkflowRunner::new(db.clone(), runtime.clone(), app.handle().clone());
             let edge = db.setting(DOCK_EDGE).ok().flatten().and_then(|e| dock::Edge::parse(&e));
-            // Agents get the Crew tools only when this socket is up; Crew still works without them.
-            if let Err(e) = tools::serve(app.handle().clone(), db.clone(), &dir.join("crew.sock")) {
-                eprintln!("Crew tools are off: {e}");
+            // Agents get the Grimoire tools only when this socket is up; Grimoire still works without them.
+            let themes_dir = themes::dir(&dir);
+            if let Err(e) = tools::serve(app.handle().clone(), db.clone(), &dir.join("grimoire.sock"), themes_dir.clone()) {
+                eprintln!("Grimoire tools are off: {e}");
             }
-            app.manage(AppState { db, runtime, scheduler, workflows, dock: dock::Dock::default() });
+            app.manage(AppState { db, runtime, scheduler, workflows, dock: dock::Dock::default(), themes_dir });
             if edge.is_some() {
                 let state = app.state::<AppState>();
                 state.dock.set_edge(app.handle(), edge)?;
@@ -434,7 +473,12 @@ pub fn run() {
             save_workflow,
             delete_workflow,
             run_workflow,
-            stop_workflow
+            stop_workflow,
+            list_themes,
+            save_theme,
+            delete_theme,
+            set_theme,
+            open_themes_folder
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -446,7 +490,7 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("error while building Crew")
+        .expect("error while building Grimoire")
         .run(|app, event| {
             if let RunEvent::Reopen { .. } = event {
                 let _ = dock::show_main(app, None);
@@ -459,10 +503,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn picks_a_default_workspace_under_crew() {
+    fn picks_a_default_workspace_under_grimoire() {
         let home = Path::new("/Users/me");
         let path = workspace_for(None, "Site Builder!", "abcdef123", home).unwrap();
-        assert_eq!(path, Path::new("/Users/me/Crew/site-builder-abcdef"));
+        assert_eq!(path, Path::new("/Users/me/Grimoire/site-builder-abcdef"));
     }
 
     #[test]

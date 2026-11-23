@@ -61,7 +61,7 @@ impl Dock {
             (None, None) => Ok(()),
             (Some(edge), Some(window)) => window.emit("dock_edge", edge).map_err(|e| e.to_string()),
             (Some(_), None) => WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html".into()))
-                .title("Crew dock")
+                .title("Grimoire dock")
                 .inner_size(76.0, 160.0)
                 .transparent(true)
                 .decorations(false)
@@ -113,7 +113,7 @@ fn work_area(app: &AppHandle, dock: &WebviewWindow) -> Result<Area, String> {
 }
 
 pub fn show_main(app: &AppHandle, agent_id: Option<String>) -> Result<(), String> {
-    let main = app.get_webview_window("main").ok_or("The Crew window is missing.")?;
+    let main = app.get_webview_window("main").ok_or("The Grimoire window is missing.")?;
     main.show().map_err(|e| e.to_string())?;
     let _ = main.unminimize();
     main.set_focus().map_err(|e| e.to_string())?;

@@ -5,7 +5,7 @@ import type { Agent } from "./api";
 
 export function Page(props: { title: string; actions?: JSX.Element; children: JSX.Element }) {
   return (
-    <section class="page">
+    <section class="page" data-slot="page">
       <header class="page-header" data-tauri-drag-region>
         <h1 data-tauri-drag-region>{props.title}</h1>
         <div class="page-actions">{props.actions}</div>
@@ -90,7 +90,7 @@ export function AgentSelect(props: { agents: Agent[]; value: string; onChange: (
       <select aria-label={props.label} value={props.value} onChange={(e) => props.onChange(e.currentTarget.value)}>
         <Show when={!current()}>
           <option value="" disabled>
-            Choose an agent
+            Choose a familiar
           </option>
         </Show>
         <For each={props.agents}>{(agent) => <option value={agent.id}>{agent.name}</option>}</For>

@@ -170,7 +170,7 @@ pub struct Workflow {
     pub name: String,
     pub steps: Vec<WorkflowStep>,
     pub created_at: i64,
-    /// The agent that created this workflow through its Crew tools, if any.
+    /// The agent that created this workflow through its Grimoire tools, if any.
     #[serde(default)]
     pub created_by: Option<String>,
 }
@@ -621,9 +621,9 @@ mod tests {
 
     #[test]
     fn upgrades_version_one_databases() {
-        let dir = std::env::temp_dir().join(format!("crew-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("grimoire-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("crew.db");
+        let path = dir.join("grimoire.db");
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
@@ -712,9 +712,9 @@ mod tests {
 
     #[test]
     fn reopening_marks_streaming_messages_interrupted() {
-        let dir = std::env::temp_dir().join(format!("crew-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("grimoire-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("crew.db");
+        let path = dir.join("grimoire.db");
         {
             let db = Db::open(&path).unwrap();
             db.insert_agent(&agent("a")).unwrap();

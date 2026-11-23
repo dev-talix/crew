@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "Tyrian",
+  "variants": {
+    "dark": {
+      "canvas": "#1b1922",
+      "accent": "#9b7bff"
+    },
+    "light": {
+      "canvas": "#f7f5fa",
+      "accent": "#6a48e0"
+    }
+  }
+}

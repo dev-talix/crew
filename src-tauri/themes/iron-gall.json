@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "Iron gall",
+  "variants": {
+    "dark": {
+      "canvas": "#161a22",
+      "accent": "#7fa2ff"
+    },
+    "light": {
+      "canvas": "#f4efe3",
+      "accent": "#2f4a9a"
+    }
+  }
+}

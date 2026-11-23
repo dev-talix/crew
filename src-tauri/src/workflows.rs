@@ -29,14 +29,14 @@ pub fn step_prompt(template: &str, input: &str, previous: Option<&str>) -> Strin
 
 pub fn validate(workflow: &Workflow, agent_exists: impl Fn(&str) -> bool) -> Result<(), String> {
     if workflow.name.trim().is_empty() {
-        return Err("Give the workflow a name.".into());
+        return Err("Give the spell a name.".into());
     }
     if workflow.steps.is_empty() {
         return Err("Add at least one step.".into());
     }
     for (index, step) in workflow.steps.iter().enumerate() {
         if !agent_exists(&step.agent_id) {
-            return Err(format!("Step {} needs an agent.", index + 1));
+            return Err(format!("Step {} needs a familiar.", index + 1));
         }
         if step.prompt.trim().is_empty() {
             return Err(format!("Step {} needs instructions.", index + 1));
@@ -90,11 +90,11 @@ impl WorkflowRunner {
             .list_workflows()?
             .into_iter()
             .find(|w| w.id == workflow_id)
-            .ok_or("That workflow no longer exists.")?;
+            .ok_or("That spell no longer exists.")?;
         {
             let mut running = self.running.lock().map_err(|_| "workflow state poisoned")?;
             if running.contains_key(workflow_id) {
-                return Err("This workflow is already running.".into());
+                return Err("This spell is already being cast.".into());
             }
             running.insert(workflow_id.to_string(), None);
         }
@@ -118,7 +118,7 @@ impl WorkflowRunner {
     async fn run(self: Arc<Self>, workflow: Workflow, input: String) {
         let total = workflow.steps.len();
         let mut previous: Option<String> = None;
-        let source = format!("Workflow: {}", workflow.name);
+        let source = format!("Spell: {}", workflow.name);
         for (index, step) in workflow.steps.iter().enumerate() {
             if let Ok(mut running) = self.running.lock() {
                 running.insert(workflow.id.clone(), Some(step.agent_id.clone()));

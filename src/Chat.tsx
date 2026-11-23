@@ -79,7 +79,7 @@ function ToolGroup(props: { messages: Message[]; workspace: string }) {
   const single = () => entries().length === 1;
   const Icon = () => TOOL_ICONS[dominantKind(entries())]();
   return (
-    <div class="row tools">
+    <div class="row tools" data-slot="message" data-role="tools">
       <Show
         when={!single()}
         fallback={
@@ -121,11 +121,11 @@ function AssistantRow(props: { message: Message; turn: () => TurnInfo | undefine
     const turn = props.turn();
     if (!turn?.endsTurn || streaming()) return null;
     const finished = m().updatedAt ?? m().createdAt;
-    const note = m().status === "stopped" ? "Stopped" : m().status === "interrupted" ? "Cut off when Crew closed" : null;
+    const note = m().status === "stopped" ? "Stopped" : m().status === "interrupted" ? "Cut off when Grimoire closed" : null;
     return { time: clock(finished), took: formatDuration(finished - turn.startedAt), note };
   };
   return (
-    <div class="row assistant">
+    <div class="row assistant" data-slot="message" data-role="assistant">
       <Show when={!streaming()} fallback={<div class="plain">{m().text.trimEnd()}<span class="caret" aria-hidden="true" /></div>}>
         <div class="md" innerHTML={html()} onClick={openLinks} />
       </Show>
@@ -145,7 +145,7 @@ function AssistantRow(props: { message: Message; turn: () => TurnInfo | undefine
 function UserRow(props: { message: Message }) {
   const m = () => props.message;
   return (
-    <div class="row user">
+    <div class="row user" data-slot="message" data-role="user">
       <Show when={m().source}>
         <div class="user-source">{m().source}</div>
       </Show>
@@ -194,7 +194,7 @@ const SpeechRecognition = (window as unknown as { webkitSpeechRecognition?: new 
   .webkitSpeechRecognition;
 
 const DICTATION_ERRORS: Record<string, string> = {
-  "not-allowed": "Crew needs microphone and speech recognition access. Allow both in System Settings, Privacy & Security.",
+  "not-allowed": "Grimoire needs microphone and speech recognition access. Allow both in System Settings, Privacy & Security.",
   "service-not-allowed": "Speech recognition is turned off. Turn on Siri or Dictation in System Settings.",
   "audio-capture": "No microphone was found.",
   network: "Speech recognition needs an internet connection.",
@@ -329,8 +329,8 @@ export default function Chat(props: {
   };
 
   return (
-    <section class={["chat", { compact: !!props.compact }]}>
-      <header class="chat-bar" data-tauri-drag-region>
+    <section class={["chat", { compact: !!props.compact }]} data-slot="chat">
+      <header class="chat-bar" data-slot="chat-header" data-tauri-drag-region>
         <div class="crumbs" data-tauri-drag-region>
           <BotAvatar avatar={props.agent.avatar} size={20} fluid working={props.busy} mood={props.mood} />
           <span class="crumb-name">{props.agent.name}</span>
@@ -346,7 +346,7 @@ export default function Chat(props: {
         <div class="bar-actions">
           <Show when={props.compact}>
             {(compact) => (
-              <button class="icon-button" aria-label="Open in Crew" title="Open in Crew" onClick={compact().onOpenMain}>
+              <button class="icon-button" aria-label="Open in Grimoire" title="Open in Grimoire" onClick={compact().onOpenMain}>
                 <ExpandIcon />
               </button>
             )}
@@ -363,7 +363,7 @@ export default function Chat(props: {
           <Show
             when={props.compact}
             fallback={
-              <button class="icon-button" aria-label="Agent settings" title="Agent settings" onClick={props.onEdit}>
+              <button class="icon-button" aria-label="Familiar settings" title="Familiar settings" onClick={props.onEdit}>
                 <GearIcon />
               </button>
             }
@@ -424,7 +424,7 @@ export default function Chat(props: {
         </div>
       </div>
 
-      <footer class="composer-dock">
+      <footer class="composer-dock" data-slot="composer">
         <Show when={actionError()}>
           <p class="error-box composer-error" role="alert">
             {actionError()}

@@ -53,7 +53,7 @@ export default function AvatarStudio(props: { avatar: Avatar; name: string; onCh
   return (
     <div class="studio">
       <div class="studio-stage">
-        <BotAvatar avatar={props.avatar} size={112} fluid mood={previewMood()} label={`${props.name || "New agent"} avatar`} />
+        <BotAvatar avatar={props.avatar} size={112} fluid mood={previewMood()} label={`${props.name || "New familiar"} avatar`} />
         <button type="button" class="ghost small" onClick={() => props.onChange(randomAvatar())}>
           <ShuffleIcon /> Shuffle
         </button>

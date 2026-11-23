@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createEffect, createSignal, onSettled, type Accessor } from "solid-js";
 import type { Avatar } from "./avatar";
+import type { ThemeFile } from "./theme";
 
 export type Provider = "codex" | "claude";
 export type Access = "workspace" | "full";
@@ -75,7 +76,7 @@ export interface Workflow {
   name: string;
   steps: WorkflowStep[];
   createdAt: number;
-  /** The agent that created it with its Crew tools. */
+  /** The agent that created it with its Grimoire tools. */
   createdBy: string | null;
 }
 
@@ -141,6 +142,19 @@ export function changesFor(agent: Agent, patch: Partial<AgentChanges> = {}): Age
 
 export const PAGE_SIZE = 100;
 
+export interface ThemeEntry {
+  id: string;
+  builtIn: boolean;
+  theme: ThemeFile;
+}
+
+export interface ThemeList {
+  active: string;
+  themes: ThemeEntry[];
+  /** Files in the themes folder that could not be loaded. */
+  problems: { file: string; error: string }[];
+}
+
 export const api = {
   listAgents: () => invoke<Agent[]>("list_agents"),
   busyAgents: () => invoke<string[]>("busy_agents"),
@@ -171,6 +185,11 @@ export const api = {
   deleteWorkflow: (id: string) => invoke<void>("delete_workflow", { id }),
   runWorkflow: (id: string, input: string) => invoke<void>("run_workflow", { id, input }),
   stopWorkflow: (id: string) => invoke<void>("stop_workflow", { id }),
+  listThemes: () => invoke<ThemeList>("list_themes"),
+  saveTheme: (id: string | null, theme: ThemeFile) => invoke<ThemeEntry>("save_theme", { id, theme }),
+  deleteTheme: (id: string) => invoke<void>("delete_theme", { id }),
+  setTheme: (id: string) => invoke<void>("set_theme", { id }),
+  openThemesFolder: () => invoke<void>("open_themes_folder"),
 };
 
 /**
@@ -210,7 +229,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

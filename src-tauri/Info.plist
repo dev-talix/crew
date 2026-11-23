@@ -3,8 +3,8 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Crew listens only while you dictate a message to an agent.</string>
+  <string>Grimoire listens only while you dictate a message to an agent.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
-  <string>Crew turns your dictation into text for messages to your agents.</string>
+  <string>Grimoire turns your dictation into text for messages to your agents.</string>
 </dict>
 </plist>

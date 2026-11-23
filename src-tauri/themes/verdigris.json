@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "Verdigris",
+  "variants": {
+    "dark": {
+      "canvas": "#141b1b",
+      "accent": "#4fc1a6"
+    },
+    "light": {
+      "canvas": "#f3f6f4",
+      "accent": "#1f7f6b"
+    }
+  }
+}
