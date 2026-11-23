@@ -44,6 +44,12 @@
 - **The dock** pins your familiars to the edge of the screen, so you can chat without opening
   the main window. Pick which familiars it shows in Settings, General; new ones show up until you
   turn them off.
+- **Helpers** take long jobs. A familiar calls `start_helper` and keeps chatting while a helper works
+  in a hidden chat, on a fresh session with the familiar's model, workspace, and access. The result
+  comes back as a message labeled "Helper <label>", which starts the familiar's next turn. Up to 3 run
+  at once, each for at most 30 minutes, and a helper can't start helpers or message other familiars.
+  The helpers button in the chat header shows each one's status, time, and transcript, with a Stop
+  button. Helpers still running when Grimoire quits show as interrupted at the next launch.
 - **Voice** dictation in the composer uses macOS speech recognition.
 
 <table>

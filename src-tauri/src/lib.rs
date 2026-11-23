@@ -8,6 +8,7 @@ mod db;
 mod delegation;
 mod dock;
 mod exports;
+mod helpers;
 mod inbox;
 mod ledger;
 mod mcp;
@@ -250,6 +251,7 @@ fn open_workspace(app: AppHandle, state: State<AppState>, agent_id: String) -> R
 
 #[tauri::command]
 async fn delete_agent(app: AppHandle, state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
+    helpers::stop_for(&state.db, &agent_id);
     state.runtime.remove_agent(&agent_id).await?;
     if let Ok(dir) = app.path().app_data_dir() {
         attachments::remove_for_agent(&state.db, &attachments::root(&dir), &agent_id);
@@ -636,6 +638,8 @@ pub fn run() {
             // A setup error ends the app with a panic nobody sees, so say what's wrong first.
             let db = Arc::new(Db::open(&dir.join("grimoire.db")).inspect_err(|e| startup_alert(&e.to_string()))?);
             ledger::init(db.clone());
+            // Helpers' CLI sessions ended with the last launch; the chat's helpers list shows them as interrupted.
+            let _ = helpers::interrupt_leftovers(&db);
             let billing = db.setting(CLAUDE_BILLING).ok().flatten();
             providers::USE_CLAUDE_SUBSCRIPTION.store(billing.as_deref() != Some("api"), Ordering::Relaxed);
             if let Err(e) = delegation::recover(&db) {
@@ -763,7 +767,9 @@ pub fn run() {
             inbox::answer_question,
             inbox::dismiss_question,
             ledger::get_ledger,
-            ledger::save_ledger
+            ledger::save_ledger,
+            helpers::list_helpers,
+            helpers::stop_helper
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {

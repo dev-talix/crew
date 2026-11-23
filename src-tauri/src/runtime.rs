@@ -332,6 +332,49 @@ impl Runtime {
         }
     }
 
+    /// Runs a background helper's one turn in its hidden chat (see `helpers`): `task` is shown in the
+    /// transcript and `prompt` goes to the CLI, on a fresh session in the familiar's own settings.
+    pub async fn helper_turn(self: &Arc<Self>, chat_id: &str, task: &str, prompt: &str) -> TurnOutcome {
+        let Ok(Some(chat)) = crate::side::get(&self.db, chat_id) else {
+            return TurnOutcome::Failed("The helper's chat was deleted.".into());
+        };
+        let agent = match self.db.get_agent(&chat.target_id) {
+            Ok(Some(agent)) => agent,
+            _ => return TurnOutcome::Failed("That familiar no longer exists.".into()),
+        };
+        let sink = SideSink { app: self.app.clone(), chat_id: chat.id.clone() };
+        match self.db.insert_message_in(&chat.id, &agent.id, "user", task, "done", Some(&format!("From {}", agent.name))) {
+            Ok(row) => sink.message(&row),
+            Err(e) => return TurnOutcome::Failed(e),
+        }
+        let mut writer = TurnWriter::for_side(&self.db, &sink, &agent, &chat.id, None);
+        if let Err(reason) = crate::budgets::check_turn(&self.db, &agent.id) {
+            return writer.fail(&reason);
+        }
+        let lane = Lane { key: crate::side::lane_key(&agent.id, &chat.id), session: LaneSession::Fresh };
+        let (tx, rx) = mpsc::unbounded_channel();
+        let started = match agent.provider {
+            Provider::Codex => self.codex.start_turn_in(&agent, Some(&lane), prompt, &[], tx).await,
+            Provider::Claude => self.claude.start_turn_in(&agent, Some(&lane), prompt, &[], tx).await,
+        };
+        match started {
+            Ok(()) => stream_turn(&mut writer, rx).await,
+            Err(e) => writer.fail(&e),
+        }
+    }
+
+    /// Interrupts whatever turn runs under a lane key, on either provider.
+    pub async fn stop_lane(&self, key: &str) {
+        let _ = self.codex.stop(key).await;
+        self.claude.stop(key).await;
+    }
+
+    /// Lets go of a lane's CLI process or thread once nothing will run in it again.
+    pub fn forget_lane(&self, key: &str) {
+        self.codex.forget(key);
+        self.claude.forget(key);
+    }
+
     async fn run_turn(self: &Arc<Self>, agent_id: &str, text: &str, source: Option<&str>, attachments: &[Attachment]) -> TurnOutcome {
         let agent = match self.db.get_agent(agent_id) {
             Ok(Some(agent)) => agent,

@@ -374,7 +374,7 @@ fn tool_label(name: &str, input: &Value) -> String {
         "WebFetch" => field("url").map(|u| format!("Fetch {u}")),
         "WebSearch" => field("query").map(|q| format!("Search {q}")),
         // Grimoire adds its own row that opens the side conversation.
-        "mcp__grimoire__ask_familiar" | "mcp__grimoire__message_familiar" => Some(String::new()),
+        "mcp__grimoire__ask_familiar" | "mcp__grimoire__message_familiar" | "mcp__grimoire__start_helper" => Some(String::new()),
         _ => None,
     }
     .unwrap_or_else(|| name.to_string())

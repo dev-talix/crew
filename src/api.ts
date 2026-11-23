@@ -401,6 +401,19 @@ export interface Delegation {
   approve: boolean;
 }
 
+/** A short-lived helper a familiar started for a long job. Its transcript is a side chat. */
+export interface Helper {
+  id: string;
+  agentId: string;
+  chatId: string;
+  label: string;
+  task: string;
+  status: "running" | "done" | "failed" | "stopped" | "timeout" | "interrupted";
+  result: string | null;
+  startedAt: number;
+  finishedAt: number | null;
+}
+
 export const api = {
   listAgents: () => invoke<Agent[]>("list_agents"),
   busyAgents: () => invoke<string[]>("busy_agents"),
@@ -504,6 +517,8 @@ export const api = {
   /** Fields left out stay as they are; an empty string clears one. */
   saveLedger: (agentId: string, patch: Partial<Pick<Ledger, "goal" | "status" | "waitingOn" | "nextStep">>) =>
     invoke<Ledger>("save_ledger", { agentId, patch }),
+  listHelpers: (agentId: string) => invoke<Helper[]>("list_helpers", { agentId }),
+  stopHelper: (id: string) => invoke<void>("stop_helper", { id }),
 };
 
 export interface InboxOption {
@@ -563,7 +578,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

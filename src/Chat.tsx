@@ -6,6 +6,7 @@ import ChatsMenu, { chatTitle } from "./ChatsMenu";
 import { AttachButton, createComposerFiles, DropOverlay, MessageAttachments, PendingFiles } from "./ChatAttachments";
 import type { ChatStore } from "./chatStore";
 import Ledger from "./Ledger";
+import Helpers from "./Helpers";
 import ModelPicker from "./ModelPicker";
 import SideConversation from "./SideConversation";
 import { effortName, runningModelName } from "./models";
@@ -500,6 +501,7 @@ export default function Chat(props: {
           </span>
         </div>
         <div class="bar-actions">
+          <Helpers agent={props.agent} />
           <Show when={props.compact}>
             {(compact) => (
               <button class="icon-button" aria-label="Open in Grimoire" title="Open in Grimoire" onClick={compact().onOpenMain}>

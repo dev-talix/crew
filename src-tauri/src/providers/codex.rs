@@ -481,7 +481,7 @@ fn tool_label(item: &Value) -> Option<String> {
             Some(format!("Edit {}", paths.join(", ")))
         }
         // Grimoire adds its own row that opens the side conversation.
-        "mcpToolCall" if text("server") == crate::tools::SERVER_NAME && matches!(text("tool").as_str(), "ask_familiar" | "message_familiar") => {
+        "mcpToolCall" if text("server") == crate::tools::SERVER_NAME && matches!(text("tool").as_str(), "ask_familiar" | "message_familiar" | "start_helper") => {
             Some(String::new())
         }
         "mcpToolCall" => Some(format!("{}.{}", text("server"), text("tool"))),
