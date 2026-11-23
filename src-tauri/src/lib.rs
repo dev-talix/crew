@@ -1,4 +1,5 @@
 mod approvals;
+mod chats;
 mod covens;
 mod db;
 mod dock;
@@ -235,16 +236,6 @@ fn send_message(state: State<AppState>, agent_id: String, text: String) -> Resul
 #[tauri::command]
 async fn stop_turn(state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
     state.runtime.stop(&agent_id).await
-}
-
-#[tauri::command]
-fn new_chat(state: State<AppState>, agent_id: String) -> Result<Message, String> {
-    if state.runtime.is_busy(&agent_id) {
-        return Err("Wait for the familiar to finish, or stop it first.".into());
-    }
-    state.runtime.reset_session(&agent_id);
-    state.db.set_session(&agent_id, None)?;
-    state.db.insert_message(&agent_id, "divider", "New chat", "done")
 }
 
 #[derive(Serialize, Deserialize)]
@@ -641,7 +632,12 @@ pub fn run() {
             list_messages,
             send_message,
             stop_turn,
-            new_chat,
+            chats::new_chat,
+            chats::list_chats,
+            chats::open_chat,
+            chats::rename_chat,
+            chats::delete_chat,
+            chats::search_messages,
             get_settings,
             list_models,
             dock_edge,
