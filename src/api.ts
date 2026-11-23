@@ -373,7 +373,8 @@ export function relativeTime(ms: number, now = Date.now()): string {
   ];
   const format = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
   for (const [unit, size] of units) {
-    if (abs >= size) return format.format(Math.round(diff / size), unit);
+    // A timer set for an hour is a few seconds short of it by the time it shows; still call it an hour.
+    if (abs >= size * 0.98) return format.format(Math.round(diff / size), unit);
   }
   return diff >= 0 ? "in a moment" : "just now";
 }

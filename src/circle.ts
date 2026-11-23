@@ -1,8 +1,8 @@
 // Geometry for the summoning circle on Home, kept apart from the component so it can be tested.
 import type { Workflow } from "./api";
 
-export const NODE_RING = 37; // where familiars sit, in percent of the circle's width
-export const OUTER_RING = 46;
+export const NODE_RING = 33; // where familiars sit, in percent of the circle's width
+export const OUTER_RING = 47;
 export const RUNES = 36;
 
 type Point = { x: number; y: number };
