@@ -133,32 +133,27 @@ pub fn update(db: &Db, agent_id: &str, patch: Patch, by: &str) -> Result<Ledger,
     if patch.goal.is_none() && patch.status.is_none() && patch.waiting_on.is_none() && patch.next_step.is_none() {
         return Err("Nothing to change. Give a goal, status, waiting_on, or next_step.".into());
     }
-    let mut ledger = get(db, agent_id)?;
-    if let Some(goal) = patch.goal {
-        ledger.goal = checked("goal", goal, GOAL_LIMIT)?;
-    }
-    if let Some(status) = patch.status {
-        let status = status.trim().to_lowercase();
-        if !STATUSES.contains(&status.as_str()) {
+    let goal = patch.goal.map(|g| checked("goal", g, GOAL_LIMIT)).transpose()?;
+    let status = match patch.status.map(|s| s.trim().to_lowercase()) {
+        Some(status) if !STATUSES.contains(&status.as_str()) => {
             return Err(format!("Unknown status \"{status}\". Use one of {}.", STATUSES.join(", ")));
         }
-        ledger.status = status;
-    }
-    if let Some(waiting_on) = patch.waiting_on {
-        ledger.waiting_on = checked("waiting_on", waiting_on, WAITING_LIMIT)?;
-    }
-    if let Some(next_step) = patch.next_step {
-        ledger.next_step = checked("next_step", next_step, NEXT_LIMIT)?;
-    }
-    let at = now_ms();
+        status => status,
+    };
+    let waiting_on = patch.waiting_on.map(|w| checked("waiting_on", w, WAITING_LIMIT)).transpose()?;
+    let next_step = patch.next_step.map(|n| checked("next_step", n, NEXT_LIMIT)).transpose()?;
+    // One statement writes only the fields given, so two updates at once can't undo each other.
+    let empty = Ledger::empty();
     db.with(|c| {
         c.execute(
-            "INSERT INTO ledgers (agent_id, goal, status, waiting_on, next_step, updated_at, updated_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(agent_id) DO UPDATE SET goal = ?2, status = ?3, waiting_on = ?4, next_step = ?5, updated_at = ?6, updated_by = ?7",
-            params![agent_id, ledger.goal, ledger.status, ledger.waiting_on, ledger.next_step, at, by],
+            "INSERT INTO ledgers (agent_id, goal, status, waiting_on, next_step, updated_at, updated_by)
+             VALUES (?1, COALESCE(?2, ?8), COALESCE(?3, ?9), COALESCE(?4, ?10), COALESCE(?5, ?11), ?6, ?7)
+             ON CONFLICT(agent_id) DO UPDATE SET goal = COALESCE(?2, goal), status = COALESCE(?3, status),
+               waiting_on = COALESCE(?4, waiting_on), next_step = COALESCE(?5, next_step), updated_at = ?6, updated_by = ?7",
+            params![agent_id, goal, status, waiting_on, next_step, now_ms(), by, empty.goal, empty.status, empty.waiting_on, empty.next_step],
         )
     })?;
-    Ok(Ledger { updated_at: Some(at), updated_by: Some(by.into()), ..ledger })
+    get(db, agent_id)
 }
 
 /// The ledger part of a familiar's chat-start prompt.
@@ -292,6 +287,17 @@ mod tests {
         Patch { goal: goal.map(String::from), status: status.map(String::from), waiting_on: waiting_on.map(String::from), next_step: None }
     }
 
+
+    #[test]
+    fn updates_touch_only_the_fields_they_give() {
+        let db = Db::open_in_memory().unwrap();
+        familiar(&db, "a");
+        let patch = |goal: Option<&str>, status: Option<&str>| Patch { goal: goal.map(String::from), status: status.map(String::from), waiting_on: None, next_step: None };
+        update(&db, "a", patch(Some("Old goal"), None), "you").unwrap();
+        update(&db, "a", patch(Some("New goal"), None), "familiar").unwrap();
+        let after = update(&db, "a", patch(None, Some("working")), "familiar").unwrap();
+        assert_eq!((after.goal.as_str(), after.status.as_str()), ("New goal", "working"));
+    }
     #[test]
     fn saves_partial_updates_and_validates() {
         let db = Db::open_in_memory().unwrap();
