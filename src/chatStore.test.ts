@@ -12,7 +12,7 @@ mock.module("./api", () => ({
     listMessages: async (agentId: string, beforeId?: number) => {
       await gate;
       const all = pages[agentId] ?? [];
-      return beforeId === undefined ? all.filter((m) => m.id >= 10) : all.filter((m) => m.id < beforeId);
+      return (beforeId === undefined ? all.filter((m) => m.id >= 10) : all.filter((m) => m.id < beforeId)).slice(-100);
     },
   },
 }));
@@ -129,5 +129,30 @@ test("loadOlder prepends the previous page", async () => {
   await store.loadOlder();
   await settle();
   expect(texts(store)).toEqual(["8:old", "9:older", "10:hi", "11:there"]);
+  dispose();
+});
+
+test("reload fetches the familiar's chat again after a switch", async () => {
+  const { store, dispose } = setup();
+  await settle();
+  pages.a = [msg(30, "another chat")];
+  // The new chat's messages all sit above the initial filter's cutoff.
+  await store.reload();
+  await settle();
+  expect(texts(store)).toEqual(["30:another chat"]);
+  dispose();
+});
+
+test("loadUntil pages back to an older message", async () => {
+  pages.c = Array.from({ length: 250 }, (_, i) => msg(i + 1, `m${i + 1}`, "c"));
+  const { store, dispose } = setup("c");
+  await settle();
+  expect(store.messages.length).toBe(100);
+  expect(await store.loadUntil(60)).toBe(true);
+  expect([store.messages[0].id, store.hasOlder()]).toEqual([51, true]); // Stops at the page that has it.
+  expect(await store.loadUntil(12)).toBe(true);
+  expect([store.messages[0].id, store.hasOlder()]).toEqual([1, false]);
+  expect(await store.loadUntil(200)).toBe(true); // Already loaded: nothing to fetch.
+  expect(await store.loadUntil(999)).toBe(false);
   dispose();
 });

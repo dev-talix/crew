@@ -1,0 +1,188 @@
+.chat-title-anchor {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+.chat-title-button {
+  gap: 4px;
+  min-width: 0;
+  max-width: 320px;
+  padding: 2px 6px;
+  margin-left: -6px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.chat-title-button > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-title-button svg {
+  flex-shrink: 0;
+  transform: rotate(90deg);
+  color: var(--faint);
+}
+
+.chat-title-button:hover,
+.chat-title-button[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  color: var(--text);
+}
+
+.picker.chats-menu {
+  top: calc(100% + 6px);
+  bottom: auto;
+  left: -6px;
+  z-index: 6;
+  width: 320px;
+}
+
+/* The dock's panel is narrow: hang the menu from the whole header instead of the title. */
+.chat.compact .chat-bar {
+  position: relative;
+}
+
+.chat.compact .chat-title-anchor {
+  position: static;
+}
+
+.chat.compact .picker.chats-menu {
+  top: calc(100% - 4px);
+  left: 10px;
+  right: 10px;
+  width: auto;
+}
+
+.chats-filter {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 2px 2px 4px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--faint);
+}
+
+.chats-filter input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  border: 0;
+  outline: 0;
+  background: none;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.chats-filter:focus-within {
+  outline: 2px solid var(--agent);
+  outline-offset: 1px;
+}
+
+.picker-item.chats-new {
+  justify-content: flex-start;
+  color: var(--text);
+}
+
+.picker-item.chats-new svg {
+  color: var(--muted);
+}
+
+.chats-menu .picker-item:focus-visible {
+  outline: 2px solid var(--agent);
+  outline-offset: -2px;
+}
+
+.chats-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.chats-row > .picker-item {
+  padding-right: 64px;
+}
+
+.chats-row .picker-text {
+  flex: 1;
+}
+
+.chats-row .picker-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chats-row.current .picker-name {
+  color: var(--agent);
+}
+
+.chats-actions {
+  position: absolute;
+  right: 6px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.chats-row:hover .chats-actions,
+.chats-row:focus-within .chats-actions,
+.chats-actions:has(.chats-confirm) {
+  opacity: 1;
+}
+
+.chats-row:hover .picker-item > svg,
+.chats-row:focus-within .picker-item > svg {
+  visibility: hidden;
+}
+
+.mini-button.chats-confirm {
+  width: auto;
+  gap: 4px;
+  padding: 0 6px;
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.chats-rename {
+  width: 100%;
+  height: 34px;
+  margin: 2px 0;
+  padding: 0 10px;
+  border: 1px solid var(--agent);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 13px;
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--agent) 22%, transparent);
+  user-select: text;
+}
+
+.row.jumped {
+  animation: jumped 1.6s ease-out;
+  border-radius: var(--radius-bubble);
+}
+
+@keyframes jumped {
+  0%,
+  40% {
+    background: color-mix(in srgb, var(--agent) 16%, transparent);
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--agent) 16%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row.jumped {
+    animation: none;
+    outline: 2px solid color-mix(in srgb, var(--agent) 40%, transparent);
+    outline-offset: 4px;
+  }
+}

@@ -195,7 +195,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -364,6 +364,9 @@ impl Db {
                  COMMIT;",
             )?;
         }
+        if version < 10 {
+            crate::chats::migrate(&conn)?;
+        }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
             [],
@@ -443,10 +446,12 @@ impl Db {
         self.with(|c| c.execute("DELETE FROM agents WHERE id = ?1", params![id]).map(|_| ()))
     }
 
+    /// Saves the session on the familiar and on its current chat, so reopening the chat resumes it.
     pub fn set_session(&self, agent_id: &str, session_id: Option<&str>) -> Result<(), String> {
         self.with(|c| {
+            c.execute("UPDATE agents SET session_id = ?2 WHERE id = ?1", params![agent_id, session_id])?;
             c.execute(
-                "UPDATE agents SET session_id = ?2 WHERE id = ?1",
+                "UPDATE chats SET session_id = ?2 WHERE id = (SELECT chat_id FROM agents WHERE id = ?1)",
                 params![agent_id, session_id],
             )
             .map(|_| ())
@@ -467,10 +472,12 @@ impl Db {
     ) -> Result<Message, String> {
         let created_at = now_ms();
         self.with(|c| {
+            let chat_id = crate::chats::ensure_current(c, agent_id)?;
             c.execute(
-                "INSERT INTO messages (agent_id, role, text, status, created_at, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![agent_id, role, text, status, created_at, source],
+                "INSERT INTO messages (agent_id, role, text, status, created_at, source, chat_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![agent_id, role, text, status, created_at, source, chat_id],
             )?;
+            crate::chats::touch(c, &chat_id, role, text, created_at)?;
             Ok(Message {
                 id: c.last_insert_rowid(),
                 agent_id: agent_id.to_string(),
@@ -664,11 +671,12 @@ impl Db {
         })
     }
 
+    /// A page of the familiar's current chat, oldest first.
     pub fn list_messages(&self, agent_id: &str, before_id: Option<i64>, limit: i64) -> Result<Vec<Message>, String> {
         self.with(|c| {
             let mut stmt = c.prepare_cached(
                 "SELECT id, agent_id, role, text, status, created_at, source, updated_at FROM messages
-                 WHERE agent_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3",
+                 WHERE chat_id = (SELECT chat_id FROM agents WHERE id = ?1) AND id < ?2 ORDER BY id DESC LIMIT ?3",
             )?;
             let rows = stmt.query_map(params![agent_id, before_id.unwrap_or(i64::MAX), limit], row_to_message)?;
             let mut messages: Vec<Message> = rows.collect::<rusqlite::Result<_>>()?;

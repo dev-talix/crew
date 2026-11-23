@@ -65,7 +65,8 @@ bunx tauri dev                    # development
 bunx tauri build --bundles app    # src-tauri/target/release/bundle/macos/Grimoire.app
 ```
 
-Shortcuts: ⌘N summons a familiar, ⌘, opens Settings, and ⌘1 to ⌘9 open a familiar.
+Shortcuts: ⌘K opens the command palette, ⌘N summons a familiar, ⌘, opens Settings, and ⌘1 to ⌘9 open
+a familiar.
 
 ## Familiars
 
@@ -80,6 +81,21 @@ it. The model chip in the composer shows the model it is running and switches it
 **Access.** "Workspace only" keeps Codex in its `workspace-write` sandbox and runs Claude in
 `acceptEdits` mode, so it can edit files but shell commands are refused. "Full access" uses Codex
 `danger-full-access` and Claude `bypassPermissions`. Neither asks for approval during a turn.
+
+## Chats and the palette
+
+Each familiar keeps a list of chats. The chat header shows the current chat's title, which comes from
+the first message you send in it. Click the title to filter past chats, open one, rename or delete it,
+or start a new chat (the pencil button does that too). Opening an older chat picks its conversation
+back up: your next message resumes that chat's Codex thread or Claude session. Deleting the open chat
+switches to the newest one left. You can't switch chats while the familiar is replying. Rituals and
+spells post into the familiar's current chat.
+
+⌘K opens the command palette anywhere in the main window. Type part of a name to jump to a familiar,
+cast a spell, open Home, Rituals, or a Settings section, or run an action: summon a familiar, start a
+new spell, or start a new chat with the familiar you're in. From two letters on, it also searches the
+text of every message you sent and every reply, and shows the familiar, the chat, and the matching
+words. Picking a message opens its chat and scrolls to it. Arrow keys move, Enter opens, Esc closes.
 
 ## Covens and the circle
 
@@ -272,8 +288,12 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
   (JSON-RPC over stdio), started on the first Codex message and stopped after 10 idle minutes. Each
   Claude familiar gets one `claude -p --input-format stream-json` process, started on its first
   message and stopped after 5 idle minutes. Closing Grimoire stops them all.
-- **Sessions.** The Codex thread ID or Claude session ID is saved per familiar, so a restart resumes
-  the same conversation. "New chat" drops it.
+- **Sessions.** Each chat saves its Codex thread ID or Claude session ID, so a restart resumes the
+  same conversation. "New chat" starts a chat with no session; opening an older chat loads its
+  session for the next turn. The current chat's session is also kept on the familiar, which is what
+  the providers resume.
+- **Search.** Messages are indexed in an SQLite FTS5 table that triggers keep in sync as messages are
+  added, streamed, and deleted. Tool and error rows aren't indexed.
 - **Streaming.** Text goes to the window at most every 50 ms and to SQLite every 750 ms and at the
   end of each turn. Markdown renders once a message is finished.
 - **Queue.** A message sent while a familiar works waits and runs next. Stop interrupts the turn
@@ -297,7 +317,7 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
 ## Checks
 
 ```sh
-bun run test                     # timeline, models, chat store, moods, themes
+bun run test                     # timeline, models, chat store, palette ranking, moods, themes
 cd src-tauri
 cargo test                       # unit tests
 cargo test -- --ignored          # live turns against the real codex and claude CLIs (costs tokens)

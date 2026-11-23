@@ -1,4 +1,4 @@
-import { createEffect, createSignal, createStore, type Accessor } from "solid-js";
+import { createEffect, createSignal, createStore, flush, type Accessor } from "solid-js";
 import { api, PAGE_SIZE, type DeltaEvent, type Message } from "./api";
 
 const lastIndexOf = (list: Message[], id: number) => {
@@ -56,9 +56,25 @@ export function createChatStore(selected: Accessor<string | null>) {
     }
   };
 
-  createEffect(selected, (agentId) => {
-    void load(agentId);
+  // The latest load, so a jump to a message waits for the page it lands on.
+  let loaded: Promise<void> = Promise.resolve();
+  const reload = () => (loaded = load(selected()));
+
+  createEffect(selected, () => {
+    void reload();
   });
+
+  const loadOlder = async () => {
+    const agentId = selected();
+    const first = messages[0];
+    if (!agentId || !first) return;
+    const older = await api.listMessages(agentId, first.id);
+    if (agentId !== selected()) return;
+    setMessages((list) => {
+      list.unshift(...older);
+    });
+    setHasOlder(older.length === PAGE_SIZE);
+  };
 
   return {
     messages,
@@ -69,16 +85,24 @@ export function createChatStore(selected: Accessor<string | null>) {
     onDelta: (delta: DeltaEvent) => {
       if (delta.agentId === selected()) whenLoaded(() => appendChunk(delta));
     },
-    loadOlder: async () => {
+    loadOlder,
+    /** Loads the familiar's current chat again, after switching chats. */
+    reload,
+    /** Loads earlier pages until `messageId` is in the list. Returns whether it is. */
+    loadUntil: async (messageId: number) => {
       const agentId = selected();
-      const first = messages[0];
-      if (!agentId || !first) return;
-      const older = await api.listMessages(agentId, first.id);
-      if (agentId !== selected()) return;
-      setMessages((list) => {
-        list.unshift(...older);
-      });
-      setHasOlder(older.length === PAGE_SIZE);
+      for (let waiting = loaded; ; waiting = loaded) {
+        await waiting;
+        if (waiting === loaded) break;
+      }
+      flush();
+      while (agentId === selected() && hasOlder() && messages.length && messages[0].id > messageId) {
+        const before = messages[0].id;
+        await loadOlder();
+        flush();
+        if (messages[0]?.id === before) break;
+      }
+      return messages.some((m) => m.id === messageId);
     },
   };
 }
