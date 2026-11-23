@@ -269,6 +269,7 @@ export default function AgentForm(props: {
                 }}
                 placeholder="me@studio.local"
                 autocapitalize="off"
+                autocorrect="off"
                 spellcheck={false}
                 required
               />
@@ -293,6 +294,9 @@ export default function AgentForm(props: {
               value={workspace()}
               onInput={(e) => setWorkspace(e.currentTarget.value)}
               placeholder={remote() ? "A new folder in ~/Grimoire there" : "A new folder in ~/Grimoire"}
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck={false}
             />
           </label>
         </Show>

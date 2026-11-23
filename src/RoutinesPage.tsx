@@ -582,6 +582,8 @@ function RoutineEditor(props: {
                 value={repo()}
                 onInput={(e) => setRepo(e.currentTarget.value)}
                 placeholder="owner/repo"
+                autocapitalize="off"
+                autocorrect="off"
                 spellcheck={false}
               />
               <p class="hint">Grimoire checks for new pull requests every 3 minutes with the gh command, so gh has to be signed in.</p>
@@ -593,6 +595,8 @@ function RoutineEditor(props: {
                 value={path()}
                 onInput={(e) => setPath(e.currentTarget.value)}
                 placeholder="~/Documents/Inbox"
+                autocapitalize="off"
+                autocorrect="off"
                 spellcheck={false}
               />
               <p class="hint">A file or folder in your home folder. Grimoire checks it every 30 seconds and runs when it changes.</p>

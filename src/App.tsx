@@ -45,6 +45,12 @@ export default function App() {
   const [busy, setBusy] = createStore<Record<string, boolean>>({});
   const [unread, setUnread] = createStore<Record<string, boolean>>({});
   const [view, setView] = createSignal<View>("home");
+  // Bumped on every summon, so the form starts empty even when it's already open.
+  const [summonCount, setSummonCount] = createSignal(1);
+  const summon = () => {
+    setSummonCount((n) => n + 1);
+    setView("new");
+  };
   const [editing, setEditing] = createSignal(false);
   const [memoryOpen, setMemoryOpen] = createSignal(false);
   const [loaded, setLoaded] = createSignal(false);
@@ -107,7 +113,7 @@ export default function App() {
       setBusy((b) => {
         for (const id of running) b[id] = true;
       });
-      if (!list.length) setView("new");
+      if (!list.length) summon();
     } catch (e) {
       setLoadError(errorText(e));
     } finally {
@@ -156,7 +162,7 @@ export default function App() {
       setPalette((open) => !open);
     } else if (e.key === "n") {
       e.preventDefault();
-      setView("new");
+      summon();
     } else if (e.key === ",") {
       e.preventDefault();
       setSettings((open) => (open ? null : "general"));
@@ -210,7 +216,7 @@ export default function App() {
     openRituals: () => away(() => setView("routines")),
     openHome: () => away(() => setView("home")),
     openSettings: (section) => setSettings(section),
-    summon: () => away(() => setView("new")),
+    summon: () => away(summon),
     newChat: (agentId) => away(() => openChatWith({ agentId, fresh: true })),
     openMessage: (hit) => away(() => openChatWith({ agentId: hit.agentId, chatId: hit.chatId, messageId: hit.messageId })),
   };
@@ -238,7 +244,7 @@ export default function App() {
         </nav>
         <div class="sidebar-caption">
           <span>Familiars</span>
-          <button class="icon-button" aria-label="Summon a familiar" title="Summon a familiar (⌘N)" onClick={() => setView("new")}>
+          <button class="icon-button" aria-label="Summon a familiar" title="Summon a familiar (⌘N)" onClick={summon}>
             <PlusIcon />
           </button>
         </div>
@@ -346,7 +352,9 @@ export default function App() {
             </Match>
             <Match when={is("new")}>
               <div class="form-page" data-tauri-drag-region>
-                <AgentForm covens={covens()} onSaved={created} onCancel={agents().length ? () => setView("home") : undefined} />
+                <Show when={summonCount()} keyed>
+                  {(_count) => <AgentForm covens={covens()} onSaved={created} onCancel={agents().length ? () => setView("home") : undefined} />}
+                </Show>
               </div>
             </Match>
             <Match when={is("inbox")}>
@@ -370,7 +378,7 @@ export default function App() {
                 busy={busy}
                 mood={moodOf}
                 onOpenAgent={openAgent}
-                onNewAgent={() => setView("new")}
+                onNewAgent={summon}
                 onOpenRoutines={() => setView("routines")}
               />
             </Match>
