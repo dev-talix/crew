@@ -195,6 +195,11 @@ pub struct ServerCommand {
     pub token: String,
 }
 
+/// Whether `agent` gets the Grimoire tools: the socket is up and the familiar runs on this Mac.
+pub fn available_for(agent: &Agent) -> bool {
+    agent.host.is_none() && LAUNCH.get().is_some()
+}
+
 /// The command a CLI runs to give `agent_id` the Grimoire tools, once the socket is up.
 /// In a side conversation `agent_id` is its lane key, so the tools know where the familiar is working.
 pub fn server_command(agent_id: &str) -> Option<ServerCommand> {
@@ -722,6 +727,13 @@ mod tests {
         assert_eq!(list[0]["steps"][0]["familiar"], "Writer");
         assert_eq!(list[0]["createdBy"], Value::Null);
         assert!(call(&db, &dir, "w1", "delete_everything", json!({})).is_err());
+    }
+
+    #[test]
+    fn familiars_on_another_mac_are_not_offered_the_tools() {
+        let mut remote = agent("r1", "Remote");
+        remote.host = Some("me@studio.local".into());
+        assert!(!available_for(&remote));
     }
 
     #[test]

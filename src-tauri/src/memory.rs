@@ -469,7 +469,7 @@ fn render(entries: &[Entry], ids: bool) -> String {
 /// The memory a familiar starts a chat with, or None when it has nothing to read or no way to write.
 pub fn session_prompt(agent: &Agent) -> Option<String> {
     let dir = dir().ok()?;
-    prompt_in(dir, agent, crate::tools::server_command(&agent.id).is_some())
+    prompt_in(dir, agent, crate::tools::available_for(agent))
 }
 
 fn prompt_in(dir: &Path, agent: &Agent, tools: bool) -> Option<String> {

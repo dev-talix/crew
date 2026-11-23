@@ -3,6 +3,7 @@ import BotAvatar from "./BotAvatar";
 import { api, errorText, onEvent, onMountAsync, relativeTime, type Agent, type ApprovalDecision, type InboxItem } from "./api";
 import { inkFor } from "./avatar";
 import { groupByFamiliar, isApproval, optionsInOrder } from "./inboxList";
+import { Shield } from "./Shield";
 import { EmptyState, Page } from "./ui";
 import "./inbox.css";
 
@@ -67,8 +68,22 @@ export default function InboxPage(props: { agents: Agent[]; onOpenAgent: (id: st
       void inbox.reload();
     }
   };
-  const answer = (item: InboxItem, value: string) =>
-    run(item, () => (isApproval(item) ? api.answerApproval(item.id, value as ApprovalDecision) : api.answerQuestion(item.id, value)));
+  // Theme CSS can restyle this page, so allowing goes through a confirm card it can't reach (see Shield).
+  // Denying is always safe and stays one tap.
+  const [confirming, setConfirming] = createSignal<{ item: InboxItem; value: ApprovalDecision; label: string } | null>(null);
+  const answer = (item: InboxItem, value: string) => {
+    if (!isApproval(item)) return run(item, () => api.answerQuestion(item.id, value));
+    if (value !== "deny") {
+      setConfirming({ item, value: value as ApprovalDecision, label: item.options.find((o) => o.value === value)?.label ?? value });
+      return;
+    }
+    return run(item, () => api.answerApproval(item.id, "deny"));
+  };
+  const confirm = () => {
+    const pending = confirming();
+    setConfirming(null);
+    if (pending) void run(pending.item, () => api.answerApproval(pending.item.id, pending.value));
+  };
   const dismiss = (item: InboxItem) => run(item, () => api.dismissQuestion(item.id));
 
   return (
@@ -107,6 +122,35 @@ export default function InboxPage(props: { agents: Agent[]; onOpenAgent: (id: st
           }}
         </For>
       </div>
+      <Show when={confirming()}>
+        {(pending) => (
+          <Shield place="center">
+            <div class="approvals">
+              <div class="approval" role="alertdialog" aria-label={`${pending().label}: ${pending().item.title}`}>
+                <div class="approval-head">
+                  <div>
+                    <p class="approval-title">
+                      {pending().label}: {pending().item.title}
+                    </p>
+                    <Show when={pending().item.kind === "command"} fallback={<p class="approval-detail">{pending().item.detail}</p>}>
+                      <pre class="approval-command">{pending().item.detail}</pre>
+                    </Show>
+                  </div>
+                </div>
+                <div class="approval-actions">
+                  <button class="ghost small" onClick={() => setConfirming(null)}>
+                    Cancel
+                  </button>
+                  <span class="spacer" />
+                  <button class="primary small" onClick={confirm}>
+                    {pending().label}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </Shield>
+        )}
+      </Show>
     </Page>
   );
 }

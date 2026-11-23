@@ -362,7 +362,7 @@ fn link_allowed(channel: Channel, url: &str) -> bool {
 
 /// The chat-start instruction, for a familiar that has the Grimoire tools.
 pub fn session_prompt(agent: &Agent) -> Option<String> {
-    prompt(crate::tools::server_command(&agent.id).is_some())
+    prompt(crate::tools::available_for(agent))
 }
 
 fn prompt(tools: bool) -> Option<String> {

@@ -164,7 +164,7 @@ pub fn update(db: &Db, agent_id: &str, patch: Patch, by: &str) -> Result<Ledger,
 /// The ledger part of a familiar's chat-start prompt.
 pub fn session_prompt(agent: &Agent) -> Option<String> {
     let ledger = get(DB.get()?, &agent.id).ok()?;
-    prompt_text(&ledger, crate::tools::server_command(&agent.id).is_some())
+    prompt_text(&ledger, crate::tools::available_for(agent))
 }
 
 /// None when there's no ledger to show and no tool to start one.
