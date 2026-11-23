@@ -1,7 +1,23 @@
 import { For, onSettled, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import BotAvatar from "./BotAvatar";
-import type { Agent } from "./api";
+import { hostState, type Agent } from "./api";
+
+/** The Mac a remote familiar runs on, and whether that Mac is offline or still owes it its setup. */
+export function HostBadge(props: { agent: Agent; host: string; title?: string }) {
+  const state = () => hostState(props.agent);
+  const title = () => {
+    if (props.agent.setupPending) return `${props.host} was offline when this familiar was summoned. Grimoire finishes setting it up when that Mac connects.`;
+    if (props.agent.offline) return `${props.host} didn't answer the last time Grimoire tried.`;
+    return props.title;
+  };
+  return (
+    <span class={["remote-badge", { "remote-waiting": !!state() }]} title={title()}>
+      {props.host}
+      <Show when={state()}>{(text) => <span class="remote-state"> · {text()}</span>}</Show>
+    </span>
+  );
+}
 
 export function Page(props: { title: string; actions?: JSX.Element; children: JSX.Element }) {
   return (

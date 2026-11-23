@@ -348,7 +348,7 @@ impl Codex {
                 codex.handle_message(&reader, message).await;
             }
             reader.kill();
-            let detail = stderr.text();
+            let detail = stderr.final_text().await;
             let reason = if detail.is_empty() { "codex stopped unexpectedly.".to_string() } else { detail };
             if let Ok(mut pending) = reader.pending.lock() {
                 for (_, waiter) in pending.drain() {

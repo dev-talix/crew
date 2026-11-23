@@ -422,6 +422,17 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* Its Mac is offline or still owes it its setup; the badge says which in words. */
+.remote-badge.remote-waiting {
+  max-width: 260px;
+  border-style: dashed;
+}
+
+.remote-state {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .form-actions {
   display: flex;
   align-items: center;

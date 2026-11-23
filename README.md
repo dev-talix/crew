@@ -142,6 +142,15 @@ system `ssh` and talks to it over the same stdio stream it uses locally. Set up 
 it. The workspace is a path on that Mac, a full path or one under `~/`, and defaults to a new folder
 in `~/Grimoire` there. Grimoire creates it when you summon the familiar.
 
+If the Mac doesn't answer when you summon the familiar, Grimoire still saves it, and its host badge
+says "Setup pending". Grimoire finishes the setup the next time that Mac answers: before the
+familiar's next turn, in a background retry every three minutes, or when you press "Check
+connection" in its settings. Other errors, like a workspace path the Mac refuses, still stop the
+summon. When a chat turn, ritual, spell step, or side conversation can't reach the Mac, the chat
+shows a plain "that Mac is offline" message instead of the ssh error, and the badge says "Offline"
+until a later try gets through. A key ssh refuses or a changed host key still shows ssh's own
+message, since you have to fix those yourself.
+
 What doesn't cross machines yet: Grimoire's tools (saving memory, making spells and themes, the
 vault, and asking other familiars) need a socket on this Mac, so remote familiars run without them.
 They still get their memory when a chat starts, and other familiars can still ask them. Attachments

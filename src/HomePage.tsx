@@ -6,7 +6,7 @@ import CovenEditor from "./CovenEditor";
 import { RitualPauseNotice } from "./BudgetControls";
 import HomeCircle from "./HomeCircle";
 import { PlusIcon } from "./icons";
-import { EmptyState, Page, Sheet } from "./ui";
+import { EmptyState, HostBadge, Page, Sheet } from "./ui";
 import { ritualAgents, ritualWho } from "./spells";
 
 const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
@@ -197,7 +197,7 @@ export default function HomePage(props: {
                       </span>
                       <span class="home-meta">
                         <span>{PROVIDER_NAMES[agent.provider]}</span>
-                        <Show when={agent.host}>{(host) => <span class="remote-badge">{host()}</span>}</Show>
+                        <Show when={agent.host}>{(host) => <HostBadge agent={agent} host={host()} />}</Show>
                         <Show when={last[agent.id]}>{(m) => <span>{ago(m().createdAt)}</span>}</Show>
                       </span>
                     </button>

@@ -344,7 +344,7 @@ impl Claude {
                 }
             }
             if let Some(tx) = reader.take_route() {
-                let detail = stderr.text();
+                let detail = stderr.final_text().await;
                 let message = if detail.is_empty() { "claude stopped unexpectedly.".to_string() } else { detail };
                 let _ = tx.send(ProviderEvent::Failed(message));
             }

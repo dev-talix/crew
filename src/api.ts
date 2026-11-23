@@ -28,7 +28,18 @@ export interface Agent {
   covenId: string | null;
   /** The SSH destination of the Mac it runs on. Null runs it on this Mac. */
   host: string | null;
+  /** Saved while its Mac was offline. Grimoire makes its workspace there once the Mac answers. */
+  setupPending?: boolean;
+  /** Its Mac didn't answer the last time Grimoire tried. */
+  offline?: boolean;
   createdAt: number;
+}
+
+/** What the host badge says about a remote familiar's Mac, or null when there's nothing to flag. */
+export function hostState(agent: Pick<Agent, "setupPending" | "offline">): "Setup pending" | "Offline" | null {
+  if (agent.setupPending) return "Setup pending";
+  if (agent.offline) return "Offline";
+  return null;
 }
 
 /** What "Check connection" found on another Mac. */

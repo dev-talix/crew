@@ -250,7 +250,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 21;
+const SCHEMA_VERSION: i64 = 22;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -517,6 +517,15 @@ impl Db {
                  COMMIT;",
             )?;
         }
+        if version < 22 {
+            // A remote familiar saved while its Mac was offline, whose workspace there isn't made yet.
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE agents ADD COLUMN setup_pending INTEGER NOT NULL DEFAULT 0;
+                 PRAGMA user_version = 22;
+                 COMMIT;",
+            )?;
+        }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
             [],
@@ -585,6 +594,19 @@ impl Db {
             )
             .map(|_| ())
         })
+    }
+
+    /// The remote familiars whose setup waits for their Mac to connect.
+    pub fn pending_setups(&self) -> Result<std::collections::HashSet<String>, String> {
+        self.with(|c| {
+            let mut stmt = c.prepare_cached("SELECT id FROM agents WHERE setup_pending = 1")?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
+    pub fn set_setup_pending(&self, agent_id: &str, pending: bool) -> Result<(), String> {
+        self.with(|c| c.execute("UPDATE agents SET setup_pending = ?2 WHERE id = ?1", params![agent_id, pending]).map(|_| ()))
     }
 
     pub fn set_active_model(&self, agent_id: &str, model: &str) -> Result<(), String> {
@@ -1023,6 +1045,32 @@ mod tests {
         assert_eq!((saved.host.as_deref(), saved.workspace.as_str()), (Some("me@studio.local"), "~/Grimoire/r"));
         db.update_agent(&Agent { name: "Renamed".into(), ..saved }).unwrap();
         assert_eq!(db.list_agents().unwrap()[1].host.as_deref(), Some("me@studio.local"), "edits keep the host");
+    }
+
+    #[test]
+    fn an_existing_database_gains_pending_setups() {
+        let dir = std::env::temp_dir().join(format!("grimoire-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grimoire.db");
+        {
+            let db = Db::open(&path).unwrap();
+            db.insert_agent(&agent("a")).unwrap();
+        }
+        // Roll the file back to version 21, as the previous release left it.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("ALTER TABLE agents DROP COLUMN setup_pending; PRAGMA user_version = 21;").unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let version: i64 = db.with(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(db.pending_setups().unwrap().is_empty(), "existing familiars aren't pending");
+        db.set_setup_pending("a", true).unwrap();
+        assert!(db.pending_setups().unwrap().contains("a"));
+        db.set_setup_pending("a", false).unwrap();
+        assert!(db.pending_setups().unwrap().is_empty());
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

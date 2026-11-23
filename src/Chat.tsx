@@ -9,6 +9,7 @@ import type { ChatStore } from "./chatStore";
 import Ledger from "./Ledger";
 import Helpers from "./Helpers";
 import ModelPicker from "./ModelPicker";
+import { HostBadge } from "./ui";
 import SideConversation from "./SideConversation";
 import { effortName, runningModelName } from "./models";
 import {
@@ -477,11 +478,7 @@ export default function Chat(props: {
                 </button>
               }
             >
-              {(host) => (
-                <span class="remote-badge" title={`Runs in ${props.agent.workspace} on ${host()} over SSH, without Grimoire's tools`}>
-                  {host()}
-                </span>
-              )}
+              {(host) => <HostBadge agent={props.agent} host={host()} title={`Runs in ${props.agent.workspace} on ${host()} over SSH, without Grimoire's tools`} />}
             </Show>
           </Show>
           <span class="crumb-sep" aria-hidden="true">

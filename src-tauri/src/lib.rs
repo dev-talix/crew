@@ -189,8 +189,8 @@ fn strictly_inside(path: &Path, home: &Path) -> bool {
 }
 
 #[tauri::command]
-fn list_agents(state: State<AppState>) -> Result<Vec<Agent>, String> {
-    state.db.list_agents()
+fn list_agents(state: State<AppState>) -> Result<Vec<remote::AgentStatus>, String> {
+    remote::with_status(&state.db, state.db.list_agents()?)
 }
 
 #[tauri::command]
@@ -199,17 +199,18 @@ fn busy_agents(state: State<AppState>) -> Vec<String> {
 }
 
 #[tauri::command]
-async fn create_agent(app: AppHandle, state: State<'_, AppState>, input: NewAgent) -> Result<Agent, String> {
+async fn create_agent(app: AppHandle, state: State<'_, AppState>, input: NewAgent) -> Result<remote::AgentStatus, String> {
     let name = clean_name(&input.name)?;
     input.avatar.validate()?;
     let id = uuid::Uuid::new_v4().to_string();
     let host = remote::clean_host(input.host.as_deref())?;
     let effort = clean_effort(input.effort)?;
     let coven_id = clean_coven(&state.db, input.coven_id)?;
+    let mut setup_pending = false;
     let workspace = match &host {
         Some(host) => {
             let workspace = remote::clean_workspace(input.workspace.as_deref(), &name, &id)?;
-            remote::make_workspace(host, &workspace).await?;
+            setup_pending = remote::setup_on_create(host, &workspace, remote::first_setup).await?;
             workspace
         }
         None => {
@@ -234,8 +235,14 @@ async fn create_agent(app: AppHandle, state: State<'_, AppState>, input: NewAgen
         created_at: now_ms(),
     };
     state.db.insert_agent(&agent)?;
+    if setup_pending {
+        state.db.set_setup_pending(&agent.id, true).inspect_err(|_| {
+            let _ = state.db.delete_agent(&agent.id);
+        })?;
+    }
     let _ = app.emit("agents_changed", ());
-    Ok(agent)
+    let offline = agent.host.as_deref().is_some_and(remote::is_offline);
+    Ok(remote::AgentStatus { agent, setup_pending, offline })
 }
 
 #[tauri::command]
@@ -667,6 +674,7 @@ pub fn run() {
             if let Err(e) = delegation::recover(&db) {
                 eprintln!("Couldn't close side conversations left unfinished: {e}");
             }
+            remote::install(app.handle().clone(), db.clone());
             let runtime = Runtime::new(db.clone(), app.handle().clone());
             let workflows = WorkflowRunner::new(db.clone(), runtime.clone(), app.handle().clone());
             let edge = db.setting(DOCK_EDGE).ok().flatten().and_then(|e| dock::Edge::parse(&e));

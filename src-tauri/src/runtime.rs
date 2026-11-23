@@ -405,6 +405,9 @@ impl Runtime {
         if let Err(reason) = crate::budgets::check_turn(&self.db, &agent.id) {
             return writer.fail(&reason);
         }
+        if let Err(outcome) = gate(&mut writer, &self.db, &agent, crate::remote::quick_setup).await {
+            return outcome;
+        }
         let lane = Lane { key, session: lane_session(session, agent.session_id.clone()) };
         let prompt = crate::side::framed(asker, message);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -414,7 +417,7 @@ impl Runtime {
         };
         match started {
             Ok(()) => stream_turn(&mut writer, rx).await,
-            Err(e) => writer.fail(&e),
+            Err(e) => writer.fail(&crate::remote::explain(&agent, e).await),
         }
     }
 
@@ -437,6 +440,9 @@ impl Runtime {
         if let Err(reason) = crate::budgets::check_turn(&self.db, &agent.id) {
             return writer.fail(&reason);
         }
+        if let Err(outcome) = gate(&mut writer, &self.db, &agent, crate::remote::quick_setup).await {
+            return outcome;
+        }
         let lane = Lane { key: crate::side::lane_key(&agent.id, &chat.id), session: LaneSession::Fresh };
         if !startup.begin() {
             return TurnOutcome::Stopped;
@@ -449,7 +455,7 @@ impl Runtime {
         startup.started();
         match started {
             Ok(()) => stream_turn(&mut writer, rx).await,
-            Err(e) => writer.fail(&e),
+            Err(e) => writer.fail(&crate::remote::explain(&agent, e).await),
         }
     }
 
@@ -472,6 +478,9 @@ impl Runtime {
         };
         let mut writer = TurnWriter::new(&self.db, &self.app, &agent);
         writer.origin = origin_of(source);
+        if let Err(outcome) = gate(&mut writer, &self.db, &agent, crate::remote::quick_setup).await {
+            return outcome;
+        }
         let mut input = match crate::attachments::turn_input(std::path::Path::new(&agent.workspace), text, attachments) {
             Ok(input) => input,
             Err(e) => return writer.fail(&e),
@@ -490,9 +499,19 @@ impl Runtime {
                 clear_notes(&self.db, &held);
                 stream_turn(&mut writer, rx).await
             }
-            Err(e) => writer.fail(&e),
+            Err(e) => writer.fail(&crate::remote::explain(&agent, e).await),
         }
     }
+}
+
+/// Stops a turn before anything spawns when the familiar's Mac can't be reached, with a plain error
+/// row in the chat. A familiar saved while its Mac was offline finishes its setup here first.
+async fn gate<F, Fut>(writer: &mut TurnWriter<'_>, db: &Db, agent: &Agent, setup: F) -> Result<(), TurnOutcome>
+where
+    F: FnOnce(String, String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), crate::remote::SshError>>,
+{
+    crate::remote::ready(db, agent, setup).await.map_err(|reason| writer.fail(&reason))
 }
 
 /// A side conversation carries on its own session, or starts from a copy of the familiar's main one.
@@ -562,6 +581,8 @@ pub struct TurnWriter<'a> {
     usage: Option<(u64, u64)>,
     /// The side conversation this turn writes to, instead of the familiar's current chat.
     chat_id: Option<String>,
+    /// The familiar's name and host when it runs on another Mac, to explain an ssh failure plainly.
+    remote: Option<(String, String)>,
 }
 
 /// The settings key for Claude's latest plan limit snapshot.
@@ -581,6 +602,7 @@ impl<'a> TurnWriter<'a> {
             origin: "you",
             usage: None,
             chat_id: None,
+            remote: agent.host.clone().map(|host| (agent.name.clone(), host)),
         }
     }
 
@@ -676,6 +698,9 @@ impl<'a> TurnWriter<'a> {
     fn close(&mut self, status: &str) -> TurnOutcome {
         self.end_segment(status);
         self.record_usage();
+        if let Some((_, host)) = &self.remote {
+            crate::remote::set_offline(host, false);
+        }
         if status == "stopped" {
             TurnOutcome::Stopped
         } else {
@@ -686,10 +711,18 @@ impl<'a> TurnWriter<'a> {
     fn fail(&mut self, reason: &str) -> TurnOutcome {
         self.end_segment("done");
         self.record_usage();
-        if let Ok(message) = self.insert("error", reason.trim(), "done") {
+        let reason = match &self.remote {
+            // The CLI's ssh couldn't reach the other Mac: say so, not what ssh printed.
+            Some((name, host)) if crate::remote::offline_text(reason) => {
+                crate::remote::set_offline(host, true);
+                crate::remote::offline_message(name, host, false)
+            }
+            _ => reason.trim().to_string(),
+        };
+        if let Ok(message) = self.insert("error", &reason, "done") {
             self.sink.message(&message);
         }
-        TurnOutcome::Failed(reason.trim().to_string())
+        TurnOutcome::Failed(reason)
     }
 }
 
@@ -1017,5 +1050,34 @@ mod tests {
         assert_eq!(saved.len(), 2);
         assert_eq!((saved[0].text.as_str(), saved[0].status.as_str()), ("partial", "done"));
         assert_eq!(saved[1].role, "error");
+    }
+
+    #[tokio::test]
+    async fn a_turn_for_an_offline_familiar_says_so_plainly() {
+        let (db, local) = setup();
+        let agent = Agent { id: "r".into(), host: Some("gate-test.local".into()), workspace: "~/w".into(), ..local };
+        db.insert_agent(&agent).unwrap();
+        db.set_setup_pending("r", true).unwrap();
+        let sink = Recorder::default();
+        let mut writer = TurnWriter::new(&db, &sink, &agent);
+        let gated = gate(&mut writer, &db, &agent, |_, _| async { Err(crate::remote::SshError::Offline) }).await;
+        let expected = "Ada runs on gate-test.local, and that Mac is offline. Grimoire will finish setting it up when it connects.";
+        assert_eq!(gated, Err(TurnOutcome::Failed(expected.into())), "the turn stops before anything spawns");
+        let rows: Vec<(String, String)> = db.list_messages("r", None, 10).unwrap().into_iter().map(|m| (m.role, m.text)).collect();
+        assert_eq!(rows, [("error".to_string(), expected.to_string())]);
+        assert_eq!(sink.messages.lock().unwrap().len(), 1, "the chat shows it");
+
+        // ssh failing once the CLI starts is explained the same way, without the raw ssh line.
+        crate::remote::set_offline("gate-test.local", false);
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(ProviderEvent::Failed("ssh: connect to host gate-test.local port 22: Operation timed out".into())).unwrap();
+        let outcome = stream_turn(&mut TurnWriter::new(&db, &sink, &agent), rx).await;
+        let later = "Ada runs on gate-test.local, and that Mac is offline. Try again when it's back.";
+        assert_eq!(outcome, TurnOutcome::Failed(later.into()));
+        assert!(crate::remote::is_offline("gate-test.local"));
+
+        // A local familiar's turn never waits on ssh.
+        let mut writer = TurnWriter::new(&db, &sink, &setup().1);
+        assert_eq!(gate(&mut writer, &db, &setup().1, |_, _| async { Err(crate::remote::SshError::Offline) }).await, Ok(()));
     }
 }

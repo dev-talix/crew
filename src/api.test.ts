@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createRoot, createSignal } from "solid-js";
-import { createFetch, describeSchedule, onMountAsync } from "./api";
+import { createFetch, describeSchedule, hostState, onMountAsync } from "./api";
 
 test("describeSchedule names clocks and event triggers", () => {
   expect(describeSchedule({ kind: "interval", minutes: 120 })).toBe("Every 2 hours");
@@ -71,4 +71,11 @@ test("onMountAsync stops listeners that arrive after disposal", async () => {
   late.resolve(() => stopped.push("late"));
   await settle();
   expect(stopped).toEqual(["early", "late"]);
+});
+
+test("hostState says a remote familiar's Mac is offline or owes it its setup", () => {
+  expect(hostState({})).toBe(null);
+  expect(hostState({ offline: true })).toBe("Offline");
+  expect(hostState({ setupPending: true, offline: true })).toBe("Setup pending");
+  expect(hostState({ setupPending: false, offline: false })).toBe(null);
 });

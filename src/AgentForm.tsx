@@ -56,13 +56,16 @@ export default function AgentForm(props: {
   };
   const [workspace, setWorkspace] = createSignal("");
   const [remote, setRemote] = createSignal(false);
-  const [host, setHost] = createSignal("");
+  const [host, setHost] = createSignal(props.agent?.host ?? "");
   const [checking, setChecking] = createSignal(false);
   const [check, setCheck] = createSignal<HostCheck | string | null>(null);
+  // A familiar saved while its Mac was offline, shown here before the form closes.
+  const [savedPending, setSavedPending] = createSignal<Agent | null>(null);
   const checkConnection = async () => {
     setChecking(true);
     setCheck(null);
     try {
+      // Reaching the Mac also finishes the setup of familiars waiting on it.
       setCheck(await api.checkHost(host()));
     } catch (err) {
       setCheck(errorText(err));
@@ -121,6 +124,10 @@ export default function AgentForm(props: {
             host: remote() ? host() : "",
           });
       if (tokens !== null || hadBudget) await api.setBudget(saved.id, tokens === null ? null : { tokens, period: period() });
+      if (!editing && saved.setupPending) {
+        setSavedPending(saved);
+        return;
+      }
       props.onSaved(saved);
     } catch (err) {
       setError(errorText(err));
@@ -163,13 +170,30 @@ export default function AgentForm(props: {
         <Show
           when={!editing}
           fallback={
-            <div class="field">
-              <span>Runs on</span>
-              <p class="readonly">
-                {PROVIDER_NAMES[provider()]}
-                {props.agent!.host ? ` on ${props.agent!.host}` : ""} in {shortPath(props.agent!.workspace)}
-              </p>
-            </div>
+            <>
+              <div class="field">
+                <span>Runs on</span>
+                <p class="readonly">
+                  {PROVIDER_NAMES[provider()]}
+                  {props.agent!.host ? ` on ${props.agent!.host}` : ""} in {shortPath(props.agent!.workspace)}
+                </p>
+              </div>
+              <Show when={props.agent!.host}>
+                <div class="field">
+                  <span>Connection</span>
+                  <button type="button" class="ghost check-button" disabled={checking()} onClick={checkConnection}>
+                    {checking() ? "Checking..." : "Check connection"}
+                  </button>
+                </div>
+                <Show when={check()}>
+                  {(result) => (
+                    <p class="hint check-result" role="status">
+                      {checkSummary(result(), provider())}
+                    </p>
+                  )}
+                </Show>
+              </Show>
+            </>
           }
         >
           <div class="field">
@@ -296,6 +320,15 @@ export default function AgentForm(props: {
         </p>
       </Show>
 
+      <Show when={savedPending()}>
+        {(saved) => (
+          <p class="hint" role="status">
+            {saved().name} is saved, but {saved().host} didn't answer, so its setup is pending. Grimoire finishes it when that Mac
+            connects. Until then, chats and rituals with {saved().name} say the Mac is offline.
+          </p>
+        )}
+      </Show>
+
       <div class="form-actions">
         <Show when={editing}>
           <button type="button" class="ghost danger" onClick={remove}>
@@ -309,9 +342,20 @@ export default function AgentForm(props: {
             Cancel
           </button>
         </Show>
-        <button class="primary" type="submit" disabled={saving() || !name().trim()}>
-          {editing ? "Save changes" : "Summon familiar"}
-        </button>
+        <Show
+          when={savedPending()}
+          fallback={
+            <button class="primary" type="submit" disabled={saving() || !name().trim()}>
+              {editing ? "Save changes" : "Summon familiar"}
+            </button>
+          }
+        >
+          {(saved) => (
+            <button type="button" class="primary" onClick={() => props.onSaved(saved())}>
+              Open {saved().name}
+            </button>
+          )}
+        </Show>
       </div>
     </form>
   );
