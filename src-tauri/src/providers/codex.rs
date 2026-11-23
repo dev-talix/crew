@@ -571,6 +571,7 @@ mod tests {
             avatar: crate::db::Avatar::for_seed("a"),
             effort: None,
             active_model: None,
+            coven_id: None,
             created_at: 0,
         };
         let params = thread_params(&agent);

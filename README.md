@@ -23,6 +23,8 @@
 - **Spells** chain familiars: research, then write, then review. Each step gets the last reply.
   Click a spell in the sidebar to cast it.
 - **Rituals** send a familiar the same message on a schedule, like a morning summary.
+- **Covens** group familiars. Home's summoning circle shows everyone or one coven at a time, with
+  lines for the spells between familiars and gold arcs for their rituals.
 - **Themes** come as seven built-in inks, and you can edit or write your own as JSON.
 - **Familiars make things too.** Ask one for "a spell that…" or "a theme that feels like a rainy
   library" and it saves it through Grimoire's own tools, credited to it.
@@ -77,6 +79,18 @@ it. The model chip in the composer shows the model it is running and switches it
 **Access.** "Workspace only" keeps Codex in its `workspace-write` sandbox and runs Claude in
 `acceptEdits` mode, so it can edit files but shell commands are refused. "Full access" uses Codex
 `danger-full-access` and Claude `bypassPermissions`. Neither asks for approval during a turn.
+
+## Covens and the circle
+
+Home seats your familiars around a summoning circle. A curved line joins two familiars for each spell
+that hands work between them (hover it for the name), a gold arc on the outer ring marks a familiar
+with rituals, and a working familiar glows with a line from the center.
+
+A coven is a named group of familiars, and each familiar sits in one at most. The chips above the
+circle switch between everyone and one coven; "All" seats each coven together under a labeled arc.
+Create a coven with the + chip, change its name and familiars with "Edit", or pick a familiar's coven
+in its settings. The sidebar groups familiars by coven, with the rest under "Unbound", and
+`list_familiars` tells familiars which coven each one is in.
 
 ## Spells and rituals
 

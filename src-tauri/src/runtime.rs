@@ -498,6 +498,7 @@ mod tests {
             avatar: crate::db::Avatar::for_seed("a"),
             effort: None,
             active_model: None,
+            coven_id: None,
             created_at: now_ms(),
         };
         db.insert_agent(&agent).unwrap();
@@ -573,6 +574,7 @@ mod tests {
             avatar: crate::db::Avatar::for_seed("a"),
             effort: None,
             active_model: None,
+            coven_id: None,
             created_at: now_ms(),
         };
         db.insert_agent(&agent).unwrap();

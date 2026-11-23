@@ -2,7 +2,7 @@ import { createSignal, For, onCleanup, Show } from "solid-js";
 import AvatarStudio from "./AvatarStudio";
 import { Segmented } from "./ui";
 import { inkFor, randomAvatar, type Avatar } from "./avatar";
-import { api, createFetch, errorText, PROVIDER_NAMES, shortPath, type Access, type Agent, type Provider } from "./api";
+import { api, createFetch, errorText, PROVIDER_NAMES, shortPath, type Access, type Agent, type Coven, type Provider } from "./api";
 import { effortName, modelCatalog, modelName } from "./models";
 
 const ACCESS_HELP: Record<Provider, Record<Access, string>> = {
@@ -18,6 +18,7 @@ const ACCESS_HELP: Record<Provider, Record<Access, string>> = {
 
 export default function AgentForm(props: {
   agent?: Agent;
+  covens?: Coven[];
   onSaved: (agent: Agent) => void;
   onCancel?: () => void;
   onDeleted?: (id: string) => void;
@@ -27,6 +28,7 @@ export default function AgentForm(props: {
   const [provider, setProvider] = createSignal<Provider>(props.agent?.provider ?? "codex");
   const [model, setModel] = createSignal(props.agent?.model ?? "");
   const [effort, setEffort] = createSignal(props.agent?.effort ?? "");
+  const [coven, setCoven] = createSignal(props.agent?.covenId ?? "");
   const catalog = createFetch(provider, modelCatalog);
   const models = () => catalog() ?? [];
   const efforts = () =>
@@ -56,7 +58,7 @@ export default function AgentForm(props: {
     setSaving(true);
     try {
       const saved = props.agent
-        ? await api.updateAgent(props.agent.id, { name: name(), model: model(), access: access(), avatar: avatar(), effort: effort() })
+        ? await api.updateAgent(props.agent.id, { name: name(), model: model(), access: access(), avatar: avatar(), effort: effort(), covenId: coven() || null })
         : await api.createAgent({
             name: name(),
             provider: provider(),
@@ -65,6 +67,7 @@ export default function AgentForm(props: {
             access: access(),
             avatar: avatar(),
             effort: effort(),
+            covenId: coven() || null,
           });
       props.onSaved(saved);
     } catch (err) {
@@ -148,6 +151,16 @@ export default function AgentForm(props: {
             <For each={efforts()}>{(level) => <option value={level}>{effortName(level)}</option>}</For>
           </select>
         </label>
+
+        <Show when={props.covens?.length}>
+          <label class="field">
+            <span>Coven</span>
+            <select value={coven()} onChange={(e) => setCoven(e.currentTarget.value)}>
+              <option value="">Unbound</option>
+              <For each={props.covens}>{(c) => <option value={c.id}>{c.name}</option>}</For>
+            </select>
+          </label>
+        </Show>
 
         <Show when={!editing}>
           <label class="field">

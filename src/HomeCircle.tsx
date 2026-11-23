@@ -1,9 +1,10 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
 import BotAvatar, { type Mood } from "./BotAvatar";
-import { PROVIDER_NAMES, relativeTime, type Agent, type Routine, type Workflow } from "./api";
+import { PROVIDER_NAMES, relativeTime, type Agent, type Coven, type Routine, type Workflow } from "./api";
 import "./home.css";
 
-import { arc, curve, NODE_RING, OUTER_RING, RUNES, seat, spellLinks, type Link } from "./circle";
+import { arc, arcBetween, covenSectors, curve, NODE_RING, OUTER_RING, RUNES, seat, spellLinks, type Link } from "./circle";
+import type { JSX } from "@solidjs/web";
 
 export default function HomeCircle(props: {
   agents: Agent[];
@@ -12,6 +13,12 @@ export default function HomeCircle(props: {
   busy: Record<string, boolean>;
   mood: (agentId: string) => Mood;
   now: number;
+  /** When given, arcs mark each coven's run of seats; familiars should come in coven order. */
+  covens?: Coven[];
+  /** Shown in the middle instead of the familiar count, like a coven's name. */
+  title?: string;
+  /** Shown in the middle under the status, like a button to add familiars. */
+  centerAction?: JSX.Element;
   onOpenAgent: (id: string) => void;
   onOpenSpells: () => void;
 }) {
@@ -27,6 +34,10 @@ export default function HomeCircle(props: {
   const nextRitual = () =>
     props.routines.filter((r) => r.enabled && r.nextRunAt && index(r.agentId) >= 0).sort((a, b) => a.nextRunAt! - b.nextRunAt!)[0];
   const small = () => count() > 8;
+  const sectors = createMemo(() => (props.covens?.length ? covenSectors(props.agents.map((a) => a.covenId ?? null)) : []));
+  const covenName = (id: string) => props.covens?.find((c) => c.id === id)?.name ?? "";
+  const SECTOR_RING = OUTER_RING + 2.6;
+  const LABEL_RING = OUTER_RING + 6.5;
 
   return (
     <div class={["home-circle", { small: small() }]}>
@@ -45,6 +56,7 @@ export default function HomeCircle(props: {
           <rect x="43.5" y="43.5" width="13" height="13" />
           <rect x="43.5" y="43.5" width="13" height="13" transform="rotate(45 50 50)" />
         </g>
+        <For each={sectors()}>{(sector) => <path class="coven-arc" d={arcBetween(sector.start, sector.end, SECTOR_RING)} />}</For>
         <For each={props.agents}>
           {(agent, i) => (
             <Show when={rituals(agent.id).length > 0}>
@@ -101,15 +113,33 @@ export default function HomeCircle(props: {
         )}
       </For>
 
+      <For each={sectors()}>
+        {(sector) => {
+          const a = (sector.mid * Math.PI) / 180;
+          return (
+            <span class="coven-label" style={{ left: `${50 + LABEL_RING * Math.cos(a)}%`, top: `${50 + LABEL_RING * Math.sin(a)}%` }}>
+              {covenName(sector.covenId)}
+            </span>
+          );
+        }}
+      </For>
+
       <div class="circle-center">
-        <span class="circle-count">
-          {count()} {count() === 1 ? "familiar" : "familiars"}
-        </span>
+        <span class="circle-count">{props.title ?? `${count()} ${count() === 1 ? "familiar" : "familiars"}`}</span>
         <span class="circle-status">
-          {working().length ? `${working().map((a) => a.name).join(", ")} ${working().length === 1 ? "is" : "are"} working` : "All resting"}
+          {working().length
+            ? `${working().map((a) => a.name).join(", ")} ${working().length === 1 ? "is" : "are"} working`
+            : props.title
+              ? count()
+                ? `${count()} ${count() === 1 ? "familiar" : "familiars"}, all resting`
+                : "No familiars yet"
+              : "All resting"}
         </span>
         <Show when={nextRitual()}>
           {(r) => <span class="circle-next">Next ritual {relativeTime(r().nextRunAt!, props.now)}</span>}
+        </Show>
+        <Show when={props.centerAction}>
+          <span class="circle-action">{props.centerAction}</span>
         </Show>
       </div>
 

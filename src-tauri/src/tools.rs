@@ -171,6 +171,7 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
     let invalid = |e: serde_json::Error| format!("Invalid arguments: {e}");
     let (text, changed) = match tool {
         "list_familiars" => {
+            let covens = crate::covens::list(db)?;
             let list: Vec<Value> = agents
                 .iter()
                 .map(|a| {
@@ -179,6 +180,7 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
                         "name": a.name,
                         "provider": a.provider,
                         "model": a.active_model.as_deref().or(a.model.as_deref()).unwrap_or("default"),
+                        "coven": a.coven_id.as_deref().and_then(|id| covens.iter().find(|c| c.id == id)).map(|c| c.name.clone()),
                         "you": a.id == caller,
                     })
                 })
@@ -452,6 +454,7 @@ mod tests {
             avatar: Avatar::for_seed(id),
             effort: None,
             active_model: None,
+            coven_id: None,
             created_at: now_ms(),
         }
     }

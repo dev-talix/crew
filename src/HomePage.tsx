@@ -1,12 +1,32 @@
 import { listen } from "@tauri-apps/api/event";
 import { createMemo, createSignal, createStore, For, onCleanup, Show } from "solid-js";
 import BotAvatar, { type Mood } from "./BotAvatar";
-import { api, describeSchedule, onEvent, onMountAsync, PROVIDER_NAMES, relativeTime, type Agent, type Message, type Routine, type Workflow } from "./api";
+import { api, describeSchedule, onEvent, onMountAsync, PROVIDER_NAMES, relativeTime, type Agent, type Message, type Coven, type Routine, type Workflow } from "./api";
+import CovenEditor from "./CovenEditor";
 import HomeCircle from "./HomeCircle";
 import { PlusIcon } from "./icons";
-import { EmptyState, Page } from "./ui";
+import { EmptyState, Page, Sheet } from "./ui";
 
 const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
+
+const COVEN_KEY = "grimoire-home-coven";
+
+function readCoven(): string | null {
+  try {
+    return localStorage.getItem(COVEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeCoven(id: string | null) {
+  try {
+    if (id) localStorage.setItem(COVEN_KEY, id);
+    else localStorage.removeItem(COVEN_KEY);
+  } catch {
+    // The choice still applies until Grimoire quits.
+  }
+}
 
 function preview(message: Message | undefined): string {
   if (!message) return "No messages yet";
@@ -20,6 +40,7 @@ function preview(message: Message | undefined): string {
 export default function HomePage(props: {
   agents: Agent[];
   spells: Workflow[];
+  covens: Coven[];
   busy: Record<string, boolean>;
   mood: (agentId: string) => Mood;
   onOpenAgent: (id: string) => void;
@@ -58,9 +79,26 @@ export default function HomePage(props: {
   onCleanup(() => clearInterval(tick));
 
   const agentById = (id: string) => props.agents.find((a) => a.id === id);
+
+  // Which coven the circle shows: null for everyone. Remembered between launches.
+  const [selected, setSelected] = createSignal<string | null>(readCoven());
+  const [editing, setEditing] = createSignal<Coven | "new" | null>(null);
+  const choose = (id: string | null) => {
+    setSelected(id);
+    writeCoven(id);
+  };
+  const coven = () => props.covens.find((c) => c.id === selected()) ?? null;
+  const members = (id: string) => props.agents.filter((a) => a.covenId === id);
+  // Everyone, seated coven by coven so each coven's arc is one piece, with the unbound last.
+  const everyone = createMemo(() => [
+    ...props.covens.flatMap((c) => members(c.id)),
+    ...props.agents.filter((a) => !a.covenId || !props.covens.some((c) => c.id === a.covenId)),
+  ]);
+  const shown = () => (coven() ? members(coven()!.id) : everyone());
+  const shownIds = () => new Set(shown().map((a) => a.id));
   const upcoming = createMemo(() =>
     routines()
-      .filter((r) => r.enabled && r.nextRunAt && agentById(r.agentId))
+      .filter((r) => r.enabled && r.nextRunAt && shownIds().has(r.agentId))
       .sort((a, b) => (a.nextRunAt ?? 0) - (b.nextRunAt ?? 0))
       .slice(0, 5),
   );
@@ -89,16 +127,50 @@ export default function HomePage(props: {
         }
       >
         <div class="home">
+          <div class="coven-chips" role="tablist" aria-label="Covens">
+            <button role="tab" aria-selected={!coven() ? "true" : "false"} class={["coven-chip", { on: !coven() }]} onClick={() => choose(null)}>
+              All <span class="coven-chip-count">{props.agents.length}</span>
+            </button>
+            <For each={props.covens}>
+              {(c) => (
+                <button role="tab" aria-selected={coven()?.id === c.id ? "true" : "false"} class={["coven-chip", { on: coven()?.id === c.id }]} onClick={() => choose(c.id)}>
+                  {c.name} <span class="coven-chip-count">{members(c.id).length}</span>
+                </button>
+              )}
+            </For>
+            <button class="coven-chip add" aria-label="New coven" title="New coven" onClick={() => setEditing("new")}>
+              <PlusIcon />
+            </button>
+          </div>
+
           <HomeCircle
-            agents={props.agents}
+            agents={shown()}
             spells={props.spells}
             routines={routines()}
             busy={props.busy}
             mood={props.mood}
             now={now()}
+            covens={coven() ? undefined : props.covens}
+            title={coven()?.name}
+            centerAction={
+              <Show when={coven() && shown().length === 0}>
+                <button class="ghost small" onClick={() => setEditing(coven())}>
+                  Add familiars
+                </button>
+              </Show>
+            }
             onOpenAgent={props.onOpenAgent}
             onOpenSpells={props.onOpenSpells}
           />
+          <Show when={coven()}>
+            {(c) => (
+              <div class="coven-edit">
+                <button class="ghost small" onClick={() => setEditing(c())}>
+                  Edit {c().name}
+                </button>
+              </div>
+            )}
+          </Show>
           <p class="home-circle-legend">
             <span>
               <i class="legend-line" aria-hidden="true" /> Spells link familiars
@@ -107,66 +179,86 @@ export default function HomePage(props: {
               <i class="legend-arc" aria-hidden="true" /> Gold marks a ritual
             </span>
           </p>
+
           <div class="home-columns">
             <section>
               <h2 class="section-title">Latest replies</h2>
               <div class="list">
-            <For each={props.agents}>
-              {(agent) => (
-                <button class="list-row home-agent" style={{ "--agent": agent.avatar.color }} onClick={() => props.onOpenAgent(agent.id)}>
-                  <BotAvatar avatar={agent.avatar} size={32} mood={props.mood(agent.id)} />
-                  <span class="list-main">
-                    <span class="list-title">{agent.name}</span>
-                    <span class="list-sub">{props.busy[agent.id] ? "Working" : preview(last[agent.id])}</span>
-                  </span>
-                  <span class="home-meta">
-                    <span>{PROVIDER_NAMES[agent.provider]}</span>
-                    <Show when={last[agent.id]}>{(m) => <span>{ago(m().createdAt)}</span>}</Show>
-                  </span>
-                </button>
-              )}
-            </For>
-          </div>
-
+                <For each={shown()} fallback={<p class="list-row list-sub">No familiars in this coven yet.</p>}>
+                  {(agent) => (
+                    <button class="list-row home-agent" style={{ "--agent": agent.avatar.color }} onClick={() => props.onOpenAgent(agent.id)}>
+                      <BotAvatar avatar={agent.avatar} size={32} mood={props.mood(agent.id)} />
+                      <span class="list-main">
+                        <span class="list-title">{agent.name}</span>
+                        <span class="list-sub">{props.busy[agent.id] ? "Working" : preview(last[agent.id])}</span>
+                      </span>
+                      <span class="home-meta">
+                        <span>{PROVIDER_NAMES[agent.provider]}</span>
+                        <Show when={last[agent.id]}>{(m) => <span>{ago(m().createdAt)}</span>}</Show>
+                      </span>
+                    </button>
+                  )}
+                </For>
+              </div>
             </section>
             <section>
               <h2 class="section-title">Coming up</h2>
-          <div class="list">
-            <Show
-              when={upcoming().length}
-              fallback={
-                <div class="list-row">
-                  <span class="list-main list-sub">No rituals scheduled.</span>
-                  <button class="ghost small" onClick={props.onOpenRoutines}>
-                    Set up a ritual
-                  </button>
-                </div>
-              }
-            >
-              <For each={upcoming()}>
-                {(routine) => {
-                  const agent = () => agentById(routine.agentId)!;
-                  return (
-                    <button class="list-row home-agent" onClick={props.onOpenRoutines}>
-                      <BotAvatar avatar={agent().avatar} size={24} />
-                      <span class="list-main">
-                        <span class="list-title">{routine.name}</span>
-                        <span class="list-sub">
-                          {agent().name}, {lowerFirst(describeSchedule(routine.schedule))}
-                        </span>
-                      </span>
-                      <span class="home-meta">
-                        <span>{relativeTime(routine.nextRunAt!, now())}</span>
-                      </span>
-                    </button>
-                  );
-                }}
-              </For>
-            </Show>
-          </div>
+              <div class="list">
+                <Show
+                  when={upcoming().length}
+                  fallback={
+                    <div class="list-row">
+                      <span class="list-main list-sub">No rituals scheduled.</span>
+                      <button class="ghost small" onClick={props.onOpenRoutines}>
+                        Set up a ritual
+                      </button>
+                    </div>
+                  }
+                >
+                  <For each={upcoming()}>
+                    {(routine) => {
+                      const agent = () => agentById(routine.agentId)!;
+                      return (
+                        <button class="list-row home-agent" onClick={props.onOpenRoutines}>
+                          <BotAvatar avatar={agent().avatar} size={24} />
+                          <span class="list-main">
+                            <span class="list-title">{routine.name}</span>
+                            <span class="list-sub">
+                              {agent().name}, {lowerFirst(describeSchedule(routine.schedule))}
+                            </span>
+                          </span>
+                          <span class="home-meta">
+                            <span>{relativeTime(routine.nextRunAt!, now())}</span>
+                          </span>
+                        </button>
+                      );
+                    }}
+                  </For>
+                </Show>
+              </div>
             </section>
           </div>
         </div>
+      </Show>
+      <Show when={editing()}>
+        {(target) => (
+          <Sheet label={target() === "new" ? "New coven" : "Edit coven"} wide onClose={() => setEditing(null)}>
+            <CovenEditor
+              coven={target() === "new" ? null : (target() as Coven)}
+              agents={props.agents}
+              covens={props.covens}
+              onSaved={(saved) => {
+                setEditing(null);
+                choose(saved.id);
+              }}
+              onDeleted={() => {
+                setEditing(null);
+                choose(null);
+              }}
+              onCancel={() => setEditing(null)}
+            />
+          </Sheet>
+        )}
       </Show>
     </Page>
   );

@@ -26,3 +26,13 @@ test("spells link the familiars they hand work between", () => {
   );
   expect(links.map((l) => `${l.spell.id}:${l.from}>${l.to}:${l.lane}`)).toEqual(["brief:a>b:0", "brief:b>c:0", "check:b>a:1"]);
 });
+
+test("coven sectors cover each run of neighbors in the same coven", async () => {
+  const { covenSectors } = await import("./circle");
+  const sectors = covenSectors(["r", "r", null, "o"]);
+  expect(sectors.map((s) => s.covenId)).toEqual(["r", "o"]);
+  // Four seats are 90 degrees apart, starting at the top; the first sector spans seats 0 and 1.
+  expect(sectors[0].start).toBeCloseTo(-90 - 45 + 4);
+  expect(sectors[0].end).toBeCloseTo(0 + 45 - 4);
+  expect(covenSectors([null, null])).toEqual([]);
+});

@@ -20,6 +20,14 @@ export interface Agent {
   avatar: Avatar;
   effort: string | null;
   activeModel: string | null;
+  /** The coven it sits in, if any. */
+  covenId: string | null;
+  createdAt: number;
+}
+
+export interface Coven {
+  id: string;
+  name: string;
   createdAt: number;
 }
 
@@ -119,6 +127,7 @@ export interface NewAgentInput {
   access: Access;
   avatar: Avatar;
   effort: string;
+  covenId?: string | null;
 }
 
 export interface AgentChanges {
@@ -127,6 +136,8 @@ export interface AgentChanges {
   access: Access;
   avatar: Avatar;
   effort: string;
+  /** Left out keeps the coven; null unbinds. */
+  covenId?: string | null;
 }
 
 export function changesFor(agent: Agent, patch: Partial<AgentChanges> = {}): AgentChanges {
@@ -255,6 +266,9 @@ export const api = {
   setTheme: (id: string) => invoke<void>("set_theme", { id }),
   openThemesFolder: () => invoke<void>("open_themes_folder"),
   setAppIcon: (icon: "paper" | "night") => invoke<void>("set_app_icon", { icon }),
+  listCovens: () => invoke<Coven[]>("list_covens"),
+  saveCoven: (id: string | null, name: string, members: string[]) => invoke<Coven>("save_coven", { id, name, members }),
+  deleteCoven: (id: string) => invoke<void>("delete_coven", { id }),
   listVault: () => invoke<VaultItem[]>("list_vault"),
   vaultSecret: (id: string) => invoke<Record<string, string>>("vault_secret", { id }),
   saveVaultItem: (input: VaultItemInput) => invoke<VaultItem>("save_vault_item", { input }),
@@ -307,7 +321,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

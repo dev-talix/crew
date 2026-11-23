@@ -1,4 +1,4 @@
-import { createEffect, createSignal, createStore, For, Match, onSettled, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, createStore, For, Match, onSettled, Show, Switch } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import AgentForm from "./AgentForm";
 import Approvals from "./Approvals";
@@ -9,7 +9,7 @@ import HomePage from "./HomePage";
 import RoutinesPage from "./RoutinesPage";
 import { SettingsDialog } from "./SettingsPage";
 import WorkflowsPage, { type SpellIntent } from "./WorkflowsPage";
-import { api, errorText, onEvent, onMountAsync, PROVIDER_NAMES, subscribe, type Agent, type Workflow } from "./api";
+import { api, errorText, onEvent, onMountAsync, PROVIDER_NAMES, subscribe, type Agent, type Coven, type Workflow } from "./api";
 import { inkFor } from "./avatar";
 import { runningModelName } from "./models";
 import { createMoods } from "./moods";
@@ -50,6 +50,17 @@ export default function App() {
   const openSettings = (section?: SettingsSection) => setSettings(section ?? "general");
   const agentById = (id: string) => agents().find((a) => a.id === id);
   const loadSpells = () => api.listWorkflows().then(setSpells, () => {});
+  const [covens, setCovens] = createSignal<Coven[]>([]);
+  const loadCovens = () => api.listCovens().then(setCovens, () => {});
+  // The sidebar lists familiars coven by coven once there are covens, with the unbound last.
+  const sidebarGroups = createMemo(() => {
+    const list = agents();
+    if (!covens().length) return [{ label: null as string | null, agents: list }];
+    const groups = covens().map((c) => ({ label: c.name as string | null, agents: list.filter((a) => a.covenId === c.id) }));
+    const unbound = list.filter((a) => !a.covenId || !covens().some((c) => c.id === a.covenId));
+    return [...groups, { label: "Unbound", agents: unbound }].filter((g) => g.agents.length > 0);
+  });
+  const ordered = () => sidebarGroups().flatMap((g) => g.agents);
   const openSpells = (intent: SpellIntent | null) => {
     setSpellIntent(intent);
     setView("workflows");
@@ -95,6 +106,8 @@ export default function App() {
     );
     keep(stopModels);
     keep(await onEvent("workflows_changed", () => void loadSpells()));
+    keep(await onEvent("covens_changed", () => void loadCovens()));
+    void loadCovens();
     startUpdateChecks();
     void loadSpells();
     const stopOpen = await onEvent<string>("open_agent", (id) => {
@@ -133,7 +146,7 @@ export default function App() {
       e.preventDefault();
       setSettings((open) => (open ? null : "general"));
     } else if (/^[1-9]$/.test(e.key)) {
-      const agent = agents()[Number(e.key) - 1];
+      const agent = ordered()[Number(e.key) - 1];
       if (agent) {
         e.preventDefault();
         openAgent(agent.id);
@@ -190,8 +203,16 @@ export default function App() {
           </button>
         </div>
         <nav class="agent-list" aria-label="Familiars and spells">
-          <For each={agents()}>
-            {(agent, index) => (
+          <For each={sidebarGroups()}>
+            {(group) => (
+              <>
+                <Show when={group.label}>
+                  <div class="coven-subhead">{group.label}</div>
+                </Show>
+                <For each={group.agents}>
+            {(agent) => {
+              const index = () => ordered().indexOf(agent);
+              return (
               <button
                 class={["agent-row", { active: agent.id === selected() }]}
                 data-slot="sidebar-row"
@@ -211,6 +232,10 @@ export default function App() {
                   <span class="unread-dot" aria-hidden="true" />
                 </Show>
               </button>
+              );
+            }}
+                </For>
+              </>
             )}
           </For>
           <div class="sidebar-caption">
@@ -267,7 +292,7 @@ export default function App() {
                   />
                   <Show when={editing()}>
                     <Sheet label="Familiar settings" wide onClose={() => setEditing(false)}>
-                      <AgentForm agent={agent()} onSaved={updated} onCancel={() => setEditing(false)} onDeleted={deleted} />
+                      <AgentForm agent={agent()} covens={covens()} onSaved={updated} onCancel={() => setEditing(false)} onDeleted={deleted} />
                     </Sheet>
                   </Show>
                 </div>
@@ -275,7 +300,7 @@ export default function App() {
             </Match>
             <Match when={is("new")}>
               <div class="form-page" data-tauri-drag-region>
-                <AgentForm onSaved={created} onCancel={agents().length ? () => setView("home") : undefined} />
+                <AgentForm covens={covens()} onSaved={created} onCancel={agents().length ? () => setView("home") : undefined} />
               </div>
             </Match>
             <Match when={is("routines")}>
@@ -288,6 +313,7 @@ export default function App() {
               <HomePage
                 agents={agents()}
                 spells={spells()}
+                covens={covens()}
                 onOpenSpells={() => openSpells(null)}
                 busy={busy}
                 mood={moodOf}

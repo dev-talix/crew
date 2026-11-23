@@ -69,6 +69,9 @@ pub struct Agent {
     pub avatar: Avatar,
     pub effort: Option<String>,
     pub active_model: Option<String>,
+    /// The coven this familiar sits in, if any.
+    #[serde(default)]
+    pub coven_id: Option<String>,
     pub created_at: i64,
 }
 
@@ -192,7 +195,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -352,6 +355,15 @@ impl Db {
                  COMMIT;",
             )?;
         }
+        if version < 9 {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE covens (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);
+                 ALTER TABLE agents ADD COLUMN coven_id TEXT;
+                 PRAGMA user_version = 9;
+                 COMMIT;",
+            )?;
+        }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
             [],
@@ -369,7 +381,7 @@ impl Db {
     pub fn list_agents(&self) -> Result<Vec<Agent>, String> {
         self.with(|c| {
             let mut stmt = c.prepare_cached(
-                "SELECT id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, active_model
+                "SELECT id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, active_model, coven_id
                  FROM agents ORDER BY created_at",
             )?;
             let rows = stmt.query_map([], row_to_agent)?;
@@ -380,7 +392,7 @@ impl Db {
     pub fn get_agent(&self, id: &str) -> Result<Option<Agent>, String> {
         self.with(|c| {
             c.prepare_cached(
-                "SELECT id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, active_model
+                "SELECT id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, active_model, coven_id
                  FROM agents WHERE id = ?1",
             )?
             .query_row(params![id], row_to_agent)
@@ -391,8 +403,8 @@ impl Db {
     pub fn insert_agent(&self, agent: &Agent) -> Result<(), String> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO agents (id, name, provider, model, workspace, access, session_id, created_at, avatar, effort)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO agents (id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, coven_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     agent.id,
                     agent.name,
@@ -403,7 +415,8 @@ impl Db {
                     agent.session_id,
                     agent.created_at,
                     agent.avatar.to_column(),
-                    agent.effort
+                    agent.effort,
+                    agent.coven_id
                 ],
             )
             .map(|_| ())
@@ -413,8 +426,8 @@ impl Db {
     pub fn update_agent(&self, agent: &Agent) -> Result<(), String> {
         self.with(|c| {
             c.execute(
-                "UPDATE agents SET name = ?2, model = ?3, access = ?4, avatar = ?5, effort = ?6 WHERE id = ?1",
-                params![agent.id, agent.name, agent.model, agent.access.as_str(), agent.avatar.to_column(), agent.effort],
+                "UPDATE agents SET name = ?2, model = ?3, access = ?4, avatar = ?5, effort = ?6, coven_id = ?7 WHERE id = ?1",
+                params![agent.id, agent.name, agent.model, agent.access.as_str(), agent.avatar.to_column(), agent.effort, agent.coven_id],
             )
             .map(|_| ())
         })
@@ -695,6 +708,7 @@ fn row_to_agent(r: &rusqlite::Row) -> rusqlite::Result<Agent> {
         avatar,
         effort: r.get(9)?,
         active_model: r.get(10)?,
+        coven_id: r.get(11)?,
     })
 }
 
@@ -714,6 +728,7 @@ mod tests {
             avatar: Avatar::for_seed(id),
             effort: None,
             active_model: None,
+            coven_id: None,
             created_at: now_ms(),
         }
     }

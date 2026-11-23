@@ -1,4 +1,5 @@
 mod approvals;
+mod covens;
 mod db;
 mod dock;
 mod mcp;
@@ -48,6 +49,8 @@ struct NewAgent {
     access: Access,
     avatar: Avatar,
     effort: Option<String>,
+    #[serde(default)]
+    coven_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -58,6 +61,27 @@ struct AgentChanges {
     access: Access,
     avatar: Avatar,
     effort: Option<String>,
+    /// Left out keeps the familiar's coven, null unbinds it, and an id moves it there. Other edits,
+    /// like switching the model, leave covens alone this way.
+    #[serde(default)]
+    coven_id: Option<serde_json::Value>,
+}
+
+/// A coven a familiar is being put in, checked to exist. None or an empty id means unbound.
+fn clean_coven(db: &Db, coven_id: Option<String>) -> Result<Option<String>, String> {
+    match coven_id.filter(|c| !c.is_empty()) {
+        Some(id) if covens::exists(db, &id)? => Ok(Some(id)),
+        Some(_) => Err("That coven no longer exists.".into()),
+        None => Ok(None),
+    }
+}
+
+/// The coven after an edit: a change left out keeps `current`, null unbinds, an id moves.
+fn next_coven(db: &Db, current: Option<String>, change: Option<serde_json::Value>) -> Result<Option<String>, String> {
+    match change {
+        None => Ok(current),
+        Some(value) => clean_coven(db, value.as_str().map(String::from)),
+    }
 }
 
 fn clean_effort(effort: Option<String>) -> Result<Option<String>, String> {
@@ -143,6 +167,7 @@ fn create_agent(app: AppHandle, state: State<AppState>, input: NewAgent) -> Resu
         avatar: input.avatar,
         effort: clean_effort(input.effort)?,
         active_model: None,
+        coven_id: clean_coven(&state.db, input.coven_id)?,
         created_at: now_ms(),
     };
     state.db.insert_agent(&agent)?;
@@ -165,6 +190,7 @@ async fn update_agent(
     agent.access = changes.access;
     agent.avatar = changes.avatar;
     agent.effort = clean_effort(changes.effort)?;
+    agent.coven_id = next_coven(&state.db, agent.coven_id.take(), changes.coven_id)?;
     state.db.update_agent(&agent)?;
     if settings_changed {
         state.runtime.settings_changed(&agent_id).await;
@@ -387,6 +413,27 @@ fn run_workflow(state: State<AppState>, id: String, input: Option<String>) -> Re
 #[tauri::command]
 async fn stop_workflow(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.workflows.stop(&id).await
+}
+
+#[tauri::command]
+fn list_covens(state: State<AppState>) -> Result<Vec<covens::Coven>, String> {
+    covens::list(&state.db)
+}
+
+#[tauri::command]
+fn save_coven(app: AppHandle, state: State<AppState>, id: Option<String>, name: String, members: Vec<String>) -> Result<covens::Coven, String> {
+    let saved = covens::save(&state.db, id.as_deref(), &name, &members)?;
+    let _ = app.emit("covens_changed", ());
+    let _ = app.emit("agents_changed", ());
+    Ok(saved)
+}
+
+#[tauri::command]
+fn delete_coven(app: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
+    covens::delete(&state.db, &id)?;
+    let _ = app.emit("covens_changed", ());
+    let _ = app.emit("agents_changed", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -631,7 +678,10 @@ pub fn run() {
             save_permissions,
             usage_since,
             plan_limits,
-            check_for_updates
+            check_for_updates,
+            list_covens,
+            save_coven,
+            delete_coven
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -654,6 +704,17 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coven_edits_keep_unbind_or_move() {
+        let db = Db::open_in_memory().unwrap();
+        let ops = covens::save(&db, None, "Ops", &[]).unwrap();
+        let current = Some("old".to_string());
+        assert_eq!(next_coven(&db, current.clone(), None).unwrap(), current, "a model change leaves the coven alone");
+        assert_eq!(next_coven(&db, current.clone(), Some(serde_json::Value::Null)).unwrap(), None);
+        assert_eq!(next_coven(&db, None, Some(serde_json::json!(ops.id))).unwrap(), Some(ops.id.clone()));
+        assert!(next_coven(&db, None, Some(serde_json::json!("gone"))).is_err());
+    }
 
     #[test]
     fn picks_a_default_workspace_under_grimoire() {

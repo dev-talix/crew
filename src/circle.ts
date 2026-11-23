@@ -58,3 +58,43 @@ export function arc(center: number, spread: number, radius = OUTER_RING) {
   return `M${point(center - spread)}A${radius} ${radius} 0 0 1 ${point(center + spread)}`;
 }
 
+
+export interface Sector {
+  covenId: string;
+  /** Degrees, clockwise from the right, like the seats. */
+  start: number;
+  end: number;
+  mid: number;
+}
+
+/** One arc per run of neighbors in the same coven, for seats in the order they sit. */
+export function covenSectors(covenIds: (string | null)[]): Sector[] {
+  const count = covenIds.length;
+  const step = 360 / Math.max(count, 1);
+  const gap = Math.min(4, step * 0.15);
+  const sectors: Sector[] = [];
+  let i = 0;
+  while (i < count) {
+    const id = covenIds[i];
+    let j = i;
+    while (j + 1 < count && covenIds[j + 1] === id) j++;
+    if (id) {
+      const start = -90 + step * i - step / 2 + gap;
+      const end = -90 + step * j + step / 2 - gap;
+      sectors.push({ covenId: id, start, end, mid: (start + end) / 2 });
+    }
+    i = j + 1;
+  }
+  return sectors;
+}
+
+/** An SVG arc from one angle to another, the long way round when it spans more than half. */
+export function arcBetween(start: number, end: number, radius: number) {
+  const point = (deg: number) => {
+    const a = (deg * Math.PI) / 180;
+    return `${50 + radius * Math.cos(a)} ${50 + radius * Math.sin(a)}`;
+  };
+  // A lone coven filling the whole ring can't be one arc, so it stops just short of a full turn.
+  const span = Math.min(end - start, 359.5);
+  return `M${point(start)}A${radius} ${radius} 0 ${span > 180 ? 1 : 0} 1 ${point(start + span)}`;
+}
