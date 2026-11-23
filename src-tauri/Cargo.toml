@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.90"
 license = "MIT"
 description = "A lean desktop app for persistent Codex and Claude agents"
-repository = "https://github.com/dev-talix/crew"
+repository = "https://github.com/dev-talix/grimoire"
 
 [lib]
 name = "grimoire_lib"
