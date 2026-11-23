@@ -219,3 +219,9 @@ export const ExpandIcon = () => (
   </Icon>
 );
 
+
+export const TrashIcon = () => (
+  <Icon size={14}>
+    <path d="M2.8 4.2h10.4M6.2 4.2V2.8h3.6v1.4M4.2 4.2l.6 9h6.4l.6-9M6.8 6.6v4.4M9.2 6.6v4.4" />
+  </Icon>
+);

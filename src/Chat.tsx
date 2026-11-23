@@ -1,7 +1,8 @@
 import { createEffect, createMemo, createSignal, flush, For, Match, onCleanup, Show, Switch } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import BotAvatar, { type Mood } from "./BotAvatar";
-import { api, changesFor, errorText, PROVIDER_NAMES, type Agent, type Message } from "./api";
+import { api, changesFor, errorText, onEvent, onMountAsync, PROVIDER_NAMES, type Agent, type ChatInfo, type Message } from "./api";
+import ChatsMenu, { chatTitle } from "./ChatsMenu";
 import type { ChatStore } from "./chatStore";
 import ModelPicker from "./ModelPicker";
 import { effortName, runningModelName } from "./models";
@@ -125,7 +126,7 @@ function AssistantRow(props: { message: Message; turn: () => TurnInfo | undefine
     return { time: clock(finished), took: formatDuration(finished - turn.startedAt), note };
   };
   return (
-    <div class="row assistant" data-slot="message" data-role="assistant">
+    <div class="row assistant" data-slot="message" data-role="assistant" data-message-id={m().id}>
       <Show when={!streaming()} fallback={<div class="plain">{m().text.trimEnd()}<span class="caret" aria-hidden="true" /></div>}>
         <div class="md" innerHTML={html()} onClick={openLinks} />
       </Show>
@@ -145,7 +146,7 @@ function AssistantRow(props: { message: Message; turn: () => TurnInfo | undefine
 function UserRow(props: { message: Message }) {
   const m = () => props.message;
   return (
-    <div class="row user" data-slot="message" data-role="user">
+    <div class="row user" data-slot="message" data-role="user" data-message-id={m().id}>
       <Show when={m().source}>
         <div class="user-source">{m().source}</div>
       </Show>
@@ -200,6 +201,9 @@ const DICTATION_ERRORS: Record<string, string> = {
   network: "Speech recognition needs an internet connection.",
 };
 
+/** A request from outside the chat, like the palette: start a new chat, or open one at a message. */
+export type ChatIntent = { agentId: string; fresh?: boolean; chatId?: string; messageId?: number };
+
 export default function Chat(props: {
   agent: Agent;
   busy: boolean;
@@ -208,6 +212,8 @@ export default function Chat(props: {
   onEdit: () => void;
   onAgentUpdated: (agent: Agent) => void;
   compact?: { onClose: () => void; onOpenMain: () => void };
+  intent?: ChatIntent | null;
+  onIntentDone?: () => void;
 }) {
   const [draft, setDraft] = createSignal("");
   const [actionError, setActionError] = createSignal("");
@@ -239,12 +245,109 @@ export default function Chat(props: {
   const pickModel = (model: string, effort: string) =>
     run(async () => props.onAgentUpdated(await api.updateAgent(props.agent.id, changesFor(props.agent, { model, effort }))));
 
+  // The familiar's chats. `shown` is the chat whose messages the store holds, so a switch made
+  // elsewhere (the dock, the palette, a deleted chat) reloads them.
+  const [chats, setChats] = createSignal<ChatInfo[]>([]);
+  const [chatsOpen, setChatsOpen] = createSignal(false);
+  const currentChat = () => chats().find((c) => c.current);
+  let shown: string | null = null;
+  let chatsToken = 0;
+  const refreshChats = async () => {
+    const agentId = props.agent.id;
+    const token = ++chatsToken;
+    const list = await api.listChats(agentId).catch(() => null);
+    // A newer refresh or a switch made here wins over this answer.
+    if (!list || token !== chatsToken || agentId !== props.agent.id) return;
+    setChats(list);
+    const current = list.find((c) => c.current)?.id ?? null;
+    const switched = shown !== null && current !== shown;
+    shown = current;
+    if (switched) await props.store.reload();
+  };
+  const showChat = async (chat: ChatInfo) => {
+    shown = chat.id;
+    chatsToken++;
+    setChatsOpen(false);
+    input?.focus();
+    await props.store.reload();
+    await refreshChats();
+  };
+  const newChat = () =>
+    run(async () => {
+      stickToBottom = true;
+      await showChat(await api.newChat(props.agent.id));
+    });
+  const openChat = (chat: ChatInfo) =>
+    run(async () => {
+      if (chat.current) return setChatsOpen(false);
+      stickToBottom = true;
+      await showChat(await api.openChat(props.agent.id, chat.id));
+    });
+  const renameChat = (chat: ChatInfo, title: string) =>
+    run(async () => {
+      await api.renameChat(chat.id, title);
+      await refreshChats();
+    });
+  const deleteChat = (chat: ChatInfo) =>
+    run(async () => {
+      await api.deleteChat(chat.id);
+      await refreshChats();
+    });
+
+  onMountAsync(async (keep) => {
+    keep(
+      await onEvent<{ agentId: string }>("chats_changed", ({ agentId }) => {
+        if (agentId === props.agent.id) void refreshChats();
+      }),
+    );
+  });
+
   createEffect(
     () => props.agent.id,
     () => {
       stickToBottom = true;
       setActionError("");
+      setChatsOpen(false);
+      shown = null;
+      void refreshChats();
       input?.focus();
+    },
+  );
+
+  // The first message you send names the chat.
+  createEffect(
+    () => messages().some((m) => m.role === "user"),
+    (sent) => {
+      if (sent && currentChat() && !currentChat()!.title) void refreshChats();
+    },
+  );
+
+  const jumpTo = async (messageId: number) => {
+    if (!(await props.store.loadUntil(messageId))) return setActionError("That message is no longer in this chat.");
+    flush();
+    const row = list.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
+    if (!row) return;
+    stickToBottom = false;
+    row.scrollIntoView({ block: "center" });
+    row.classList.remove("jumped");
+    void row.offsetWidth; // Restart the highlight when jumping to the same message twice.
+    row.classList.add("jumped");
+  };
+
+  createEffect(
+    () => (props.intent?.agentId === props.agent.id ? props.intent : null),
+    (intent) => {
+      if (!intent) return;
+      void run(async () => {
+        await Promise.resolve(); // Leave the effect before clearing the intent.
+        props.onIntentDone?.();
+        if (intent.fresh) return newChat();
+        if (intent.chatId && intent.chatId !== shown) {
+          stickToBottom = !intent.messageId;
+          await showChat(await api.openChat(props.agent.id, intent.chatId));
+        }
+        if (intent.messageId) await jumpTo(intent.messageId);
+      });
     },
   );
 
@@ -342,6 +445,36 @@ export default function Chat(props: {
               {folder()}
             </button>
           </Show>
+          <span class="crumb-sep" aria-hidden="true">
+            /
+          </span>
+          <span class="chat-title-anchor">
+            <button
+              class="chat-title-button"
+              data-chats-trigger
+              aria-haspopup="dialog"
+              aria-expanded={chatsOpen() ? "true" : "false"}
+              title="Chats"
+              onClick={() => {
+                if (!chatsOpen()) void refreshChats();
+                setChatsOpen(!chatsOpen());
+              }}
+            >
+              <span>{chatTitle(currentChat())}</span>
+              <ChevronIcon />
+            </button>
+            <Show when={chatsOpen()}>
+              <ChatsMenu
+                chats={chats()}
+                busy={props.busy}
+                onOpen={openChat}
+                onNew={newChat}
+                onRename={renameChat}
+                onDelete={deleteChat}
+                onClose={() => setChatsOpen(false)}
+              />
+            </Show>
+          </span>
         </div>
         <div class="bar-actions">
           <Show when={props.compact}>
@@ -356,7 +489,7 @@ export default function Chat(props: {
             aria-label="New chat"
             title="New chat"
             disabled={props.busy}
-            onClick={() => run(() => api.newChat(props.agent.id).then(props.store.onMessage))}
+            onClick={newChat}
           >
             <ComposeIcon />
           </button>
@@ -410,11 +543,6 @@ export default function Chat(props: {
                   {(r) => <ToolGroup messages={(r() as Extract<Row, { kind: "tools" }>).messages} workspace={props.agent.workspace} />}
                 </Match>
                 <Match when={row.kind === "error" && row}>{(r) => <div class="row error-box">{(r() as Extract<Row, { kind: "error" }>).message.text}</div>}</Match>
-                <Match when={row.kind === "divider"}>
-                  <div class="row divider" role="separator">
-                    <span>New chat</span>
-                  </div>
-                </Match>
               </Switch>
             )}
           </For>

@@ -43,12 +43,35 @@ export interface ModelOption {
 export interface Message {
   id: number;
   agentId: string;
-  role: "user" | "assistant" | "tool" | "error" | "divider";
+  role: "user" | "assistant" | "tool" | "error";
   text: string;
   status: "done" | "streaming" | "queued" | "cancelled" | "stopped" | "interrupted";
   source: string | null;
   createdAt: number;
   updatedAt: number | null;
+}
+
+/** One of a familiar's conversations, with its own CLI session. */
+export interface ChatInfo {
+  id: string;
+  agentId: string;
+  /** Empty until the first message. */
+  title: string;
+  sessionId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  current: boolean;
+}
+
+export interface SearchHit {
+  messageId: number;
+  agentId: string;
+  chatId: string;
+  chatTitle: string;
+  role: "user" | "assistant";
+  /** The text around the match, each matched term between \u0002 and \u0003. */
+  snippet: string;
+  createdAt: number;
 }
 
 export type Schedule = { kind: "interval"; minutes: number } | { kind: "daily"; time: string; days: number[] };
@@ -241,7 +264,12 @@ export const api = {
     invoke<Message[]>("list_messages", { agentId, beforeId: beforeId ?? null, limit: PAGE_SIZE }),
   sendMessage: (agentId: string, text: string) => invoke<Message>("send_message", { agentId, text }),
   stopTurn: (agentId: string) => invoke<void>("stop_turn", { agentId }),
-  newChat: (agentId: string) => invoke<Message>("new_chat", { agentId }),
+  newChat: (agentId: string) => invoke<ChatInfo>("new_chat", { agentId }),
+  listChats: (agentId: string) => invoke<ChatInfo[]>("list_chats", { agentId }),
+  openChat: (agentId: string, chatId: string) => invoke<ChatInfo>("open_chat", { agentId, chatId }),
+  renameChat: (chatId: string, title: string) => invoke<ChatInfo>("rename_chat", { chatId, title }),
+  deleteChat: (chatId: string) => invoke<void>("delete_chat", { chatId }),
+  searchMessages: (query: string) => invoke<SearchHit[]>("search_messages", { query, limit: 30 }),
   lastMessages: () => invoke<Message[]>("last_messages"),
   listModels: (provider: Provider) => invoke<ModelOption[]>("list_models", { provider }),
   dockEdge: () => invoke<"left" | "right" | null>("dock_edge"),
@@ -321,7 +349,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "chats_changed",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

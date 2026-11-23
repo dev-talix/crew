@@ -389,6 +389,10 @@ pub fn new_chat(app: AppHandle, state: State<AppState>, agent_id: String) -> Res
 
 #[tauri::command]
 pub fn open_chat(app: AppHandle, state: State<AppState>, agent_id: String, chat_id: String) -> Result<Chat, String> {
+    // Opening the chat that is already current changes nothing, so it's fine mid-turn, like a search jump.
+    if state.db.with(|c| current_id(c, &agent_id))?.as_deref() == Some(chat_id.as_str()) {
+        return open(&state.db, &agent_id, &chat_id);
+    }
     switch(&app, &state, &agent_id, || open(&state.db, &agent_id, &chat_id))
 }
 

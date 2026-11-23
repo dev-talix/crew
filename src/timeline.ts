@@ -55,7 +55,6 @@ export function dominantKind(entries: ToolEntry[]): ToolKind {
 
 export type Row =
   | { kind: "user"; key: string; message: Message }
-  | { kind: "divider"; key: string; message: Message }
   | { kind: "error"; key: string; message: Message }
   | { kind: "assistant"; key: string; message: Message }
   | { kind: "tools"; key: string; messages: Message[] };
@@ -102,7 +101,7 @@ export function turnInfo(messages: readonly Message[]): Map<number, TurnInfo> {
     lastAgentId = null;
   };
   for (const message of messages) {
-    if (message.role === "user" || message.role === "divider") {
+    if (message.role === "user") {
       close();
       startedAt = message.createdAt;
     } else if (message.role === "assistant") {
