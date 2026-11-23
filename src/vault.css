@@ -1,0 +1,275 @@
+.vault {
+  max-width: 720px;
+}
+
+.vault-new {
+  position: relative;
+}
+
+.vault-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 0.22);
+}
+
+.vault-menu button {
+  justify-content: flex-start;
+  padding: 7px 10px;
+  border-radius: 7px;
+  font-size: 13px;
+}
+
+.vault-menu button:hover {
+  background: var(--raised);
+}
+
+.vault-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.vault-filters {
+  display: flex;
+  gap: 4px;
+}
+
+.vault-filters button {
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.vault-filters button:hover {
+  color: var(--text);
+}
+
+.vault-filters button.on {
+  background: var(--raised);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.vault-count {
+  margin-left: 3px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.vault-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 220px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--faint);
+}
+
+.vault-search input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  border: 0;
+  outline: 0;
+  background: none;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.vault-search:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.vault-row {
+  width: 100%;
+  border-radius: 0;
+  text-align: left;
+}
+
+.vault-row:first-child {
+  border-radius: 12px 12px 0 0;
+}
+
+.vault-row:last-child {
+  border-radius: 0 0 12px 12px;
+}
+
+.vault-row:only-child {
+  border-radius: 12px;
+}
+
+.vault-row:hover {
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.vault-chevron {
+  font-size: 18px;
+  color: var(--faint);
+}
+
+.vault-none {
+  padding: 18px 14px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.vault-tile {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+  font: 500 15px/1 var(--font-display);
+  color: var(--text);
+}
+
+.vault-tile-card {
+  color: var(--accent);
+}
+
+.vault-tile-api_key {
+  color: var(--warning);
+}
+
+.vault-details,
+.vault-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.vault-details-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.vault-details-head .vault-tile {
+  width: 42px;
+  height: 42px;
+  font-size: 19px;
+}
+
+.vault-fields {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 12px;
+  margin: 0;
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.vault-fields dt {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.vault-fields dd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  margin: 0;
+}
+
+.vault-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.vault-value.secret {
+  color: var(--muted);
+  letter-spacing: 0.08em;
+}
+
+.vault-copied {
+  font-size: 11.5px;
+  color: var(--success);
+}
+
+.vault-fields .icon-button:has(.vault-copied) {
+  width: auto;
+  padding: 0 6px;
+}
+
+.vault-uses {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+.vault-uses li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 2px;
+  border-top: 1px solid var(--line);
+}
+
+.vault-uses li:first-child {
+  border-top: 0;
+}
+
+.vault-uses time {
+  flex-shrink: 0;
+  color: var(--faint);
+}
+
+.vault-secret-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.vault-secret-row .field {
+  flex: 1;
+}
+
+.vault-secret-row button {
+  height: 34px;
+}
+
+.vault-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.vault-show {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.vault-details .section-title {
+  margin: 4px 0 -4px;
+}

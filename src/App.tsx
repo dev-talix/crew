@@ -1,6 +1,7 @@
 import { createEffect, createSignal, createStore, For, Match, onSettled, Show, Switch } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import AgentForm from "./AgentForm";
+import Approvals from "./Approvals";
 import BotAvatar from "./BotAvatar";
 import Chat from "./Chat";
 import { createChatStore } from "./chatStore";
@@ -271,7 +272,7 @@ export default function App() {
               <WorkflowsPage agents={agents()} onOpenAgent={openAgent} intent={spellIntent()} onIntentDone={() => setSpellIntent(null)} />
             </Match>
             <Match when={is("settings")}>
-              <SettingsPage />
+              <SettingsPage agents={agents()} />
             </Match>
             <Match when={true}>
               <HomePage
@@ -286,6 +287,7 @@ export default function App() {
           </Switch>
         </Show>
       </main>
+      <Approvals agents={agents()} />
     </div>
   );
 }

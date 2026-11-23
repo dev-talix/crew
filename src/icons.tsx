@@ -96,6 +96,28 @@ export const PaletteIcon = () => (
   </Icon>
 );
 
+export const KeyIcon = () => (
+  <Icon>
+    <circle cx="5.5" cy="10.5" r="3" />
+    <path d="M7.6 8.4 13.5 2.5M11.5 4.5l1.8 1.8M9.8 6.2l1.4 1.4" />
+  </Icon>
+);
+
+export const CardIcon = () => (
+  <Icon>
+    <rect x="1.8" y="3.5" width="12.4" height="9" rx="1.6" />
+    <path d="M1.8 6.5h12.4M4.5 10h2.5" />
+  </Icon>
+);
+
+export const VaultIcon = () => (
+  <Icon>
+    <rect x="2" y="2.5" width="12" height="11" rx="1.8" />
+    <circle cx="8" cy="8" r="2.4" />
+    <path d="M8 5.6v-.8M8 11.2v-.8M10.4 8h.8M4.8 8h.8M4 13.5v1M12 13.5v1" />
+  </Icon>
+);
+
 export const LockIcon = () => (
   <Icon size={14}>
     <rect x="3.5" y="7" width="9" height="6.5" rx="1.5" />

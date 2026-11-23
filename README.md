@@ -26,6 +26,8 @@
 - **Themes** come as seven built-in inks, and you can edit or write your own as JSON.
 - **Familiars make things too.** Ask one for "a spell that…" or "a theme that feels like a rainy
   library" and it saves it through Grimoire's own tools, credited to it.
+- **The vault** keeps logins, API keys, and cards in your macOS Keychain. Familiars can use a
+  secret in a command without ever seeing it, and Grimoire asks you first.
 - **The dock** pins your familiars to the edge of the screen, so you can chat without opening
   the main window.
 - **Voice** dictation in the composer uses macOS speech recognition.
@@ -84,6 +86,25 @@ reply is added at the end when a step doesn't use it.
 
 A ritual sends a prompt every few hours, daily at a time, or on chosen weekdays. One timer sleeps
 until the next run, and a run missed while Grimoire was closed fires once at the next launch.
+
+## Vault
+
+Settings, Vault holds logins, API keys, and cards. Secret values go in your macOS Keychain under
+`dev.talix.grimoire.vault`; Grimoire's database stores only the name, site, username, and a card's
+last four digits.
+
+Familiars can find items with `vault_search` (no secrets) and use one with `vault_use`:
+
+1. Grimoire asks you in the corner of the window: "Researcher wants to use the password for
+   github.com". Allow once, Always allow, or Deny. No answer in 2 minutes counts as Deny.
+2. On yes, Grimoire puts the secret in a one-time named pipe and gives the familiar only its path.
+   The familiar reads it inside the command that needs it, like `curl -H "Authorization: Bearer
+   $(cat <path>)"`, so the value never enters the conversation sent to OpenAI or Anthropic.
+3. The pipe gives out the secret once, then disappears. Unread, it expires after 2 minutes.
+
+A familiar with shell access could still print what it reads, so Grimoire tells familiars never to,
+and every request shows in the item's history. An item's page lists the familiars you've always
+allowed, with a button to make them ask again.
 
 ## Themes
 
@@ -152,7 +173,7 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
   (Claude through its interrupt request, Codex through `turn/interrupt`) and cancels the queue.
 - **Familiar tools.** Grimoire gives each familiar an MCP server named `grimoire` (`--mcp-config`
   for Claude, thread config for Codex) with `list_familiars`, `list_spells`, `create_spell`,
-  `list_themes`, `create_theme`, and `set_theme`. The CLI starts `grimoire mcp <socket> <agent-id>`,
+  `list_themes`, `create_theme`, `set_theme`, `vault_search`, and `vault_use`. The CLI starts `grimoire mcp <socket> <agent-id>`,
   which relays calls to the app over `grimoire.sock` in its data folder (owner-only). Familiars can't
   cast, edit, or delete spells.
 - **Claude billing.** With "Claude subscription" (the default), Grimoire removes

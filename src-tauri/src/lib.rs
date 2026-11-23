@@ -1,3 +1,4 @@
+mod approvals;
 mod db;
 mod dock;
 mod mcp;
@@ -7,6 +8,7 @@ mod runtime;
 mod status;
 mod themes;
 mod tools;
+mod vault;
 mod workflows;
 
 use db::{now_ms, Access, Agent, Avatar, Db, Message, Provider, Routine, Schedule, Workflow, WorkflowStep};
@@ -27,6 +29,8 @@ struct AppState {
     workflows: Arc<WorkflowRunner>,
     dock: dock::Dock,
     themes_dir: PathBuf,
+    approvals: Arc<approvals::Approvals>,
+    secrets: Arc<dyn vault::SecretStore>,
 }
 
 const CLAUDE_BILLING: &str = "claude_billing";
@@ -439,6 +443,61 @@ fn open_themes_folder(app: AppHandle, state: State<AppState>) -> Result<(), Stri
     app.opener().open_path(state.themes_dir.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn list_vault(state: State<AppState>) -> Result<Vec<vault::VaultItem>, String> {
+    vault::list(&state.db)
+}
+
+/// The secret fields of an item, for revealing or copying in the vault.
+#[tauri::command]
+fn vault_secret(state: State<AppState>, id: String) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    vault::secret(state.secrets.as_ref(), &id)
+}
+
+#[tauri::command]
+fn save_vault_item(app: AppHandle, state: State<AppState>, input: vault::ItemInput) -> Result<vault::VaultItem, String> {
+    let saved = vault::save(&state.db, state.secrets.as_ref(), input)?;
+    let _ = app.emit("vault_changed", ());
+    Ok(saved)
+}
+
+#[tauri::command]
+fn delete_vault_item(app: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
+    vault::delete(&state.db, state.secrets.as_ref(), &id)?;
+    let _ = app.emit("vault_changed", ());
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultActivity {
+    uses: Vec<vault::Use>,
+    /// Familiars that use this item without asking.
+    always_allowed: Vec<String>,
+}
+
+#[tauri::command]
+fn vault_activity(state: State<AppState>, id: String) -> Result<VaultActivity, String> {
+    Ok(VaultActivity { uses: vault::uses(&state.db, &id)?, always_allowed: state.db.grantees(&vault::scope(&id))? })
+}
+
+#[tauri::command]
+fn revoke_vault_grant(app: AppHandle, state: State<AppState>, id: String, agent_id: String) -> Result<(), String> {
+    state.db.remove_grant(&agent_id, &vault::scope(&id))?;
+    let _ = app.emit("vault_changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn answer_approval(state: State<AppState>, id: String, decision: approvals::Decision) -> Result<(), String> {
+    state.approvals.answer(&id, decision)
+}
+
+#[tauri::command]
+fn waiting_approvals(state: State<AppState>) -> Vec<approvals::Request> {
+    state.approvals.waiting()
+}
+
 /// Entry point for `grimoire mcp`, the tool server a CLI starts for an agent.
 pub fn mcp_main(args: &[String]) -> i32 {
     mcp::main(args)
@@ -459,10 +518,20 @@ pub fn run() {
             let edge = db.setting(DOCK_EDGE).ok().flatten().and_then(|e| dock::Edge::parse(&e));
             // Agents get the Grimoire tools only when this socket is up; Grimoire still works without them.
             let themes_dir = themes::dir(&dir);
-            if let Err(e) = tools::serve(app.handle().clone(), db.clone(), &dir.join("grimoire.sock"), themes_dir.clone()) {
+            let approvals = Arc::new(approvals::Approvals::default());
+            #[cfg(target_os = "macos")]
+            let secrets: Arc<dyn vault::SecretStore> = Arc::new(vault::Keychain);
+            let tools = tools::Context {
+                app: app.handle().clone(),
+                db: db.clone(),
+                themes_dir: themes_dir.clone(),
+                approvals: approvals.clone(),
+                secrets: secrets.clone(),
+            };
+            if let Err(e) = tools::serve(Arc::new(tools), &dir.join("grimoire.sock")) {
                 eprintln!("Grimoire tools are off: {e}");
             }
-            app.manage(AppState { db, runtime, scheduler, workflows, dock: dock::Dock::default(), themes_dir });
+            app.manage(AppState { db, runtime, scheduler, workflows, dock: dock::Dock::default(), themes_dir, approvals, secrets });
             if edge.is_some() {
                 let state = app.state::<AppState>();
                 state.dock.set_edge(app.handle(), edge)?;
@@ -503,7 +572,15 @@ pub fn run() {
             delete_theme,
             set_theme,
             open_themes_folder,
-            set_app_icon
+            set_app_icon,
+            list_vault,
+            vault_secret,
+            save_vault_item,
+            delete_vault_item,
+            vault_activity,
+            revoke_vault_grant,
+            answer_approval,
+            waiting_approvals
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

@@ -179,7 +179,7 @@ pub struct Db {
     conn: Mutex<Connection>,
 }
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -291,6 +291,37 @@ impl Db {
                  COMMIT;",
             )?;
         }
+        if version < 7 {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE vault_items (
+                   id TEXT PRIMARY KEY,
+                   kind TEXT NOT NULL,
+                   name TEXT NOT NULL,
+                   site TEXT,
+                   username TEXT,
+                   hint TEXT,
+                   created_at INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE vault_uses (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   item_id TEXT NOT NULL REFERENCES vault_items(id) ON DELETE CASCADE,
+                   agent_id TEXT,
+                   field TEXT NOT NULL,
+                   outcome TEXT NOT NULL,
+                   at INTEGER NOT NULL
+                 );
+                 CREATE TABLE grants (
+                   agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                   scope TEXT NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   PRIMARY KEY (agent_id, scope)
+                 );
+                 PRAGMA user_version = 7;
+                 COMMIT;",
+            )?;
+        }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
             [],
@@ -300,7 +331,7 @@ impl Db {
         })
     }
 
-    fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T, String> {
+    pub(crate) fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T, String> {
         let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
         f(&conn).map_err(|e| e.to_string())
     }
@@ -509,6 +540,38 @@ impl Db {
 
     pub fn delete_workflow(&self, id: &str) -> Result<(), String> {
         self.with(|c| c.execute("DELETE FROM workflows WHERE id = ?1", params![id]).map(|_| ()))
+    }
+
+    /// Whether `agent_id` may do what `scope` names without asking, like "vault:<item id>".
+    pub fn has_grant(&self, agent_id: &str, scope: &str) -> Result<bool, String> {
+        self.with(|c| {
+            c.query_row("SELECT 1 FROM grants WHERE agent_id = ?1 AND scope = ?2", params![agent_id, scope], |_| Ok(()))
+                .optional()
+                .map(|found| found.is_some())
+        })
+    }
+
+    pub fn add_grant(&self, agent_id: &str, scope: &str) -> Result<(), String> {
+        self.with(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO grants (agent_id, scope, created_at) VALUES (?1, ?2, ?3)",
+                params![agent_id, scope, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn remove_grant(&self, agent_id: &str, scope: &str) -> Result<(), String> {
+        self.with(|c| c.execute("DELETE FROM grants WHERE agent_id = ?1 AND scope = ?2", params![agent_id, scope]).map(|_| ()))
+    }
+
+    /// The familiars allowed to do what `scope` names without asking.
+    pub fn grantees(&self, scope: &str) -> Result<Vec<String>, String> {
+        self.with(|c| {
+            let mut stmt = c.prepare_cached("SELECT agent_id FROM grants WHERE scope = ?1 ORDER BY created_at")?;
+            let rows = stmt.query_map(params![scope], |r| r.get(0))?;
+            rows.collect()
+        })
     }
 
     pub fn setting(&self, key: &str) -> Result<Option<String>, String> {

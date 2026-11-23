@@ -3,7 +3,9 @@
 //!
 //! In code a familiar is an agent and a spell is a workflow; the tools use the names people see.
 
+use crate::approvals::{self, Approvals, Decision};
 use crate::db::{Agent, Db, WorkflowStep};
+use crate::vault::{self, Kind, SecretStore};
 use crate::{themes, workflows};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -14,7 +16,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 pub const SERVER_NAME: &str = "grimoire";
-const TOOL_NAMES: [&str; 6] = ["list_familiars", "list_spells", "create_spell", "list_themes", "create_theme", "set_theme"];
+const TOOL_NAMES: [&str; 8] =
+    ["list_familiars", "list_spells", "create_spell", "list_themes", "create_theme", "set_theme", "vault_search", "vault_use"];
 
 /// How a CLI starts the tool server: this executable and the app's socket.
 static LAUNCH: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
@@ -81,6 +84,26 @@ pub fn definitions() -> Value {
                     "css": { "type": "string", "description": "Optional CSS applied after Grimoire's styles. Hooks: [data-slot=sidebar], [data-slot=chat], [data-slot=composer], [data-slot=message][data-role=user|assistant], [data-slot=page], and the variables --font-ui and --font-display." }
                 },
                 "required": ["name"]
+            }
+        },
+        {
+            "name": "vault_search",
+            "description": "Search the user's vault of logins, API keys, and cards. Returns names, sites, usernames, and the last digits of cards, never secrets. Use vault_use to use a secret.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "query": { "type": "string", "description": "Part of a name, site, or username. Leave out to list everything." } }
+            }
+        },
+        {
+            "name": "vault_use",
+            "description": "Use a secret from the vault without seeing it. Grimoire may ask the user first. You get back a path that holds the secret for one read; read it with $(cat PATH) inside the command that needs it, such as curl. Never print, echo, log, or save the secret. Needs shell access.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "item": { "type": "string", "description": "Item id, name, or site, from vault_search." },
+                    "field": { "type": "string", "description": "password for a login, key for an API key, or number, expiry, or cvc for a card. Defaults to the first." }
+                },
+                "required": ["item"]
             }
         },
         {
@@ -243,6 +266,16 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
             themes::set_active(db, themes_dir, &theme.id)?;
             (format!("Grimoire now uses the theme \"{}\".", theme.theme["name"].as_str().unwrap_or_default()), Some("themes_changed"))
         }
+        "vault_search" => {
+            let query = arguments.get("query").and_then(Value::as_str).unwrap_or_default().trim().to_lowercase();
+            let matches = |text: &Option<String>| text.as_deref().is_some_and(|t| t.to_lowercase().contains(&query));
+            let items: Vec<Value> = vault::list(db)?
+                .into_iter()
+                .filter(|i| query.is_empty() || i.name.to_lowercase().contains(&query) || matches(&i.site) || matches(&i.username))
+                .map(|i| json!({ "id": i.id, "kind": i.kind, "name": i.name, "site": i.site, "username": i.username, "hint": i.hint, "fields": i.kind.fields() }))
+                .collect();
+            (pretty(&items), None)
+        }
         _ => return Err(format!("Grimoire has no tool named {tool}.")),
     };
     Ok(Outcome { text, changed })
@@ -265,9 +298,78 @@ fn pretty(value: &impl serde::Serialize) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
 }
 
+/// What the tool server needs from the app.
+pub struct Context {
+    pub app: AppHandle,
+    pub db: Arc<Db>,
+    pub themes_dir: PathBuf,
+    pub approvals: Arc<Approvals>,
+    pub secrets: Arc<dyn SecretStore>,
+}
+
+/// Hands a vault secret to `caller` through a one-time pipe. `ask` puts the question to the user,
+/// unless the familiar is always allowed to use that item.
+async fn vault_use<Ask, Answer>(db: &Db, secrets: &dyn SecretStore, caller: &str, arguments: Value, ask: Ask) -> Result<String, String>
+where
+    Ask: FnOnce(approvals::Request) -> Answer,
+    Answer: std::future::Future<Output = Decision>,
+{
+    let wanted = arguments.get("item").and_then(Value::as_str).ok_or("Name the vault item to use.")?;
+    let item = vault::resolve(db, wanted)?;
+    let fields = item.kind.fields();
+    let field = match arguments.get("field").and_then(Value::as_str) {
+        Some(field) => field.trim().to_lowercase(),
+        None => fields[0].to_string(),
+    };
+    if !fields.contains(&field.as_str()) {
+        return Err(format!("{} has no {field}. Its fields are {}.", item.name, fields.join(", ")));
+    }
+    let agent = db.get_agent(caller)?.ok_or("Only a familiar can use the vault.")?;
+    let scope = vault::scope(&item.id);
+    let label = item.site.clone().unwrap_or_else(|| item.name.clone());
+    let allowed = db.has_grant(caller, &scope)? || {
+        let request = approvals::Request {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent_id: caller.to_string(),
+            kind: "vault",
+            title: format!("{} wants to use the {field} for {label}", agent.name),
+            detail: "Grimoire hands it over through a one-time pipe, so the model never sees it.".into(),
+            can_remember: true,
+        };
+        match ask(request).await {
+            Decision::Always => {
+                db.add_grant(caller, &scope)?;
+                true
+            }
+            Decision::Once => true,
+            Decision::Deny => false,
+        }
+    };
+    vault::record_use(db, &item.id, Some(caller), &field, if allowed { "allowed" } else { "denied" })?;
+    if !allowed {
+        return Err(format!("The user didn't allow using the {field} for {label}. Don't ask for it again unless they tell you to."));
+    }
+    let value = vault::secret(secrets, &item.id)?
+        .get(&field)
+        .and_then(Value::as_str)
+        .map(String::from)
+        .ok_or(format!("{} has no {field} saved.", item.name))?;
+    let path = vault::hand_off(value, vault::HAND_OFF_TTL)?;
+    let path = path.display();
+    let example = match item.kind {
+        Kind::Login => format!("curl -u '{}:'\"$(cat {path})\" https://...", item.username.as_deref().unwrap_or("USER")),
+        Kind::ApiKey => format!("curl -H \"Authorization: Bearer $(cat {path})\" https://..."),
+        Kind::Card => format!("some-command --{field} \"$(cat {path})\""),
+    };
+    Ok(format!(
+        "The {field} for {label} is waiting at {path}. Read it with $(cat {path}) inside the command that needs it, for example:\n{example}\n\
+         It can be read once and expires in 2 minutes. Never print, echo, log, or save it, and don't cat it on its own."
+    ))
+}
+
 /// Listens on `socket` for relayed tool calls, one JSON object per line in each direction.
 /// Familiars only get the tools once this succeeds.
-pub fn serve(app: AppHandle, db: Arc<Db>, socket: &Path, themes_dir: PathBuf) -> std::io::Result<()> {
+pub fn serve(ctx: Arc<Context>, socket: &Path) -> std::io::Result<()> {
     let _ = std::fs::remove_file(socket);
     // Bind with std here: setup runs outside the async runtime, so tokio takes the socket over in the task.
     let listener = std::os::unix::net::UnixListener::bind(socket)?;
@@ -277,14 +379,13 @@ pub fn serve(app: AppHandle, db: Arc<Db>, socket: &Path, themes_dir: PathBuf) ->
         std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
     }
     let _ = LAUNCH.set((std::env::current_exe()?, socket.to_path_buf()));
-    let themes_dir = Arc::new(themes_dir);
     tauri::async_runtime::spawn(async move {
         let listener = match UnixListener::from_std(listener) {
             Ok(listener) => listener,
             Err(e) => return eprintln!("Grimoire tools are off: {e}"),
         };
         while let Ok((stream, _)) = listener.accept().await {
-            tauri::async_runtime::spawn(handle_connection(stream, app.clone(), db.clone(), themes_dir.clone()));
+            tauri::async_runtime::spawn(handle_connection(stream, ctx.clone()));
         }
     });
     Ok(())
@@ -298,20 +399,28 @@ struct Request {
     arguments: Value,
 }
 
-async fn handle_connection(stream: UnixStream, app: AppHandle, db: Arc<Db>, themes_dir: Arc<PathBuf>) {
+async fn handle_connection(stream: UnixStream, ctx: Arc<Context>) {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         let reply = match serde_json::from_str::<Request>(&line) {
             Ok(request) => {
-                let (db, themes_dir) = (db.clone(), themes_dir.clone());
-                let result = tokio::task::spawn_blocking(move || call(&db, &themes_dir, &request.agent, &request.tool, request.arguments))
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()));
+                let result = if request.tool == "vault_use" {
+                    let ask = |question| ctx.approvals.ask(&ctx.app, question);
+                    let used = vault_use(&ctx.db, ctx.secrets.as_ref(), &request.agent, request.arguments, ask).await;
+                    // Every attempt lands in the item's log, allowed or not.
+                    let _ = ctx.app.emit("vault_changed", ());
+                    used.map(|text| Outcome { text, changed: None })
+                } else {
+                    let ctx = ctx.clone();
+                    tokio::task::spawn_blocking(move || call(&ctx.db, &ctx.themes_dir, &request.agent, &request.tool, request.arguments))
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
+                };
                 match result {
                     Ok(outcome) => {
                         if let Some(event) = outcome.changed {
-                            let _ = app.emit(event, ());
+                            let _ = ctx.app.emit(event, ());
                         }
                         json!({ "ok": true, "text": outcome.text })
                     }
@@ -403,6 +512,66 @@ mod tests {
         assert_eq!(list[0]["steps"][0]["familiar"], "Writer");
         assert_eq!(list[0]["createdBy"], Value::Null);
         assert!(call(&db, &dir, "w1", "delete_everything", json!({})).is_err());
+    }
+
+    #[test]
+    fn vault_search_never_returns_secrets() {
+        let (db, dir) = setup();
+        let store = vault::MemoryStore::new();
+        let input = vault::ItemInput {
+            id: None,
+            kind: Kind::Login,
+            name: "GitHub".into(),
+            site: Some("github.com".into()),
+            username: Some("me".into()),
+            secret: json!({ "password": "hunter2" }).as_object().unwrap().clone(),
+        };
+        vault::save(&db, &store, input).unwrap();
+        let text = call(&db, &dir, "r1", "vault_search", json!({ "query": "GIT" })).unwrap().text;
+        let found: Vec<Value> = serde_json::from_str(&text).unwrap();
+        assert_eq!(found[0]["name"], "GitHub");
+        assert_eq!(found[0]["fields"], json!(["password"]));
+        assert!(!text.contains("hunter2"));
+        assert_eq!(call(&db, &dir, "r1", "vault_search", json!({ "query": "bank" })).unwrap().text, "[]");
+    }
+
+    #[tokio::test]
+    async fn vault_use_asks_hands_off_once_and_remembers_always() {
+        let (db, _) = setup();
+        let store = vault::MemoryStore::new();
+        let input = vault::ItemInput {
+            id: None,
+            kind: Kind::Login,
+            name: "GitHub".into(),
+            site: Some("github.com".into()),
+            username: Some("me".into()),
+            secret: json!({ "password": "hunter2" }).as_object().unwrap().clone(),
+        };
+        let item = vault::save(&db, &store, input).unwrap();
+        let args = || json!({ "item": "github.com" });
+
+        let denied = vault_use(&db, &store, "r1", args(), |_| async { Decision::Deny }).await.unwrap_err();
+        assert!(denied.contains("didn't allow"));
+
+        let asked = std::sync::Mutex::new(Vec::new());
+        let text = vault_use(&db, &store, "r1", args(), |q: approvals::Request| {
+            asked.lock().unwrap().push(q.title.clone());
+            async { Decision::Always }
+        })
+        .await
+        .unwrap();
+        assert_eq!(asked.lock().unwrap()[0], "Researcher wants to use the password for github.com");
+        assert!(!text.contains("hunter2"));
+        let path = text.split_whitespace().find(|w| w.contains("grimoire-secrets")).unwrap().trim_end_matches('.');
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "hunter2");
+
+        // Always allowed now: no question, and the log has both attempts.
+        vault_use(&db, &store, "r1", args(), |_| async { panic!("should not ask") }).await.unwrap();
+        let outcomes: Vec<String> = vault::uses(&db, &item.id).unwrap().into_iter().map(|u| u.outcome).collect();
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes.contains(&"denied".to_string()));
+
+        assert!(vault_use(&db, &store, "w1", json!({ "item": "GitHub", "field": "pin" }), |_| async { Decision::Once }).await.unwrap_err().contains("fields are password"));
     }
 
     #[test]

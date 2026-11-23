@@ -1,13 +1,14 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { createSignal, For, Match, onSettled, Show, Switch } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import { api, createFetch, errorText, PROVIDER_NAMES, type DockEdge, type Provider, type ProviderStatus, type Settings } from "./api";
+import { api, createFetch, errorText, PROVIDER_NAMES, type Agent, type DockEdge, type Provider, type ProviderStatus, type Settings } from "./api";
 import { Page, Segmented } from "./ui";
 import { ThemePicker } from "./ThemeEditor";
 import { appIcon, readMode, setAppIcon, setMode, type AppIconSetting, type ModeSetting } from "./themeStore";
 import nightIcon from "./assets/icon-night.svg";
 import paperIcon from "./assets/icon-paper.svg";
-import { GearIcon, PaletteIcon } from "./icons";
+import { GearIcon, PaletteIcon, VaultIcon } from "./icons";
+import VaultPage from "./VaultPage";
 import "./settings.css";
 
 type Billing = Settings["claudeBilling"];
@@ -262,14 +263,15 @@ function AppearanceSettings() {
   );
 }
 
-export type SettingsSection = "general" | "appearance";
+export type SettingsSection = "general" | "appearance" | "vault";
 
 const SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element }[] = [
   { id: "general", label: "General", icon: GearIcon },
   { id: "appearance", label: "Appearance", icon: PaletteIcon },
+  { id: "vault", label: "Vault", icon: VaultIcon },
 ];
 
-export default function SettingsPage(props: { section?: SettingsSection }) {
+export default function SettingsPage(props: { section?: SettingsSection; agents: Agent[] }) {
   const [section, setSection] = createSignal<SettingsSection>(props.section ?? "general");
   return (
     <div class="settings-shell">
@@ -294,6 +296,9 @@ export default function SettingsPage(props: { section?: SettingsSection }) {
         </Match>
         <Match when={section() === "appearance"}>
           <AppearanceSettings />
+        </Match>
+        <Match when={section() === "vault"}>
+          <VaultPage agents={props.agents} />
         </Match>
       </Switch>
     </div>

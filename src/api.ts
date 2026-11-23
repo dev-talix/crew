@@ -155,6 +155,48 @@ export interface ThemeList {
   problems: { file: string; error: string }[];
 }
 
+export type VaultKind = "login" | "api_key" | "card";
+
+export interface VaultItem {
+  id: string;
+  kind: VaultKind;
+  name: string;
+  /** The website or service. */
+  site: string | null;
+  /** The username for a login, or the name on a card. */
+  username: string | null;
+  /** Safe to show, like the last digits of a card. */
+  hint: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface VaultItemInput {
+  id: string | null;
+  kind: VaultKind;
+  name: string;
+  site: string | null;
+  username: string | null;
+  /** Secret fields to set. On an edit, fields left out keep their value. */
+  secret: Record<string, string>;
+}
+
+export interface VaultActivity {
+  uses: { agentId: string | null; field: string; outcome: "allowed" | "denied"; at: number }[];
+  alwaysAllowed: string[];
+}
+
+export interface ApprovalRequest {
+  id: string;
+  agentId: string;
+  kind: "vault" | "command" | "file";
+  title: string;
+  detail: string;
+  canRemember: boolean;
+}
+
+export type ApprovalDecision = "once" | "always" | "deny";
+
 export const api = {
   listAgents: () => invoke<Agent[]>("list_agents"),
   busyAgents: () => invoke<string[]>("busy_agents"),
@@ -191,6 +233,14 @@ export const api = {
   setTheme: (id: string) => invoke<void>("set_theme", { id }),
   openThemesFolder: () => invoke<void>("open_themes_folder"),
   setAppIcon: (icon: "paper" | "night") => invoke<void>("set_app_icon", { icon }),
+  listVault: () => invoke<VaultItem[]>("list_vault"),
+  vaultSecret: (id: string) => invoke<Record<string, string>>("vault_secret", { id }),
+  saveVaultItem: (input: VaultItemInput) => invoke<VaultItem>("save_vault_item", { input }),
+  deleteVaultItem: (id: string) => invoke<void>("delete_vault_item", { id }),
+  vaultActivity: (id: string) => invoke<VaultActivity>("vault_activity", { id }),
+  revokeVaultGrant: (id: string, agentId: string) => invoke<void>("revoke_vault_grant", { id, agentId }),
+  answerApproval: (id: string, decision: ApprovalDecision) => invoke<void>("answer_approval", { id, decision }),
+  waitingApprovals: () => invoke<ApprovalRequest[]>("waiting_approvals"),
 };
 
 /**
@@ -230,7 +280,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));
