@@ -44,7 +44,8 @@
       "icons/icon.png"
     ],
     "macOS": {
-      "signingIdentity": "Developer ID Application: Nikhil Kapadia (2TG5HP8NSV)"
+      "signingIdentity": "Developer ID Application: Nikhil Kapadia (2TG5HP8NSV)",
+      "entitlements": "./Entitlements.plist"
     }
   }
 }

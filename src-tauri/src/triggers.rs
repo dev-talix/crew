@@ -9,7 +9,7 @@ use crate::routines::Scheduler;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{Emitter, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -101,6 +101,23 @@ fn cooling_down(state: Option<&TriggerState>, now: i64) -> bool {
     state.and_then(|s| s.fired_at).is_some_and(|at| now - at < COOLDOWN_MS)
 }
 
+/// Held while a check's result is saved, so two results can't both claim the same run.
+static CLAIM: Mutex<()> = Mutex::new(());
+
+/// Saves a check's result and returns the ritual to run, if `fire` and nothing moved underneath. The check
+/// started from `started`. When the ritual was deleted, paused, or given another trigger since, or its state
+/// changed (a save resets it, another webhook call records its run), the result is dropped.
+fn claim(db: &Db, routine: &Routine, started: Option<&TriggerState>, next: &TriggerState, fire: bool) -> Result<Option<Routine>, String> {
+    let _held = CLAIM.lock().map_err(|_| "trigger lock poisoned".to_string())?;
+    let current = db.list_routines()?.into_iter().find(|r| r.id == routine.id && r.enabled && r.schedule == routine.schedule);
+    let Some(current) = current else { return Ok(None) };
+    if load(db, &routine.id)?.as_ref() != started {
+        return Ok(None);
+    }
+    store(db, next)?;
+    Ok(fire.then_some(current))
+}
+
 /// Folds one check into the saved state. `check` gets the previous cursor, or None for a baseline, and
 /// returns the new cursor plus what changed. Returns the state to save and what to tell the familiar.
 fn advance(
@@ -157,7 +174,17 @@ struct Pr {
     title: String,
 }
 
-/// The cursor is the highest PR number seen; a PR above it is new.
+/// How many of the newest pull requests each check reads.
+const PR_LIMIT: usize = 100;
+
+/// Lists pull requests in every state, newest first, so one opened and merged between checks still counts,
+/// and an old one reopened stays below the cursor.
+fn gh_args(repo: &str) -> Vec<String> {
+    let limit = PR_LIMIT.to_string();
+    ["pr", "list", "--repo", repo, "--state", "all", "--limit", &limit, "--json", "number,title,url,createdAt"].map(String::from).to_vec()
+}
+
+/// The cursor is the highest PR number seen in any state; a PR above it is new.
 fn github_diff(prev: Option<&str>, repo: &str, json: &str) -> Result<(String, Option<String>), String> {
     let prs: Vec<Pr> = serde_json::from_str(json).map_err(|_| "GitHub sent something Grimoire couldn't read.".to_string())?;
     let seen: u64 = prev.and_then(|p| p.parse().ok()).unwrap_or(0);
@@ -165,14 +192,16 @@ fn github_diff(prev: Option<&str>, repo: &str, json: &str) -> Result<(String, Op
     let Some(_) = prev else { return Ok((top.to_string(), None)) };
     let mut new: Vec<&Pr> = prs.iter().filter(|p| p.number > seen).collect();
     new.sort_by_key(|p| p.number);
+    // A full page of new PRs means more may have landed than one check reads.
+    let count = if new.len() >= PR_LIMIT { format!("At least {}", new.len()) } else { new.len().to_string() };
     let change = match new.as_slice() {
         [] => None,
         [pr] => Some(format!("PR #{} '{}' opened in {repo}", pr.number, pr.title)),
-        many => Some(format!(
-            "{} PRs opened in {repo}: {}",
-            many.len(),
-            many.iter().take(5).map(|p| format!("#{} '{}'", p.number, p.title)).collect::<Vec<_>>().join(", ")
-        )),
+        many => {
+            let shown = many.iter().rev().take(5).map(|p| format!("#{} '{}'", p.number, p.title)).collect::<Vec<_>>().join(", ");
+            let more = if many.len() > 5 { format!(", and {} more", many.len() - 5) } else { String::new() };
+            Some(format!("{count} PRs opened in {repo}: {shown}{more}"))
+        }
     };
     Ok((top.to_string(), change))
 }
@@ -196,7 +225,7 @@ async fn check_github(repo: &str, prev: Option<String>) -> Result<(String, Optio
     }
     let home = home().ok_or("Grimoire can't find your home folder.")?;
     let mut cmd = crate::providers::command("gh", &home.to_string_lossy());
-    cmd.args(["pr", "list", "--repo", repo, "--state", "open", "--limit", "50", "--json", "number,title,url,createdAt"]);
+    cmd.args(gh_args(repo));
     cmd.stdin(std::process::Stdio::null());
     let json = output(cmd, "gh", Duration::from_secs(60)).await?;
     github_diff(prev.as_deref(), repo, &json)
@@ -376,9 +405,9 @@ async fn round(scheduler: &Arc<Scheduler>) -> Result<(), String> {
             changed = true;
         }
         changed |= fresh.is_none();
-        store(&db, &next)?;
-        if let Some(what) = change {
-            scheduler.fire_with(&routine, &what);
+        let run = claim(&db, &routine, prev.as_ref(), &next, change.is_some())?;
+        if let (Some(current), Some(what)) = (run, change) {
+            scheduler.fire_with(&current, &what);
             changed = true;
         }
     }
@@ -534,9 +563,10 @@ fn webhook_fire(scheduler: &Arc<Scheduler>, routine: &Routine, body: &[u8]) -> R
         return Ok(false);
     }
     let (next, change) = advance(prev.as_ref(), &routine.id, "webhook", now, |_| Ok((String::new(), Some(webhook_text(body)))));
-    store(&scheduler.db, &next)?;
+    // A call that got here first has recorded its run, so this one falls inside the cooldown.
+    let Some(current) = claim(&scheduler.db, routine, prev.as_ref(), &next, true)? else { return Ok(false) };
     if let Some(what) = change {
-        scheduler.fire_with(routine, &what);
+        scheduler.fire_with(&current, &what);
     }
     let _ = scheduler.app.emit("routines_changed", ());
     Ok(true)
@@ -621,10 +651,103 @@ mod tests {
         assert_eq!(github_diff(Some("12"), "o/r", json).unwrap(), ("12".into(), None));
         assert_eq!(github_diff(Some("10"), "o/r", json).unwrap(), ("12".into(), Some("PR #12 'Fix x' opened in o/r".into())));
         let (cursor, change) = github_diff(Some("8"), "o/r", json).unwrap();
-        assert_eq!((cursor.as_str(), change.unwrap().as_str()), ("12", "2 PRs opened in o/r: #9 'Old', #12 'Fix x'"));
-        // Closing every PR doesn't lower the cursor.
+        assert_eq!((cursor.as_str(), change.unwrap().as_str()), ("12", "2 PRs opened in o/r: #12 'Fix x', #9 'Old'"));
+        // An empty list doesn't lower the cursor.
         assert_eq!(github_diff(Some("12"), "o/r", "[]").unwrap(), ("12".into(), None));
         assert!(github_diff(Some("1"), "o/r", "oops").is_err());
+    }
+
+    #[test]
+    fn github_reads_every_state_so_merged_and_reopened_prs_are_judged_by_number() {
+        let args = gh_args("o/r");
+        assert!(args.windows(2).any(|w| w == ["--state", "all"]), "{args:?}");
+        // The baseline counts a closed PR, so reopening it later isn't news.
+        let baseline = r#"[{"number":7,"title":"Old","state":"CLOSED"},{"number":3,"title":"Open","state":"OPEN"}]"#;
+        let (cursor, _) = github_diff(None, "o/r", baseline).unwrap();
+        assert_eq!(cursor, "7");
+        let reopened = r#"[{"number":7,"title":"Old","state":"OPEN"},{"number":3,"title":"Open","state":"OPEN"}]"#;
+        assert_eq!(github_diff(Some(&cursor), "o/r", reopened).unwrap(), ("7".into(), None));
+        // A PR opened and merged between checks still shows up, since merged ones are listed too.
+        let merged = r#"[{"number":8,"title":"Quick fix","state":"MERGED"},{"number":7,"title":"Old","state":"OPEN"}]"#;
+        assert_eq!(github_diff(Some(&cursor), "o/r", merged).unwrap(), ("8".into(), Some("PR #8 'Quick fix' opened in o/r".into())));
+    }
+
+    #[test]
+    fn many_new_prs_fire_one_message_and_catch_the_cursor_up() {
+        let prs: Vec<String> = (1..=PR_LIMIT as u64).rev().map(|n| format!(r#"{{"number":{},"title":"t{n}"}}"#, n + 100)).collect();
+        let (cursor, change) = github_diff(Some("100"), "o/r", &format!("[{}]", prs.join(","))).unwrap();
+        assert_eq!(cursor, (100 + PR_LIMIT).to_string());
+        let change = change.unwrap();
+        assert!(change.starts_with(&format!("At least {PR_LIMIT} PRs opened in o/r: #{} ", 100 + PR_LIMIT)), "{change}");
+        assert!(change.ends_with(&format!(", and {} more", PR_LIMIT - 5)), "{change}");
+    }
+
+    fn ritual(schedule: Schedule) -> Routine {
+        Routine {
+            id: "r".into(),
+            agent_id: None,
+            workflow_id: None,
+            name: "Watch".into(),
+            prompt: "Go".into(),
+            schedule,
+            enabled: true,
+            last_run_at: None,
+            next_run_at: None,
+            created_at: 0,
+        }
+    }
+
+    fn db_with(routine: &Routine, state: &TriggerState) -> Db {
+        let db = Db::open_in_memory().unwrap();
+        db.with(|c| c.execute_batch("PRAGMA foreign_keys = OFF")).unwrap();
+        db.save_routine(routine).unwrap();
+        store(&db, state).unwrap();
+        db
+    }
+
+    #[test]
+    fn a_save_pause_or_delete_during_a_check_stops_the_run() {
+        let routine = ritual(Schedule::GithubPr { repo: "o/r".into() });
+        let started = TriggerState { routine_id: "r".into(), source: "githubPr:o/r".into(), cursor: Some("5".into()), ..Default::default() };
+        let next = TriggerState { cursor: Some("6".into()), fired_at: Some(1), ..started.clone() };
+
+        let db = db_with(&routine, &started);
+        assert_eq!(claim(&db, &routine, Some(&started), &next, true).unwrap().map(|r| r.id), Some("r".into()));
+        assert_eq!(load(&db, "r").unwrap(), Some(next.clone()));
+
+        // Saved with the same trigger while `gh` ran: the save reset the state, so the old result is dropped.
+        let db = db_with(&routine, &started);
+        reset(&db, "r").unwrap();
+        assert!(claim(&db, &routine, Some(&started), &next, true).unwrap().is_none());
+        assert_eq!(load(&db, "r").unwrap().unwrap().cursor, None, "the reset stays");
+
+        // Given another trigger, paused, or deleted.
+        let db = db_with(&ritual(Schedule::GithubPr { repo: "o/other".into() }), &started);
+        assert!(claim(&db, &routine, Some(&started), &next, true).unwrap().is_none());
+        let db = db_with(&Routine { enabled: false, ..routine.clone() }, &started);
+        assert!(claim(&db, &routine, Some(&started), &next, true).unwrap().is_none());
+        let db = db_with(&routine, &started);
+        db.delete_routine("r").unwrap();
+        assert!(claim(&db, &routine, Some(&started), &next, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn two_webhook_calls_at_once_run_the_ritual_once() {
+        let routine = ritual(Schedule::Webhook { secret: "s".into() });
+        let started = TriggerState { routine_id: "r".into(), source: "webhook".into(), cursor: Some(String::new()), ..Default::default() };
+        let db = Arc::new(db_with(&routine, &started));
+        let calls: Vec<_> = (0..8)
+            .map(|i| {
+                let (db, routine, started) = (db.clone(), routine.clone(), started.clone());
+                std::thread::spawn(move || {
+                    let (next, _) = advance(Some(&started), "r", "webhook", 1_000 + i, |_| ok("", Some("call")));
+                    claim(&db, &routine, Some(&started), &next, true).unwrap().is_some()
+                })
+            })
+            .collect();
+        let runs = calls.into_iter().map(|c| c.join().unwrap()).filter(|ran| *ran).count();
+        assert_eq!(runs, 1);
+        assert!(cooling_down(load(&db, "r").unwrap().as_ref(), 1_010));
     }
 
     #[test]
