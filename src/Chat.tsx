@@ -10,7 +10,7 @@ import Ledger from "./Ledger";
 import Helpers from "./Helpers";
 import ModelPicker from "./ModelPicker";
 import { HostBadge } from "./ui";
-import { homeOffline, isRemote, offlineNotice } from "./linked";
+import { homeOffline, isRemote, offlineNotice, remoteSideLabel } from "./linked";
 import SideConversation from "./SideConversation";
 import { effortName, runningModelName } from "./models";
 import {
@@ -31,6 +31,7 @@ import {
   SearchIcon,
   SendIcon,
   StopIcon,
+  TalkIcon,
   TerminalIcon,
   WrenchIcon,
 } from "./icons";
@@ -612,7 +613,21 @@ export default function Chat(props: {
                 </Match>
                 <Match when={row.kind === "error" && row}>{(r) => <div class="row error-box">{(r() as Extract<Row, { kind: "error" }>).message.text}</div>}</Match>
                 <Match when={row.kind === "side" && row}>
-                  {(r) => <SideConversation message={(r() as Extract<Row, { kind: "side" }>).message} asker={props.agent.name} />}
+                  {(r) => {
+                    const message = (r() as Extract<Row, { kind: "side" }>).message;
+                    // A linked familiar's side conversations live on its Mac, so the row can't open them here.
+                    const label = remoteSideLabel(message.text, props.agent);
+                    return label === null ? (
+                      <SideConversation message={message} asker={props.agent.name} />
+                    ) : (
+                      <div class="row side" data-slot="message" data-role="side" data-message-id={message.id}>
+                        <div class="tool-line">
+                          <TalkIcon />
+                          <span>{label}</span>
+                        </div>
+                      </div>
+                    );
+                  }}
                 </Match>
               </Switch>
             )}

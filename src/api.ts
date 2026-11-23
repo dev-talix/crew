@@ -684,7 +684,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

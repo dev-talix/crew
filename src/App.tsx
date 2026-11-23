@@ -16,7 +16,7 @@ import { SettingsDialog } from "./SettingsPage";
 import WorkflowsPage, { type SpellIntent } from "./WorkflowsPage";
 import { api, errorText, onEvent, onMountAsync, PROVIDER_NAMES, subscribe, withAgent, type Agent, type Coven, type Workflow } from "./api";
 import { inkFor } from "./avatar";
-import { groupByHome, homeOffline, isRemote } from "./linked";
+import { groupByHome, homeOffline, isRemote, reloadsOpenChat } from "./linked";
 import { runningModelName } from "./models";
 import { createMoods } from "./moods";
 import { ClockIcon, GearIcon, HomeIcon, PlusIcon, TalkIcon } from "./icons";
@@ -143,6 +143,14 @@ export default function App() {
     for (const name of ["agents_changed", "links_changed"] as const) {
       keep(await onEvent<null>(name, () => api.listAgents().then(setAgents, () => {})));
     }
+    // This Mac missed a linked Mac's events, or that Mac switched a familiar to another chat:
+    // load the open chat again rather than adding to what it shows.
+    keep(
+      await onEvent<{ agentId: string | null }>("link_reload", ({ agentId }) => {
+        if (reloadsOpenChat(agentId, current())) void chat.reload();
+        api.listAgents().then(setAgents, () => {});
+      }),
+    );
     const stop = await subscribe({
       message: (message) => {
         chat.onMessage(message);

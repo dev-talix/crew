@@ -233,6 +233,10 @@ export default function LinkedMacsPage() {
           </p>
         </Show>
 
+        <p class="hint settings-footnote">
+          A linked Mac can chat with this Mac's familiars, with the access each one has here. Familiars it creates here get workspace access.
+        </p>
+
         <h2 class="section-title">Linked Macs</h2>
         <div class="list">
           <For

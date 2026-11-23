@@ -9,6 +9,23 @@ export function parseRemoteId(id: string): { peerId: string; agentId: string } |
 /** Lives on a linked Mac, so only that Mac can change or delete it. */
 export const isRemote = (agent: Pick<Agent, "home">) => !!agent.home;
 
+/**
+ * Whether a `link_reload` event means the open chat must load again. `agentId` is a linked
+ * familiar's id, or null for every familiar from linked Macs.
+ */
+export function reloadsOpenChat(agentId: string | null, open: Pick<Agent, "id" | "home"> | null | undefined): boolean {
+  if (!open) return false;
+  return agentId === null ? isRemote(open) : agentId === open.id;
+}
+
+/**
+ * A side conversation row in a linked familiar's chat. The conversation lives on that familiar's
+ * Mac, so the row names the Mac instead of opening it. Null for a familiar on this Mac.
+ */
+export function remoteSideLabel(label: string, agent: Pick<Agent, "home">): string | null {
+  return agent.home ? `${label} (open it on ${agent.home.name})` : null;
+}
+
 /** Lives on a linked Mac that can't be reached right now. */
 export const homeOffline = (agent: Pick<Agent, "home">) => !!agent.home && !agent.home.online;
 

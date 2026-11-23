@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { AgentHome } from "./api";
-import { countdown, groupByHome, homeOffline, homeTitle, isRemote, offlineNotice, parseRemoteId, peerState, runsOnOptions } from "./linked";
+import { countdown, groupByHome, homeOffline, homeTitle, isRemote, offlineNotice, parseRemoteId, peerState, reloadsOpenChat, remoteSideLabel, runsOnOptions } from "./linked";
 
 const studio: AgentHome = { peerId: "p1", name: "Studio", online: true };
 const air: AgentHome = { peerId: "p2", name: "Air", online: false };
@@ -64,4 +64,22 @@ test("lists runs-on choices with offline Macs disabled", () => {
     { value: "peer:p2", label: "Air (offline)", disabled: true },
     { value: "ssh", label: "Another Mac over SSH" },
   ]);
+});
+
+test("reloads the open chat only for its own linked familiar", () => {
+  const remote = { id: "peer:p1:abc", home: studio };
+  const local = { id: "abc", home: null };
+  expect(reloadsOpenChat("peer:p1:abc", remote)).toBe(true);
+  expect(reloadsOpenChat("peer:p1:other", remote)).toBe(false);
+  expect(reloadsOpenChat(null, remote)).toBe(true);
+  expect(reloadsOpenChat(null, local)).toBe(false);
+  expect(reloadsOpenChat("abc", local)).toBe(true);
+  expect(reloadsOpenChat(null, undefined)).toBe(false);
+  expect(reloadsOpenChat("peer:p1:abc", null)).toBe(false);
+});
+
+test("names the home Mac on a linked familiar's side conversation rows", () => {
+  expect(remoteSideLabel("Asked Scribe", { home: studio })).toBe("Asked Scribe (open it on Studio)");
+  expect(remoteSideLabel("Asked Scribe", { home: null })).toBeNull();
+  expect(remoteSideLabel("Asked Scribe", {})).toBeNull();
 });
