@@ -72,6 +72,8 @@ impl Dock {
                 .visible_on_all_workspaces(true)
                 .focused(false)
                 .accept_first_mouse(true)
+                // Let the chat take dropped files itself.
+                .disable_drag_drop_handler()
                 .visible(false)
                 .build()
                 .map(|_| ())

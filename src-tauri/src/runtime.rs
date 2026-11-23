@@ -1,3 +1,4 @@
+use crate::attachments::{Attachment, Staged};
 use crate::db::{Agent, Db, Message, Provider};
 use crate::providers::{claude::Claude, codex::Codex, ProviderEvent};
 use serde::Serialize;
@@ -39,6 +40,7 @@ struct Job {
     message_id: i64,
     text: String,
     source: Option<String>,
+    attachments: Vec<Attachment>,
     reply: Option<Reply>,
 }
 
@@ -119,27 +121,41 @@ impl Runtime {
     }
 
     pub fn send(self: &Arc<Self>, agent_id: &str, text: String, source: Option<&str>) -> Result<Message, String> {
-        self.enqueue(agent_id, text, source, None)
+        self.enqueue(agent_id, text, source, Staged::default(), None)
+    }
+
+    /// Sends a message from the composer, with the files it staged.
+    pub fn send_with(self: &Arc<Self>, agent_id: &str, text: String, staged: Staged) -> Result<Message, String> {
+        self.enqueue(agent_id, text, None, staged, None)
     }
 
     pub async fn send_and_wait(self: &Arc<Self>, agent_id: &str, text: String, source: Option<&str>) -> TurnOutcome {
         let (tx, rx) = oneshot::channel();
-        if let Err(e) = self.enqueue(agent_id, text, source, Some(tx)) {
+        if let Err(e) = self.enqueue(agent_id, text, source, Staged::default(), Some(tx)) {
             return TurnOutcome::Failed(e);
         }
         rx.await.unwrap_or(TurnOutcome::Stopped)
     }
 
-    fn enqueue(self: &Arc<Self>, agent_id: &str, text: String, source: Option<&str>, reply: Option<Reply>) -> Result<Message, String> {
+    fn enqueue(
+        self: &Arc<Self>,
+        agent_id: &str,
+        text: String,
+        source: Option<&str>,
+        staged: Staged,
+        reply: Option<Reply>,
+    ) -> Result<Message, String> {
         if self.db.get_agent(agent_id)?.is_none() {
             return Err("That familiar no longer exists.".into());
         }
         let mut agents = self.agents.lock().map_err(|_| "runtime state poisoned")?;
         let state = agents.entry(agent_id.to_string()).or_default();
         let status = if state.busy { "queued" } else { "done" };
-        let message = self.db.insert_message_from(agent_id, "user", &text, status, source)?;
+        let mut message = self.db.insert_message_from(agent_id, "user", &text, status, source)?;
+        message.attachments = staged.store(&self.db, message.id).inspect_err(|_| crate::attachments::drop_message(&self.db, message.id))?;
         self.app.message(&message);
-        let job = Job { message_id: message.id, text, source: source.map(String::from), reply };
+        let attachments = message.attachments.clone();
+        let job = Job { message_id: message.id, text, source: source.map(String::from), attachments, reply };
         if state.busy {
             state.queue.push_back(job);
         } else {
@@ -230,7 +246,7 @@ impl Runtime {
     fn spawn_turn(self: &Arc<Self>, agent_id: String, job: Job) {
         let runtime = self.clone();
         tauri::async_runtime::spawn(async move {
-            let outcome = runtime.run_turn(&agent_id, &job.text, job.source.as_deref()).await;
+            let outcome = runtime.run_turn(&agent_id, &job.text, job.source.as_deref(), &job.attachments).await;
             crate::notify::turn_ended(&runtime.app, &agent_id, job.source.as_deref(), &outcome);
             if let Some(reply) = job.reply {
                 let _ = reply.send(outcome);
@@ -256,18 +272,22 @@ impl Runtime {
         }
     }
 
-    async fn run_turn(self: &Arc<Self>, agent_id: &str, text: &str, source: Option<&str>) -> TurnOutcome {
+    async fn run_turn(self: &Arc<Self>, agent_id: &str, text: &str, source: Option<&str>, attachments: &[Attachment]) -> TurnOutcome {
         let agent = match self.db.get_agent(agent_id) {
             Ok(Some(agent)) => agent,
             _ => return TurnOutcome::Failed("That familiar no longer exists.".into()),
         };
-        let (tx, rx) = mpsc::unbounded_channel();
-        let started = match agent.provider {
-            Provider::Codex => self.codex.start_turn(&agent, text, tx).await,
-            Provider::Claude => self.claude.start_turn(&agent, text, tx).await,
-        };
         let mut writer = TurnWriter::new(&self.db, &self.app, &agent);
         writer.origin = origin_of(source);
+        let input = match crate::attachments::turn_input(std::path::Path::new(&agent.workspace), text, attachments) {
+            Ok(input) => input,
+            Err(e) => return writer.fail(&e),
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        let started = match agent.provider {
+            Provider::Codex => self.codex.start_turn(&agent, &input.text, &input.images, tx).await,
+            Provider::Claude => self.claude.start_turn(&agent, &input.text, &input.images, tx).await,
+        };
         match started {
             Ok(()) => stream_turn(&mut writer, rx).await,
             Err(e) => writer.fail(&e),
@@ -585,8 +605,8 @@ mod tests {
         let codex = Arc::new(Codex::default());
         let claude = Claude::default();
         match provider {
-            Provider::Codex => codex.start_turn(&agent, prompt, tx).await.unwrap(),
-            Provider::Claude => claude.start_turn(&agent, prompt, tx).await.unwrap(),
+            Provider::Codex => codex.start_turn(&agent, prompt, &[], tx).await.unwrap(),
+            Provider::Claude => claude.start_turn(&agent, prompt, &[], tx).await.unwrap(),
         }
         stream_turn(&mut TurnWriter::new(&db, &sink, &agent), rx).await;
         claude.forget("live");
@@ -620,6 +640,63 @@ mod tests {
     async fn live_claude_turn() {
         let (db, messages) = live_turn(Provider::Claude, LIVE_PROMPT).await;
         assert_live(&db, &messages);
+    }
+
+    /// Sends a PNG with the word MARMALADE on it and returns the reply.
+    async fn live_image_reply(provider: Provider, model: &str) -> String {
+        let workspace = std::env::temp_dir().join(format!("grimoire-live-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let image = workspace.join("word.png");
+        std::fs::write(&image, include_bytes!("testdata/word.png")).unwrap();
+        let db = Db::open_in_memory().unwrap();
+        let agent = Agent {
+            id: "live".into(),
+            name: "Live".into(),
+            provider: provider.clone(),
+            model: Some(model.into()),
+            workspace: workspace.to_string_lossy().into_owned(),
+            access: Access::Workspace,
+            session_id: None,
+            avatar: crate::db::Avatar::for_seed("a"),
+            effort: None,
+            active_model: None,
+            coven_id: None,
+            created_at: now_ms(),
+        };
+        db.insert_agent(&agent).unwrap();
+        let (codex, claude) = (Arc::new(Codex::default()), Claude::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let prompt = "Without using any tools, what word is written in the attached image? Reply with just the word.";
+        match provider {
+            Provider::Codex => codex.start_turn(&agent, prompt, &[image], tx).await.unwrap(),
+            Provider::Claude => claude.start_turn(&agent, prompt, &[image], tx).await.unwrap(),
+        }
+        let outcome = stream_turn(&mut TurnWriter::new(&db, &Recorder::default(), &agent), rx).await;
+        claude.forget("live");
+        let tools: Vec<String> = db.list_messages("live", None, 50).unwrap().into_iter().filter(|m| m.role == "tool").map(|m| m.text).collect();
+        assert!(tools.is_empty(), "the model used tools instead of the image block: {tools:?}");
+        std::fs::remove_dir_all(workspace).unwrap();
+        match outcome {
+            TurnOutcome::Done(text) => {
+                eprintln!("{provider:?} replied: {text}");
+                text
+            }
+            other => panic!("turn did not finish: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "runs the real codex CLI"]
+    async fn live_codex_sees_an_image() {
+        let reply = live_image_reply(Provider::Codex, "gpt-6.2-sol").await;
+        assert!(reply.to_uppercase().contains("MARMALADE"), "unexpected reply: {reply}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "runs the real claude CLI"]
+    async fn live_claude_sees_an_image() {
+        let reply = live_image_reply(Provider::Claude, "haiku").await;
+        assert!(reply.to_uppercase().contains("MARMALADE"), "unexpected reply: {reply}");
     }
 
     #[tokio::test(start_paused = true)]

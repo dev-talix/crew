@@ -1,5 +1,6 @@
 mod approvals;
 mod chats;
+mod attachments;
 mod covens;
 mod db;
 mod delegation;
@@ -213,6 +214,9 @@ fn open_workspace(app: AppHandle, state: State<AppState>, agent_id: String) -> R
 #[tauri::command]
 async fn delete_agent(app: AppHandle, state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
     state.runtime.remove_agent(&agent_id).await?;
+    if let Ok(dir) = app.path().app_data_dir() {
+        attachments::remove_for_agent(&state.db, &attachments::root(&dir), &agent_id);
+    }
     state.db.delete_agent(&agent_id)?;
     memory::forget(&state.db, memory::Owner { scope: memory::Scope::Familiar, id: &agent_id })?;
     let _ = app.emit("agents_changed", ());
@@ -226,16 +230,19 @@ fn list_messages(
     before_id: Option<i64>,
     limit: Option<i64>,
 ) -> Result<Vec<Message>, String> {
-    state.db.list_messages(&agent_id, before_id, limit.unwrap_or(100).clamp(1, 500))
+    let mut messages = state.db.list_messages(&agent_id, before_id, limit.unwrap_or(100).clamp(1, 500))?;
+    attachments::attach(&state.db, &mut messages)?;
+    Ok(messages)
 }
 
 #[tauri::command]
-fn send_message(state: State<AppState>, agent_id: String, text: String) -> Result<Message, String> {
+fn send_message(app: AppHandle, state: State<AppState>, agent_id: String, text: String, attachments: Option<Vec<String>>) -> Result<Message, String> {
     let text = text.trim();
-    if text.is_empty() {
+    let staged = attachments::staged(&app, attachments.unwrap_or_default())?;
+    if text.is_empty() && staged.is_empty() {
         return Err("The message is empty.".into());
     }
-    state.runtime.send(&agent_id, text.to_string(), None)
+    state.runtime.send_with(&agent_id, text.to_string(), staged)
 }
 
 #[tauri::command]
@@ -602,10 +609,14 @@ pub fn mcp_main(args: &[String]) -> i32 {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .register_asynchronous_uri_scheme_protocol(attachments::SCHEME, |ctx, request, responder| {
+            attachments::protocol(ctx.app_handle(), request, responder)
+        })
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             memory::init(&dir);
+            attachments::clear_staging(&attachments::root(&dir));
             let db = Arc::new(Db::open(&dir.join("grimoire.db"))?);
             let billing = db.setting(CLAUDE_BILLING).ok().flatten();
             providers::USE_CLAUDE_SUBSCRIPTION.store(billing.as_deref() != Some("api"), Ordering::Relaxed);
@@ -652,6 +663,8 @@ pub fn run() {
             delete_agent,
             list_messages,
             send_message,
+            attachments::stage_attachment,
+            attachments::open_attachment,
             stop_turn,
             chats::new_chat,
             chats::list_chats,

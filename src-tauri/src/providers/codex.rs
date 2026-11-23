@@ -2,6 +2,7 @@ use super::{command, spawn_error, EventTx, IdleTimer, ModelOption, ProviderEvent
 use crate::db::{Access, Agent};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -117,8 +118,17 @@ fn thread_params(agent: &Agent) -> Value {
     params
 }
 
+/// A turn's `input`: each image as a `localImage` Codex reads from disk, then the text.
+fn turn_input(text: &str, images: &[PathBuf]) -> Value {
+    let mut input: Vec<Value> = images.iter().map(|path| json!({ "type": "localImage", "path": path })).collect();
+    if !text.is_empty() || input.is_empty() {
+        input.push(json!({ "type": "text", "text": text, "text_elements": [] }));
+    }
+    Value::Array(input)
+}
+
 impl Codex {
-    pub async fn start_turn(self: &Arc<Self>, agent: &Agent, text: &str, tx: EventTx) -> Result<(), String> {
+    pub async fn start_turn(self: &Arc<Self>, agent: &Agent, text: &str, images: &[PathBuf], tx: EventTx) -> Result<(), String> {
         let process = self.ensure_process(&agent.workspace).await?;
         self.idle.cancel();
         let thread_id = match self.open_thread(&process, agent).await {
@@ -142,8 +152,7 @@ impl Codex {
         if let Ok(mut routes) = process.routes.lock() {
             routes.insert(thread_id.clone(), Route { tx: Some(tx), ..Route::default() });
         }
-        let input = json!([{ "type": "text", "text": text, "text_elements": [] }]);
-        let mut params = json!({ "threadId": thread_id, "input": input, "approvalPolicy": approval_policy(), "approvalsReviewer": "user" });
+        let mut params = json!({ "threadId": thread_id, "input": turn_input(text, images), "approvalPolicy": approval_policy(), "approvalsReviewer": "user" });
         if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
             params["model"] = json!(model);
         }
@@ -487,6 +496,20 @@ pub fn map_notification(method: &str, params: &Value, route: &mut Route) -> (Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sends_images_as_local_images_before_the_text() {
+        let input = turn_input("What's this?", &[PathBuf::from("/data/attachments/4/shot.png")]);
+        assert_eq!(
+            input,
+            json!([
+                { "type": "localImage", "path": "/data/attachments/4/shot.png" },
+                { "type": "text", "text": "What's this?", "text_elements": [] }
+            ])
+        );
+        assert_eq!(turn_input("", &[PathBuf::from("/a.png")]), json!([{ "type": "localImage", "path": "/a.png" }]));
+        assert_eq!(turn_input("hi", &[]), json!([{ "type": "text", "text": "hi", "text_elements": [] }]));
+    }
 
     fn run(steps: &[(&str, Value)]) -> (Vec<ProviderEvent>, bool) {
         let mut route = Route::default();

@@ -1,8 +1,9 @@
 import { createEffect, createMemo, createSignal, flush, For, Match, onCleanup, Show, Switch } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import BotAvatar, { type Mood } from "./BotAvatar";
-import { api, changesFor, errorText, onEvent, onMountAsync, PROVIDER_NAMES, type Agent, type ChatInfo, type Message } from "./api";
+import { api, changesFor, errorText, onEvent, onMountAsync, PROVIDER_NAMES, type Agent, type Attachment, type ChatInfo, type Message } from "./api";
 import ChatsMenu, { chatTitle } from "./ChatsMenu";
+import { AttachButton, createComposerFiles, DropOverlay, MessageAttachments, PendingFiles } from "./ChatAttachments";
 import type { ChatStore } from "./chatStore";
 import ModelPicker from "./ModelPicker";
 import { effortName, runningModelName } from "./models";
@@ -144,14 +145,19 @@ function AssistantRow(props: { message: Message; turn: () => TurnInfo | undefine
   );
 }
 
-function UserRow(props: { message: Message }) {
+function UserRow(props: { message: Message; onOpen: (attachment: Attachment) => void }) {
   const m = () => props.message;
   return (
     <div class="row user" data-slot="message" data-role="user" data-message-id={m().id}>
       <Show when={m().source}>
         <div class="user-source">{m().source}</div>
       </Show>
-      <div class="user-bubble">{m().text}</div>
+      <Show when={m().attachments?.length}>
+        <MessageAttachments items={m().attachments ?? []} onOpen={props.onOpen} />
+      </Show>
+      <Show when={m().text}>
+        <div class="user-bubble">{m().text}</div>
+      </Show>
       <div class="meta end">
         <Show when={m().status === "queued" || m().status === "cancelled"}>
           <span class="status">{m().status === "queued" ? "Queued, runs next" : "Cancelled"}</span>
@@ -220,6 +226,7 @@ export default function Chat(props: {
   const [draft, setDraft] = createSignal("");
   const [actionError, setActionError] = createSignal("");
   const [listening, setListening] = createSignal(false);
+  const files = createComposerFiles(setActionError);
   let recognition: SpeechRecognitionLike | undefined;
   let list!: HTMLDivElement;
   let input!: HTMLTextAreaElement;
@@ -404,19 +411,28 @@ export default function Chat(props: {
     setListening(true);
   };
 
+  const canSend = () => !!draft().trim() || files.items().length > 0;
+
   const send = () => {
     stopDictation();
     const text = draft().trim();
-    if (!text) return;
+    if (!canSend()) return;
+    const attached = files.take();
     setDraft("");
     resize();
     stickToBottom = true;
-    void run(() =>
-      api.sendMessage(props.agent.id, text).catch((e) => {
+    void run(async () => {
+      try {
+        const staged = [];
+        for (const item of attached) staged.push((await api.stageAttachment(item.file)).token);
+        await api.sendMessage(props.agent.id, text, staged);
+        files.release(attached);
+      } catch (e) {
         setDraft(text);
+        files.restore(attached);
         throw e;
-      }),
-    );
+      }
+    });
   };
 
   const toggleAccess = () =>
@@ -434,7 +450,10 @@ export default function Chat(props: {
   };
 
   return (
-    <section class={["chat", { compact: !!props.compact }]} data-slot="chat">
+    <section class={["chat", { compact: !!props.compact }]} data-slot="chat" {...files.dropTarget}>
+      <Show when={files.dragging()}>
+        <DropOverlay />
+      </Show>
       <header class="chat-bar" data-slot="chat-header" data-tauri-drag-region>
         <div class="crumbs" data-tauri-drag-region>
           <BotAvatar avatar={props.agent.avatar} size={20} fluid working={props.busy} mood={props.mood} />
@@ -541,7 +560,9 @@ export default function Chat(props: {
           <For each={rows()}>
             {(row) => (
               <Switch>
-                <Match when={row.kind === "user" && row}>{(r) => <UserRow message={(r() as Extract<Row, { kind: "user" }>).message} />}</Match>
+                <Match when={row.kind === "user" && row}>
+                  {(r) => <UserRow message={(r() as Extract<Row, { kind: "user" }>).message} onOpen={(a) => run(() => api.openAttachment(a.id))} />}
+                </Match>
                 <Match when={row.kind === "assistant" && row}>
                   {(r) => {
                     const message = (r() as Extract<Row, { kind: "assistant" }>).message;
@@ -568,6 +589,7 @@ export default function Chat(props: {
           </p>
         </Show>
         <div class="composer-card">
+          <PendingFiles items={files.items()} onRemove={files.remove} />
           <textarea
             ref={input}
             rows={1}
@@ -578,6 +600,7 @@ export default function Chat(props: {
               setDraft(e.currentTarget.value);
               resize();
             }}
+            onPaste={files.onPaste}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
                 e.preventDefault();
@@ -611,6 +634,7 @@ export default function Chat(props: {
               <span>{props.agent.access === "full" ? "Full access" : "Workspace only"}</span>
             </button>
             <span class="spacer" />
+            <AttachButton onFiles={files.add} />
             <Show when={SpeechRecognition}>
               <button
                 class={["icon-button mic", { listening: listening() }]}
@@ -623,9 +647,9 @@ export default function Chat(props: {
               </button>
             </Show>
             <Show
-              when={props.busy && !draft().trim()}
+              when={props.busy && !canSend()}
               fallback={
-                <button class="round-button send" aria-label="Send" title="Send" disabled={!draft().trim()} onClick={send}>
+                <button class="round-button send" aria-label="Send" title="Send" disabled={!canSend()} onClick={send}>
                   <SendIcon />
                 </button>
               }

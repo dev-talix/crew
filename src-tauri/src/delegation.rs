@@ -457,8 +457,8 @@ mod tests {
                                 }
                                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                                 match agent.provider {
-                                    Provider::Codex => codex.start_turn(&agent, &text, tx).await.unwrap(),
-                                    Provider::Claude => claude.start_turn(&agent, &text, tx).await.unwrap(),
+                                    Provider::Codex => codex.start_turn(&agent, &text, &[], tx).await.unwrap(),
+                                    Provider::Claude => claude.start_turn(&agent, &text, &[], tx).await.unwrap(),
                                 }
                                 stream_turn(&mut TurnWriter::new(&db, &Quiet, &agent), rx).await
                             };
@@ -485,8 +485,8 @@ mod tests {
             async move {
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                 match asker.provider {
-                    Provider::Codex => codex.start_turn(&asker, &prompt, tx).await.unwrap(),
-                    Provider::Claude => claude.start_turn(&asker, &prompt, tx).await.unwrap(),
+                    Provider::Codex => codex.start_turn(&asker, &prompt, &[], tx).await.unwrap(),
+                    Provider::Claude => claude.start_turn(&asker, &prompt, &[], tx).await.unwrap(),
                 }
                 stream_turn(&mut TurnWriter::new(&db, &Quiet, &asker), rx).await
             }

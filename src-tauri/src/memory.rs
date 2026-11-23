@@ -450,8 +450,8 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (codex, claude) = (std::sync::Arc::new(Codex::default()), Claude::default());
         match provider {
-            Provider::Codex => codex.start_turn(&agent, prompt, tx).await.unwrap(),
-            Provider::Claude => claude.start_turn(&agent, prompt, tx).await.unwrap(),
+            Provider::Codex => codex.start_turn(&agent, prompt, &[], tx).await.unwrap(),
+            Provider::Claude => claude.start_turn(&agent, prompt, &[], tx).await.unwrap(),
         }
         let mut reply = String::new();
         let collect = async {

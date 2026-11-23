@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createEffect, createSignal, onSettled, type Accessor } from "solid-js";
 import type { Avatar } from "./avatar";
@@ -50,6 +50,8 @@ export interface Message {
   source: string | null;
   createdAt: number;
   updatedAt: number | null;
+  /** Files and images sent with a user message. */
+  attachments?: Attachment[];
 }
 
 /** One of a familiar's conversations, with its own CLI session. */
@@ -74,6 +76,26 @@ export interface SearchHit {
   snippet: string;
   createdAt: number;
 }
+
+export interface Attachment {
+  id: number;
+  messageId: number;
+  name: string;
+  kind: "image" | "file";
+  size: number;
+  path: string;
+}
+
+/** A file saved by `stage_attachment`, waiting for its message to be sent. */
+export interface StagedFile {
+  token: string;
+  name: string;
+  kind: "image" | "file";
+  size: number;
+}
+
+/** Where the window loads a stored attachment's bytes, for thumbnails. */
+export const attachmentUrl = (id: number) => convertFileSrc(String(id), "attachment");
 
 export type Schedule = { kind: "interval"; minutes: number } | { kind: "daily"; time: string; days: number[] };
 
@@ -277,7 +299,13 @@ export const api = {
   openWorkspace: (agentId: string) => invoke<void>("open_workspace", { agentId }),
   listMessages: (agentId: string, beforeId?: number) =>
     invoke<Message[]>("list_messages", { agentId, beforeId: beforeId ?? null, limit: PAGE_SIZE }),
-  sendMessage: (agentId: string, text: string) => invoke<Message>("send_message", { agentId, text }),
+  sendMessage: (agentId: string, text: string, attachments: string[] = []) =>
+    invoke<Message>("send_message", { agentId, text, attachments }),
+  stageAttachment: async (file: File) =>
+    invoke<StagedFile>("stage_attachment", new Uint8Array(await file.arrayBuffer()), {
+      headers: { "x-file-name": encodeURIComponent(file.name) },
+    }),
+  openAttachment: (id: number) => invoke<void>("open_attachment", { id }),
   stopTurn: (agentId: string) => invoke<void>("stop_turn", { agentId }),
   newChat: (agentId: string) => invoke<ChatInfo>("new_chat", { agentId }),
   listChats: (agentId: string) => invoke<ChatInfo[]>("list_chats", { agentId }),

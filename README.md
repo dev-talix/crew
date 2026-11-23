@@ -82,6 +82,23 @@ it. The model chip in the composer shows the model it is running and switches it
 `acceptEdits` mode, so it can edit files but shell commands are refused. "Full access" uses Codex
 `danger-full-access` and Claude `bypassPermissions`. Neither asks for approval during a turn.
 
+## Attachments
+
+Drop files on the chat, paste a screenshot, or click the paperclip in the composer. You can attach up
+to 10 files to a message, and each image can be up to 20 MB. The composer shows images as thumbnails
+and other files as chips, each with a button to remove it.
+
+- **Images** (PNG, JPEG, GIF, WebP) go to the model as images: Codex gets a `localImage` input, and
+  Claude gets a base64 image block next to the text.
+- **Other files** are copied into the familiar's workspace under `attachments/<message id>/`, and
+  Grimoire adds their paths to the end of the message, so the familiar reads them with its own tools.
+  "Workspace only" access covers this.
+
+Grimoire keeps a copy of every attachment in `attachments/<message id>/` in its data folder. Sent
+messages show their attachments, and clicking one opens it in its default app. A queued message keeps
+its attachments until it runs. Deleting a familiar deletes its stored attachments, but not the
+copies in its workspace.
+
 ## Chats and the palette
 
 Each familiar keeps a list of chats. The chat header shows the current chat's title, which comes from
@@ -308,7 +325,7 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
   `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` from the `claude` process
   so it uses your claude.ai Pro or Max sign-in. "API key" leaves them in place.
 - **Storage.** `~/Library/Application Support/dev.talix.grimoire/grimoire.db`, with your themes in
-  `themes/` and memories in `memory/` beside it. Default workspaces go under `~/Grimoire`. Deleting a familiar keeps its
+  `themes/`, memories in `memory/`, and attachments in `attachments/` beside it. Default workspaces go under `~/Grimoire`. Deleting a familiar keeps its
   workspace folder.
 - **Names.** The code calls a familiar an agent, a spell a workflow, and a ritual a routine.
 
