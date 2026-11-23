@@ -187,6 +187,10 @@ listed as of the last time it answered. When it reconnects, it catches up on wha
 reloads open chats if it missed too much or the other Mac restarted. Switching chats on the home Mac
 reloads that familiar's chat on linked Macs.
 
+Familiars can ask and message familiars on a linked Mac too (see below). The asking Mac runs its own
+checks and approval prompt, then the home Mac runs the side conversation and sends the reply back to
+that Mac only. A familiar asking from another Mac gets no tools, vault, or settings on the home Mac.
+
 ## Attachments
 
 Drop files on the chat, paste a screenshot, or click the paperclip in the composer. You can attach up
@@ -307,6 +311,11 @@ chat list, search, and backups.
 
 Handoffs in the sidebar lists the latest 100 of these exchanges, newest first: who handed what to
 whom, when, whether it's Waiting, Accepted, Done, or Failed, and a link that opens each thread.
+
+`list_familiars` also lists the familiars on linked Macs, online or not. A familiar picks one by id,
+by name when it's unique, or as "Scribe on NigelBot". The same limits apply across Macs, and the side
+conversation lives on the familiar's home Mac, so the asking Mac's chat and Handoffs page name it
+without opening it. If that Mac is offline, the request fails at once.
 
 Grimoire refuses a question or message when:
 

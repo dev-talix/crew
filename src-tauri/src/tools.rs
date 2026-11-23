@@ -5,6 +5,7 @@
 
 use crate::approvals::{self, Approvals, Decision};
 use crate::db::{Agent, CheckWhen, Db, StepCheck, WorkflowStep};
+use crate::link::Linked;
 use crate::vault::{self, Kind, SecretStore};
 use crate::{inbox, ledger, memory, themes, workflows};
 use serde::Deserialize;
@@ -55,7 +56,7 @@ pub fn definitions() -> Value {
     let mut list = json!([
         {
             "name": "list_familiars",
-            "description": "List the familiars in Grimoire with their ids, names, providers, and models. Use an id or name in create_spell.",
+            "description": "List the familiars in Grimoire with their ids, names, providers, and models, then the familiars on the person's linked Macs with their Mac and whether it's online. Use an id or name in create_spell (familiars on this Mac only), ask_familiar, or message_familiar. For a familiar on a linked Mac, use its id, or \"Name on Mac\" when the name alone matches more than one.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -142,7 +143,7 @@ pub fn definitions() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "familiar": { "type": "string", "description": "Familiar id or exact name, from list_familiars." },
+                    "familiar": { "type": "string", "description": "Familiar id or exact name, from list_familiars. It may be on a linked Mac: use its id, or \"Name on Mac\" when the name alone matches more than one." },
                     "message": { "type": "string", "description": "What to ask or ask it to do." },
                     "thread": { "type": "string", "description": "Optional. The id of a conversation you started with this familiar, to follow up in it. Leave out to start a new one." }
                 },
@@ -155,7 +156,7 @@ pub fn definitions() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "familiar": { "type": "string", "description": "Familiar id or exact name, from list_familiars." },
+                    "familiar": { "type": "string", "description": "Familiar id or exact name, from list_familiars. It may be on a linked Mac: use its id, or \"Name on Mac\" when the name alone matches more than one." },
                     "message": { "type": "string", "description": "What to tell it or ask it to do." },
                     "thread": { "type": "string", "description": "Optional. The id of a conversation you started with this familiar, to add to it. Leave out to start a new one." }
                 },
@@ -299,21 +300,8 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
     let invalid = |e: serde_json::Error| format!("Invalid arguments: {e}");
     let (text, changed) = match tool {
         "list_familiars" => {
-            let covens = crate::covens::list(db)?;
-            let list: Vec<Value> = agents
-                .iter()
-                .map(|a| {
-                    json!({
-                        "id": a.id,
-                        "name": a.name,
-                        "provider": a.provider,
-                        "model": a.active_model.as_deref().or(a.model.as_deref()).unwrap_or("default"),
-                        "coven": a.coven_id.as_deref().and_then(|id| covens.iter().find(|c| c.id == id)).map(|c| c.name.clone()),
-                        "you": a.id == caller,
-                    })
-                })
-                .collect();
-            (pretty(&list), None)
+            let linked = crate::link::current().map(|l| l.linked()).unwrap_or_default();
+            (pretty(&familiars_list(db, &agents, &linked, caller)?), None)
         }
         "list_spells" => {
             let list: Vec<Value> = db
@@ -451,6 +439,74 @@ pub(crate) fn resolve_agent<'a>(agents: &'a [Agent], wanted: &str) -> Result<&'a
         [] => Err(format!("No familiar is called \"{wanted}\". Use list_familiars to see who exists.")),
         _ => Err(format!("More than one familiar is called \"{wanted}\". Use its id instead.")),
     }
+}
+
+/// A familiar picked for `ask_familiar` or `message_familiar`.
+#[derive(Debug)]
+pub(crate) enum Found<'a> {
+    Here(&'a Agent),
+    Away(&'a Linked),
+}
+
+/// Finds a familiar here or on a linked Mac by id or name. A name on its own must be unambiguous
+/// across Macs; "Name on Mac" picks one Mac's, with `this_mac` naming this one.
+pub(crate) fn resolve_familiar<'a>(agents: &'a [Agent], linked: &'a [Linked], this_mac: Option<&str>, wanted: &str) -> Result<Found<'a>, String> {
+    let wanted = wanted.trim();
+    if let Some(agent) = agents.iter().find(|a| a.id == wanted) {
+        return Ok(Found::Here(agent));
+    }
+    if let Some(familiar) = linked.iter().find(|f| f.id == wanted) {
+        return Ok(Found::Away(familiar));
+    }
+    let named = |name: &str, mac: Option<&str>| -> Vec<Found<'a>> {
+        let on = |home: Option<&str>| mac.is_none_or(|m| home.is_some_and(|h| h.eq_ignore_ascii_case(m)));
+        let here = agents.iter().filter(|a| a.name.eq_ignore_ascii_case(name) && on(this_mac)).map(Found::Here);
+        let away = linked.iter().filter(|f| f.name.eq_ignore_ascii_case(name) && on(Some(&f.mac))).map(Found::Away);
+        here.chain(away).collect()
+    };
+    let mut found = named(wanted, None);
+    if found.is_empty() {
+        // "Scribe on NigelBot": the last " on " splits the name from its Mac. Lowercasing ASCII keeps
+        // every byte where it was.
+        if let Some(at) = wanted.to_ascii_lowercase().rfind(" on ") {
+            found = named(wanted[..at].trim(), Some(wanted[at + 4..].trim()));
+        }
+    }
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        0 => Err(format!("No familiar is called \"{wanted}\". Use list_familiars to see who exists.")),
+        _ => Err(format!(
+            "More than one familiar is called \"{wanted}\". Use its id from list_familiars, or add its Mac, like \"{wanted} on {}\".",
+            found.iter().find_map(|f| match f { Found::Away(f) => Some(f.mac.as_str()), Found::Here(_) => None }).or(this_mac).unwrap_or("Mac")
+        )),
+    }
+}
+
+/// `list_familiars`: this Mac's familiars, then every linked Mac's, online or not.
+fn familiars_list(db: &Db, agents: &[Agent], linked: &[Linked], caller: &str) -> Result<Vec<Value>, String> {
+    let covens = crate::covens::list(db)?;
+    let here = agents.iter().map(|a| {
+        json!({
+            "id": a.id,
+            "name": a.name,
+            "provider": a.provider,
+            "model": a.active_model.as_deref().or(a.model.as_deref()).unwrap_or("default"),
+            "coven": a.coven_id.as_deref().and_then(|id| covens.iter().find(|c| c.id == id)).map(|c| c.name.clone()),
+            "you": a.id == caller,
+        })
+    });
+    let away = linked.iter().map(|f| {
+        json!({
+            "id": f.id,
+            "name": f.name,
+            "provider": f.provider,
+            "model": f.model.as_deref().unwrap_or("default"),
+            "mac": f.mac,
+            "where": if f.online { format!("on {}", f.mac) } else { format!("on {}, which is offline", f.mac) },
+            "online": f.online,
+        })
+    });
+    Ok(here.chain(away).collect())
 }
 
 fn pretty(value: &impl serde::Serialize) -> String {
@@ -727,6 +783,58 @@ mod tests {
         assert_eq!(list[0]["steps"][0]["familiar"], "Writer");
         assert_eq!(list[0]["createdBy"], Value::Null);
         assert!(call(&db, &dir, "w1", "delete_everything", json!({})).is_err());
+    }
+
+    fn linked(peer: &str, agent: &str, name: &str, mac: &str, online: bool) -> Linked {
+        Linked {
+            id: crate::link::remote_id(peer, agent),
+            peer: peer.into(),
+            agent: agent.into(),
+            name: name.into(),
+            mac: mac.into(),
+            online,
+            provider: Some("claude".into()),
+            model: None,
+        }
+    }
+
+    #[test]
+    fn lists_familiars_on_linked_macs_online_or_not() {
+        let (db, _) = setup();
+        let agents = db.list_agents().unwrap();
+        let away = [linked("m1", "s1", "Scribe", "NigelBot", true), linked("m2", "s2", "Critic", "Air", false)];
+        let list = familiars_list(&db, &agents, &away, "w1").unwrap();
+        assert_eq!(list.len(), 4);
+        assert_eq!(list[2]["id"], "peer:m1:s1");
+        assert_eq!((list[2]["name"].as_str(), list[2]["where"].as_str()), (Some("Scribe"), Some("on NigelBot")));
+        assert_eq!((list[3]["where"].as_str(), list[3]["online"].as_bool()), (Some("on Air, which is offline"), Some(false)));
+        assert!(list[0].get("mac").is_none(), "this Mac's familiars have no Mac");
+    }
+
+    #[test]
+    fn resolves_familiars_on_linked_macs_by_id_name_or_name_on_mac() {
+        let (db, _) = setup();
+        let agents = db.list_agents().unwrap();
+        let away = [linked("m1", "s1", "Scribe", "NigelBot", true), linked("m2", "s2", "Scribe", "Air", true), linked("m1", "c1", "Critic", "NigelBot", false)];
+        let id = |found: Found| match found {
+            Found::Here(a) => a.id.clone(),
+            Found::Away(f) => f.id.clone(),
+        };
+        let pick = |wanted: &str| resolve_familiar(&agents, &away, Some("nanmbp"), wanted).map(id);
+        assert_eq!(pick("critic").unwrap(), "peer:m1:c1", "a name alone works when it's the only one");
+        assert_eq!(pick("peer:m2:s2").unwrap(), "peer:m2:s2");
+        assert_eq!(pick("Scribe on nigelbot").unwrap(), "peer:m1:s1");
+        assert_eq!(pick(" Scribe on Air ").unwrap(), "peer:m2:s2");
+        assert_eq!(pick("Writer").unwrap(), "w1");
+        assert_eq!(pick("Writer on nanmbp").unwrap(), "w1", "this Mac's name works too");
+        let err = pick("Scribe").unwrap_err();
+        assert!(err.contains("More than one familiar is called \"Scribe\"") && err.contains("\"Scribe on NigelBot\""), "{err}");
+        assert!(pick("Writer on NigelBot").unwrap_err().contains("No familiar is called"));
+        assert!(pick("Scribe on Studio").unwrap_err().contains("No familiar is called"));
+        // A familiar here and one on a linked Mac with the same name need the Mac.
+        let twin = [linked("m1", "w9", "Writer", "NigelBot", true)];
+        assert!(resolve_familiar(&agents, &twin, Some("nanmbp"), "Writer").is_err());
+        assert_eq!(resolve_familiar(&agents, &twin, Some("nanmbp"), "writer on NIGELBOT").map(id).unwrap(), "peer:m1:w9");
     }
 
     #[test]

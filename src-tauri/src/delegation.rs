@@ -6,13 +6,15 @@
 
 use crate::approvals::{self, Decision};
 use crate::db::{Agent, Db};
+use crate::link::{BoxFuture, Link, Linked};
 use crate::runtime::TurnOutcome;
 use crate::side::{self, SideChat};
+use crate::tools::Found;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tauri::Emitter;
 
@@ -54,23 +56,26 @@ pub fn save(db: &Db, settings: Settings) -> Result<Settings, String> {
     Ok(settings)
 }
 
-/// Questions in flight, as (asker, target) pairs: the asker is waiting on the target.
+/// Questions in flight, as (asker, target) pairs: the asker is waiting on the target. A familiar on a
+/// linked Mac goes by its `peer:` id, so a chain that crosses Macs counts here too.
 #[derive(Default)]
 pub struct Chains {
     waits: Mutex<Vec<(String, String)>>,
 }
 
-/// Holds one question in `Chains` until it is dropped.
+/// Holds one question in `Chains`, with the chain that led to it, until it is dropped.
 pub struct Wait<'a> {
     chains: &'a Chains,
-    pair: (String, String),
+    pairs: Vec<(String, String)>,
 }
 
 impl Drop for Wait<'_> {
     fn drop(&mut self) {
         let mut waits = self.chains.waits.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(at) = waits.iter().position(|w| *w == self.pair) {
-            waits.remove(at);
+        for pair in &self.pairs {
+            if let Some(at) = waits.iter().position(|w| w == pair) {
+                waits.remove(at);
+            }
         }
     }
 }
@@ -78,24 +83,53 @@ impl Drop for Wait<'_> {
 impl Chains {
     /// Records that `asker` waits on `target`, unless that closes a loop or makes the chain too long.
     pub fn begin(&self, asker: &Agent, target: &Agent) -> Result<Wait<'_>, String> {
+        self.begin_chain(vec![asker.id.clone()], &target.id, &target.name)
+    }
+
+    /// Records a question to `target` at the end of `chain`, the familiars waiting on each other in
+    /// order with the asker last, unless that closes a loop or makes the chain too long. A chain from
+    /// a linked Mac arrives whole, since this Mac never saw its first questions.
+    pub fn begin_chain(&self, chain: Vec<String>, target_id: &str, target_name: &str) -> Result<Wait<'_>, String> {
         let mut waits = self.waits.lock().unwrap_or_else(|e| e.into_inner());
-        if reaches(&waits, &target.id, &asker.id) {
+        let Some(first) = chain.first() else { return Err("Nobody is asking.".into()) };
+        if chain.iter().any(|asker| asker == target_id || reaches(&waits, target_id, asker)) {
             return Err(format!(
-                "{} is waiting on you, directly or through other familiars, so it can't answer until you do. \
-                 Asking it would leave you both waiting. Reply with what you have instead.",
-                target.name
+                "{target_name} is waiting on you, directly or through other familiars, so it can't answer until you do. \
+                 Asking it would leave you both waiting. Reply with what you have instead."
             ));
         }
-        if depth_into(&waits, &asker.id, 0) + 1 > MAX_DEPTH {
+        if depth_into(&waits, first, 0) + chain.len() > MAX_DEPTH {
             return Err(format!(
                 "This would be more than {MAX_DEPTH} familiars asking each other in a row, which is Grimoire's limit. \
                  Reply with what you have instead."
             ));
         }
-        let pair = (asker.id.clone(), target.id.clone());
-        waits.push(pair.clone());
-        Ok(Wait { chains: self, pair })
+        let mut pairs: Vec<(String, String)> = chain.windows(2).map(|w| (w[0].clone(), w[1].clone())).collect();
+        pairs.push((chain[chain.len() - 1].clone(), target_id.to_string()));
+        waits.extend(pairs.iter().cloned());
+        Ok(Wait { chains: self, pairs })
     }
+
+    /// The longest chain of familiars waiting on each other that ends at `agent`, first asker first,
+    /// `agent` last.
+    fn chain_to(&self, agent: &str) -> Vec<String> {
+        let waits = self.waits.lock().unwrap_or_else(|e| e.into_inner());
+        let mut chain = path_into(&waits, agent, 0);
+        chain.push(agent.to_string());
+        chain
+    }
+}
+
+fn path_into(waits: &[(String, String)], agent: &str, hops: usize) -> Vec<String> {
+    if hops > MAX_DEPTH {
+        return Vec::new();
+    }
+    let paths = waits.iter().filter(|(_, t)| t == agent).map(|(a, _)| {
+        let mut path = path_into(waits, a, hops + 1);
+        path.push(a.clone());
+        path
+    });
+    paths.max_by_key(Vec::len).unwrap_or_default()
 }
 
 /// Whether `from` waits on `to`, directly or through others.
@@ -178,7 +212,25 @@ pub struct Outgoing {
     pub thread: Option<SideChat>,
 }
 
-fn prepare(db: &Db, caller: &str, arguments: Value) -> Result<Outgoing, String> {
+/// A message to a familiar on a linked Mac that passed this Mac's checks.
+#[derive(Debug, Clone)]
+pub struct AwayOut {
+    pub asker: Agent,
+    pub target: Linked,
+    pub message: String,
+    /// The home Mac's conversation it follows up on, or None to start a new one.
+    pub thread: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum Prepared {
+    Here(Box<Outgoing>),
+    Away(Box<AwayOut>),
+}
+
+/// Checks a request from `caller` to a familiar here or on a linked Mac (`linked`). `this_mac` is
+/// this Mac's name, for "Name on Mac".
+pub fn prepare(db: &Db, linked: &[Linked], this_mac: Option<&str>, caller: &str, arguments: Value) -> Result<Prepared, String> {
     let request: Request = serde_json::from_value(arguments).map_err(|e| format!("Invalid arguments: {e}"))?;
     let message = request.message.trim().to_string();
     if message.is_empty() {
@@ -186,20 +238,63 @@ fn prepare(db: &Db, caller: &str, arguments: Value) -> Result<Outgoing, String> 
     }
     let agents = db.list_agents()?;
     let asker = agents.iter().find(|a| a.id == caller).ok_or("Only a familiar can ask another familiar.")?;
-    let target = crate::tools::resolve_agent(&agents, &request.familiar)?;
-    if target.id == asker.id {
-        return Err("You can't ask yourself. Use list_familiars to find another familiar.".into());
+    let thread = request.thread.as_deref().map(str::trim).filter(|t| !t.is_empty());
+    match crate::tools::resolve_familiar(&agents, linked, this_mac, &request.familiar)? {
+        Found::Here(target) => {
+            if target.id == asker.id {
+                return Err("You can't ask yourself. Use list_familiars to find another familiar.".into());
+            }
+            allowed(load(db).scope, asker, target)?;
+            let thread = match thread {
+                Some(thread) => Some(side::follow_up(db, thread, asker, target)?),
+                None => None,
+            };
+            Ok(Prepared::Here(Box::new(Outgoing { asker: asker.clone(), target: target.clone(), message, thread })))
+        }
+        Found::Away(target) => {
+            allowed_away(load(db).scope, target)?;
+            if let Some(thread) = thread {
+                let started = crate::handoffs::away_thread(db, thread)?;
+                if started != Some((target.peer.clone(), asker.id.clone(), target.agent.clone())) {
+                    return Err(format!(
+                        "That conversation isn't one you started with {}. Leave thread out to start a new one.",
+                        target.label()
+                    ));
+                }
+            }
+            Ok(Prepared::Away(Box::new(AwayOut { asker: asker.clone(), target: target.clone(), message, thread: thread.map(String::from) })))
+        }
     }
-    allowed(load(db).scope, asker, target)?;
-    let thread = match request.thread.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        Some(thread) => Some(side::follow_up(db, thread, asker, target)?),
-        None => None,
-    };
-    Ok(Outgoing { asker: asker.clone(), target: target.clone(), message, thread })
 }
 
-/// Asks the person first when the settings say so.
-async fn approved<Approve, Approved>(db: &Db, out: &Outgoing, verb: &str, approve: Approve) -> Result<(), String>
+/// Whether `scope` lets a familiar here ask one on a linked Mac. A coven never spans Macs.
+fn allowed_away(scope: Scope, target: &Linked) -> Result<(), String> {
+    match scope {
+        Scope::Anyone => Ok(()),
+        Scope::Nobody => Err("Familiars can't ask each other right now: the person turned it off in Settings, Permissions.".into()),
+        Scope::Coven => Err(format!("You can only ask familiars in your own coven, and {} isn't in yours.", target.label())),
+    }
+}
+
+/// Only for the checks that resolve a familiar on this Mac.
+#[cfg(test)]
+fn here(prepared: Prepared) -> Result<Outgoing, String> {
+    match prepared {
+        Prepared::Here(out) => Ok(*out),
+        Prepared::Away(out) => Err(format!("{} lives on another Mac.", out.target.label())),
+    }
+}
+
+/// Asks the person first when the settings say so. `deny` records the request a denial stops.
+async fn approved<Approve, Approved>(
+    db: &Db,
+    asker: &Agent,
+    target: &str,
+    message: &str,
+    verb: &str,
+    approve: Approve,
+    deny: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String>
 where
     Approve: FnOnce(approvals::Request) -> Approved,
     Approved: Future<Output = Decision>,
@@ -209,16 +304,16 @@ where
     }
     let request = approvals::Request {
         id: uuid::Uuid::new_v4().to_string(),
-        agent_id: out.asker.id.clone(),
+        agent_id: asker.id.clone(),
         kind: "familiar",
-        title: format!("{} wants to {verb} {}", out.asker.name, out.target.name),
-        detail: preview(&out.message),
+        title: format!("{} wants to {verb} {target}", asker.name),
+        detail: preview(message),
         can_remember: false,
     };
     match approve(request).await {
         Decision::Deny => {
-            record_denial(db, out, verb)?;
-            Err(format!("The person didn't let you {verb} {}. Carry on without it.", out.target.name))
+            deny()?;
+            Err(format!("The person didn't let you {verb} {target}. Carry on without it."))
         }
         _ => Ok(()),
     }
@@ -245,6 +340,7 @@ fn follow_up_note(chat: &str, name: &str) -> String {
 /// Puts `caller`'s question to another familiar in a side conversation and returns its reply.
 /// `approve` asks the person when the settings say so, and `converse` opens the conversation and
 /// runs the exchange, returning the conversation's id and how the turn ended.
+#[cfg(test)]
 pub async fn ask<Approve, Approved, Converse, Conversed>(
     db: &Db,
     chains: &Chains,
@@ -260,27 +356,60 @@ where
     Converse: FnOnce(Outgoing) -> Conversed,
     Conversed: Future<Output = Result<(String, TurnOutcome), String>>,
 {
-    let out = prepare(db, caller, arguments)?;
+    let out = here(prepare(db, &[], None, caller, arguments)?)?;
+    ask_here(db, chains, out, timeout, approve, converse).await
+}
+
+async fn ask_here<Approve, Approved, Converse, Conversed>(
+    db: &Db,
+    chains: &Chains,
+    out: Outgoing,
+    timeout: Duration,
+    approve: Approve,
+    converse: Converse,
+) -> Result<String, String>
+where
+    Approve: FnOnce(approvals::Request) -> Approved,
+    Approved: Future<Output = Decision>,
+    Converse: FnOnce(Outgoing) -> Conversed,
+    Conversed: Future<Output = Result<(String, TurnOutcome), String>>,
+{
     let _wait = chains.begin(&out.asker, &out.target)?;
-    approved(db, &out, "ask", approve).await?;
+    approved(db, &out.asker, &out.target.name, &out.message, "ask", approve, || record_denial(db, &out, "ask")).await?;
     let name = out.target.name.clone();
     match tokio::time::timeout(timeout, converse(out)).await {
-        Ok(Ok((chat, TurnOutcome::Done(reply)))) => {
-            let reply = if reply.trim().is_empty() { format!("{name} finished without writing a reply.") } else { reply };
-            Ok(format!("{reply}\n\n{}", follow_up_note(&chat, &name)))
-        }
-        Ok(Ok((_, TurnOutcome::Stopped))) => Err(format!("{name} was stopped before it replied.")),
-        Ok(Ok((_, TurnOutcome::Failed(reason)))) => Err(format!("{name} couldn't reply: {reason}")),
+        Ok(Ok((chat, outcome))) => answer(&name, &chat, outcome),
         Ok(Err(e)) => Err(e),
-        Err(_) => Err(format!(
-            "{name} didn't reply within {} minutes. It's still working, and its reply will come to you as a new message when it's done.",
-            timeout.as_secs() / 60
-        )),
+        Err(_) => Err(late(&name, timeout)),
     }
+}
+
+/// What `ask_familiar` returns once the other familiar's turn ends.
+fn answer(name: &str, chat: &str, outcome: TurnOutcome) -> Result<String, String> {
+    match outcome {
+        TurnOutcome::Done(reply) => {
+            let reply = if reply.trim().is_empty() { format!("{name} finished without writing a reply.") } else { reply };
+            Ok(format!("{reply}\n\n{}", follow_up_note(chat, name)))
+        }
+        TurnOutcome::Stopped => Err(format!("{name} was stopped before it replied.")),
+        TurnOutcome::Failed(reason) => Err(format!("{name} couldn't reply: {reason}")),
+    }
+}
+
+fn late(name: &str, timeout: Duration) -> String {
+    format!(
+        "{name} didn't reply within {} minutes. It's still working, and its reply will come to you as a new message when it's done.",
+        timeout.as_secs() / 60
+    )
+}
+
+fn sent_note(name: &str, chat: &str) -> String {
+    format!("Sent to {name}. Its reply will come to you as a new message when it's done, so carry on with your work now.\n\n{}", follow_up_note(chat, name))
 }
 
 /// Sends `caller`'s message to another familiar and returns right away. `start` opens the
 /// conversation, sets the exchange going in the background, and returns the conversation's id.
+#[cfg(test)]
 pub async fn message<Approve, Approved, Start>(
     db: &Db,
     limiter: &Limiter,
@@ -295,15 +424,21 @@ where
     Approved: Future<Output = Decision>,
     Start: FnOnce(Outgoing) -> Result<String, String>,
 {
-    let out = prepare(db, caller, arguments)?;
+    let out = here(prepare(db, &[], None, caller, arguments)?)?;
+    message_here(db, limiter, out, now, approve, start).await
+}
+
+async fn message_here<Approve, Approved, Start>(db: &Db, limiter: &Limiter, out: Outgoing, now: Instant, approve: Approve, start: Start) -> Result<String, String>
+where
+    Approve: FnOnce(approvals::Request) -> Approved,
+    Approved: Future<Output = Decision>,
+    Start: FnOnce(Outgoing) -> Result<String, String>,
+{
     limiter.allow(&out.asker.id, now)?;
-    approved(db, &out, "message", approve).await?;
+    approved(db, &out.asker, &out.target.name, &out.message, "message", approve, || record_denial(db, &out, "message")).await?;
     let name = out.target.name.clone();
     let chat = start(out)?;
-    Ok(format!(
-        "Sent to {name}. Its reply will come to you as a new message when it's done, so carry on with your work now.\n\n{}",
-        follow_up_note(&chat, &name)
-    ))
+    Ok(sent_note(&name, &chat))
 }
 
 /// The message that brings a reply back to the familiar who sent `message_familiar`.
@@ -325,8 +460,9 @@ fn preview(message: &str) -> String {
     }
 }
 
-static CHAINS: LazyLock<Chains> = LazyLock::new(Chains::default);
+pub(crate) static CHAINS: LazyLock<Chains> = LazyLock::new(Chains::default);
 static LIMITER: LazyLock<Limiter> = LazyLock::new(Limiter::default);
+pub(crate) static WAITERS: LazyLock<Waiters> = LazyLock::new(Waiters::default);
 
 /// Opens the conversation, a new one or the one being followed up, and links it from the asker's
 /// chat, or from the side conversation the asker is answering in (`lane`).
@@ -344,11 +480,24 @@ fn open(ctx: &crate::tools::Context, lane: Option<&str>, out: &Outgoing, verb: &
 }
 
 /// Brings a reply back to the familiar who sent it, in the chat it sent from (`home`); see `Runtime::deliver`.
-fn deliver(runtime: &std::sync::Arc<crate::runtime::Runtime>, asker_id: &str, home: Option<String>, name: &str, chat: &str, outcome: TurnOutcome) {
+fn deliver(runtime: &Arc<crate::runtime::Runtime>, asker_id: &str, home: Option<String>, name: &str, chat: &str, outcome: TurnOutcome) {
     runtime.deliver(asker_id, home, reply_text(name, chat, outcome), &format!("{REPLY_SOURCE}{name}"));
 }
 
-/// Runs `ask_familiar` for real: through the approval prompt and a side conversation.
+/// Checks a request against this Mac's familiars and every linked Mac's.
+fn prepare_here_or_away(ctx: &crate::tools::Context, caller: &str, arguments: Value) -> Result<(Prepared, Option<Arc<Link>>), String> {
+    let link = crate::link::current();
+    let linked = link.as_ref().map(|l| l.linked()).unwrap_or_default();
+    let prepared = prepare(&ctx.db, &linked, link.as_ref().map(|l| l.name()), caller, arguments)?;
+    Ok((prepared, link))
+}
+
+fn reach<'a>(ctx: &'a crate::tools::Context, link: &'a Link, familiars: &'a AppFamiliars) -> Reach<'a> {
+    Reach { db: &ctx.db, chains: &CHAINS, limiter: &LIMITER, waiters: &WAITERS, link, familiars }
+}
+
+/// Runs `ask_familiar` for real: through the approval prompt and a side conversation, here or on the
+/// familiar's home Mac.
 pub async fn run(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, arguments: Value) -> Result<String, String> {
     let approve = |request| ctx.approvals.ask(&ctx.app, request);
     let converse = |out: Outgoing| async move {
@@ -367,7 +516,16 @@ pub async fn run(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, 
         let outcome = rx.await.unwrap_or_else(|_| TurnOutcome::Failed("The conversation ended unexpectedly.".into()));
         Ok((chat, outcome))
     };
-    let result = ask(&ctx.db, &CHAINS, caller, arguments, TIMEOUT, approve, converse).await;
+    let result = match prepare_here_or_away(ctx, caller, arguments) {
+        Ok((Prepared::Here(out), _)) => ask_here(&ctx.db, &CHAINS, *out, TIMEOUT, approve, converse).await,
+        Ok((Prepared::Away(out), Some(link))) => {
+            let familiars = AppFamiliars { app: ctx.app.clone(), db: ctx.db.clone(), runtime: ctx.runtime.clone() };
+            let home = crate::chats::current(&ctx.db, &out.asker.id)?;
+            away(&reach(ctx, &link, &familiars), *out, Kind::Ask, lane, home, TIMEOUT, Instant::now(), approve).await
+        }
+        Ok((Prepared::Away(_), None)) => Err("Linked Macs aren't running.".into()),
+        Err(e) => Err(e),
+    };
     // A new request or a denial changes the handoffs list.
     let _ = ctx.app.emit(crate::handoffs::CHANGED, ());
     result
@@ -387,22 +545,353 @@ pub async fn run_message(ctx: &crate::tools::Context, caller: &str, lane: Option
         });
         Ok(chat)
     };
-    let result = message(&ctx.db, &LIMITER, caller, arguments, Instant::now(), approve, start).await;
+    let result = match prepare_here_or_away(ctx, caller, arguments) {
+        Ok((Prepared::Here(out), _)) => message_here(&ctx.db, &LIMITER, *out, Instant::now(), approve, start).await,
+        Ok((Prepared::Away(out), Some(link))) => {
+            let familiars = AppFamiliars { app: ctx.app.clone(), db: ctx.db.clone(), runtime: ctx.runtime.clone() };
+            let home = crate::chats::current(&ctx.db, &out.asker.id)?;
+            away(&reach(ctx, &link, &familiars), *out, Kind::Message, lane, home, TIMEOUT, Instant::now(), approve).await
+        }
+        Ok((Prepared::Away(_), None)) => Err("Linked Macs aren't running.".into()),
+        Err(e) => Err(e),
+    };
     let _ = ctx.app.emit(crate::handoffs::CHANGED, ());
     result
+}
+
+// ---------- Familiars on linked Macs ----------
+//
+// A familiar here asks one on a linked Mac: this Mac runs its own checks (the limiter, the who-can-ask
+// setting, the approval prompt, loops and chain depth), then posts the request to the familiar's home
+// Mac. That Mac runs the side conversation and posts the reply back. Ids that cross Macs name the Mac
+// too, as `<install id>:<familiar id>`.
+
+/// The most bytes in a message from a linked Mac.
+const MAX_INCOMING: usize = 200_000;
+
+/// What a handoff between Macs needs from the app: the runtime and the windows, or a fake in tests.
+pub trait Familiars: Send + Sync {
+    /// Runs one exchange in a side conversation; see `Runtime::side_turn`.
+    fn side_turn(&self, chat_id: &str, handoff: i64, asker: &str, message: &str) -> BoxFuture<'static, TurnOutcome>;
+    /// Brings a reply back as a new message; see `Runtime::deliver`.
+    fn deliver(&self, asker_id: &str, home: Option<String>, text: String, source: &str);
+    /// Adds the row that links a familiar's chat to a conversation; see `side::link`.
+    fn link_row(&self, lane: Option<&str>, agent_id: &str, label: &str, source: &str) -> Result<(), String>;
+    /// Tells windows the handoffs list changed.
+    fn changed(&self);
+}
+
+pub struct AppFamiliars {
+    pub app: tauri::AppHandle,
+    pub db: Arc<Db>,
+    pub runtime: Arc<crate::runtime::Runtime>,
+}
+
+impl Familiars for AppFamiliars {
+    fn side_turn(&self, chat_id: &str, handoff: i64, asker: &str, message: &str) -> BoxFuture<'static, TurnOutcome> {
+        let (runtime, chat, asker, message) = (self.runtime.clone(), chat_id.to_string(), asker.to_string(), message.to_string());
+        Box::pin(async move { runtime.side_turn(&chat, handoff, &asker, &message).await })
+    }
+
+    fn deliver(&self, asker_id: &str, home: Option<String>, text: String, source: &str) {
+        self.runtime.deliver(asker_id, home, text, source);
+    }
+
+    fn link_row(&self, lane: Option<&str>, agent_id: &str, label: &str, source: &str) -> Result<(), String> {
+        side::link(&self.app, &self.db, lane, agent_id, label, source)
+    }
+
+    fn changed(&self) {
+        let _ = self.app.emit(crate::handoffs::CHANGED, ());
+    }
+}
+
+/// Someone waiting for a reply from a linked Mac.
+struct Waiter {
+    /// An `ask_familiar` call still waiting. None for `message_familiar`.
+    reply: Option<tokio::sync::oneshot::Sender<TurnOutcome>>,
+    /// The chat the asker sent from; see `Runtime::deliver`.
+    home: Option<String>,
+}
+
+/// Requests sent to linked Macs and still waiting for a reply, by their row in the handoffs list.
+#[derive(Default)]
+pub struct Waiters(Mutex<HashMap<i64, Waiter>>);
+
+impl Waiters {
+    fn add(&self, id: i64, waiter: Waiter) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).insert(id, waiter);
+    }
+
+    fn take(&self, id: i64) -> Option<Waiter> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&id)
+    }
+}
+
+/// What a request to a linked Mac goes through.
+pub struct Reach<'a> {
+    pub db: &'a Db,
+    pub chains: &'a Chains,
+    pub limiter: &'a Limiter,
+    pub waiters: &'a Waiters,
+    pub link: &'a Link,
+    pub familiars: &'a dyn Familiars,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Kind {
+    Ask,
+    Message,
+}
+
+impl Kind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Kind::Ask => "ask",
+            Kind::Message => "message",
+        }
+    }
+}
+
+/// A familiar id as another Mac understands it: `<install id>:<familiar id>`. `here` is this Mac's.
+fn global_id(here: &str, id: &str) -> String {
+    match crate::link::parse_remote(id) {
+        Some((peer, agent)) => format!("{peer}:{agent}"),
+        None => format!("{here}:{id}"),
+    }
+}
+
+/// A familiar id from another Mac as this Mac names it, or None when it's malformed.
+fn local_id(here: &str, id: &str) -> Option<String> {
+    let (mac, agent) = id.split_once(':')?;
+    if !crate::link::valid_id(mac) || !crate::link::valid_id(agent) {
+        return None;
+    }
+    Some(if mac == here { agent.to_string() } else { crate::link::remote_id(mac, agent) })
+}
+
+/// Sends `out` to its familiar's home Mac, after this Mac's checks. An ask waits up to `timeout` for
+/// the reply; a message returns once the home Mac has it. `home` is the chat the asker sends from.
+#[allow(clippy::too_many_arguments)]
+pub async fn away<Approve, Approved>(
+    reach: &Reach<'_>,
+    out: AwayOut,
+    kind: Kind,
+    lane: Option<&str>,
+    home: Option<String>,
+    timeout: Duration,
+    now: Instant,
+    approve: Approve,
+) -> Result<String, String>
+where
+    Approve: FnOnce(approvals::Request) -> Approved,
+    Approved: Future<Output = Decision>,
+{
+    let (db, target) = (reach.db, &out.target);
+    let label = target.label();
+    if !target.online {
+        return Err(format!("{} is offline, so {} can't be reached right now.", target.mac, target.name));
+    }
+    let _wait = match kind {
+        Kind::Ask => Some(reach.chains.begin_chain(vec![out.asker.id.clone()], &target.id, &label)?),
+        Kind::Message => {
+            reach.limiter.allow(&out.asker.id, now)?;
+            None
+        }
+    };
+    let row = crate::handoffs::Away {
+        thread: out.thread.as_deref(),
+        peer: &target.peer,
+        asker_id: &out.asker.id,
+        target_id: &target.agent,
+        target_name: &target.name,
+    };
+    let deny = || crate::handoffs::record_away(db, &row, kind.as_str(), &out.message, crate::handoffs::Status::Failed).map(|_| ());
+    approved(db, &out.asker, &label, &out.message, kind.as_str(), approve, deny).await?;
+    let here = reach.link.install_id();
+    let chain: Vec<String> = reach.chains.chain_to(&out.asker.id).iter().map(|id| global_id(here, id)).collect();
+    let id = crate::handoffs::record_away(db, &row, kind.as_str(), &out.message, crate::handoffs::Status::Waiting)?;
+    reach.familiars.changed();
+    let (reply, wait) = match kind {
+        Kind::Ask => {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            (Some(tx), Some(rx))
+        }
+        Kind::Message => (None, None),
+    };
+    // Waiting before the request goes, since the reply may come back before the request returns.
+    reach.waiters.add(id, Waiter { reply, home });
+    let body = json!({
+        "targetId": target.agent,
+        "asker": { "id": out.asker.id, "name": out.asker.name, "mac": reach.link.name() },
+        "message": out.message,
+        "kind": kind.as_str(),
+        "thread": out.thread,
+        "depth": chain.len(),
+        "chainIds": chain,
+        "requestId": id,
+    });
+    let thread = match reach.link.hand_off(target, &body).await {
+        Ok(thread) => thread,
+        Err(e) => {
+            reach.waiters.take(id);
+            crate::handoffs::set(db, id, crate::handoffs::Status::Failed)?;
+            reach.familiars.changed();
+            return Err(e);
+        }
+    };
+    // The request is out, so its reply still comes back if saving here fails.
+    let _ = crate::handoffs::set_thread(db, id, &thread);
+    let verb = if kind == Kind::Ask { "Asked" } else { "Messaged" };
+    // The row points at a thread on the other Mac, so windows here show it without opening it.
+    let _ = reach.familiars.link_row(lane, &out.asker.id, &format!("{verb} {label}"), &crate::link::remote_id(&target.peer, &thread));
+    reach.familiars.changed();
+    let Some(wait) = wait else { return Ok(sent_note(&label, &thread)) };
+    match tokio::time::timeout(timeout, wait).await {
+        Ok(Ok(outcome)) => answer(&label, &thread, outcome),
+        Ok(Err(_)) => Err("The conversation ended unexpectedly.".into()),
+        Err(_) => Err(late(&label, timeout)),
+    }
+}
+
+/// `peer` brings back the reply to request `id` from here, in its conversation `thread`. It goes to
+/// the `ask_familiar` call still waiting for it, or else to the asker as a new message. Only the Mac
+/// the request went to can answer it, once.
+pub fn away_reply(db: &Db, waiters: &Waiters, familiars: &dyn Familiars, peer: &str, thread: &str, id: i64, outcome: TurnOutcome) -> Result<(), String> {
+    let sent = crate::handoffs::sent(db, id)?.filter(|s| s.peer == peer && s.thread.as_deref().is_none_or(|t| t == thread));
+    let sent = sent.ok_or("That reply isn't for a request this Mac sent you.")?;
+    if !matches!(sent.status, crate::handoffs::Status::Waiting | crate::handoffs::Status::Accepted) {
+        return Err("That request already has its reply.".into());
+    }
+    crate::handoffs::set(db, id, crate::handoffs::Status::of(&outcome))?;
+    if sent.thread.is_none() {
+        crate::handoffs::set_thread(db, id, thread)?;
+    }
+    familiars.changed();
+    let label = format!("{} on {}", sent.target_name, sent.mac.as_deref().unwrap_or("a linked Mac"));
+    let (home, outcome) = match waiters.take(id) {
+        Some(Waiter { reply: Some(tx), home }) => match tx.send(outcome) {
+            Ok(()) => return Ok(()),
+            Err(outcome) => (home, outcome),
+        },
+        Some(Waiter { reply: None, home }) => (home, outcome),
+        None => (None, outcome),
+    };
+    familiars.deliver(&sent.asker_id, home, reply_text(&label, thread, outcome), &format!("{REPLY_SOURCE}{label}"));
+    Ok(())
+}
+
+/// A request from a familiar on a linked Mac, as `POST /v1/handoffs` carries it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Incoming {
+    /// The familiar here it's for.
+    pub target_id: String,
+    pub asker: RemoteAsker,
+    pub message: String,
+    /// "ask" or "message".
+    pub kind: String,
+    /// A conversation here the same asker started with the same familiar, to follow up in.
+    #[serde(default)]
+    pub thread: Option<String>,
+    /// How many familiars ask in a row with this one, which is `chain_ids`' length.
+    pub depth: usize,
+    /// The familiars waiting on each other that led here, as `<install id>:<familiar id>`, the asker last.
+    pub chain_ids: Vec<String>,
+    /// The request's row in the asking Mac's handoffs list, which the reply names.
+    pub request_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteAsker {
+    /// Its id on the asking Mac.
+    pub id: String,
+    pub name: String,
+    /// The asking Mac's name for itself. Checked, but this Mac names it from its own link record.
+    pub mac: String,
+}
+
+/// Starts the side conversation for a request from a familiar on `peer`, called `mac` here. `here` is
+/// this Mac's install id. It goes through what a request from a familiar here would, apart from the
+/// approval prompt, which the asking Mac shows. The asker stays a familiar on `peer`: it gets no tools,
+/// vault, or anything else here, and the side chat records it as remote. Returns the conversation's
+/// id and its exchange, which holds the chain in `chains` while it runs.
+pub fn incoming(
+    db: &Db,
+    chains: &'static Chains,
+    familiars: Arc<dyn Familiars>,
+    here: &str,
+    peer: &str,
+    mac: &str,
+    request: &Incoming,
+) -> Result<(String, BoxFuture<'static, TurnOutcome>), String> {
+    let message = request.message.trim().to_string();
+    let asker_name = crate::link::clean_mac_name(&request.asker.name);
+    let ids = crate::link::valid_id(&request.asker.id) && crate::link::valid_id(&request.target_id);
+    let (Some(asker_name), true) = (asker_name, ids && crate::link::clean_mac_name(&request.asker.mac).is_some()) else {
+        return Err("Bad handoff.".into());
+    };
+    if message.is_empty() || message.len() > MAX_INCOMING {
+        return Err(format!("A message to another familiar must have text and be under {} KB.", MAX_INCOMING / 1000));
+    }
+    let kind = match request.kind.as_str() {
+        "ask" => Kind::Ask,
+        "message" => Kind::Message,
+        _ => return Err("Bad handoff.".into()),
+    };
+    // The asker is on the Mac that sent this, so it can't speak for a familiar anywhere else.
+    let chain: Option<Vec<String>> = request.chain_ids.iter().take(MAX_DEPTH + 2).map(|id| local_id(here, id)).collect();
+    let asker_id = crate::link::remote_id(peer, &request.asker.id);
+    let chain = chain.filter(|c| c.last() == Some(&asker_id) && c.len() == request.chain_ids.len() && request.depth == c.len());
+    let chain = chain.ok_or("Bad handoff.")?;
+    let target = db.get_agent(&request.target_id)?.ok_or("That familiar no longer exists.")?;
+    let asker = format!("{asker_name} on {mac}");
+    match load(db).scope {
+        Scope::Anyone => {}
+        Scope::Nobody => return Err(format!("{} can't be asked right now: the person turned it off on its Mac, in Settings, Permissions.", target.name)),
+        Scope::Coven => return Err(format!("{} only takes requests from familiars in its own coven, and you aren't in it.", target.name)),
+    }
+    let thread = match request.thread.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(thread) => {
+            let chat = side::get(db, thread)?.filter(|c| c.asker_id == asker_id && c.target_id == target.id);
+            Some(chat.ok_or_else(|| format!("That conversation isn't one you started with {}. Leave thread out to start a new one.", target.name))?)
+        }
+        None => None,
+    };
+    let hold = match kind {
+        Kind::Ask => Some(chains.begin_chain(chain, &target.id, &target.name)?),
+        Kind::Message => None,
+    };
+    let chat = match thread {
+        Some(chat) => chat.id,
+        None => side::create_remote(db, peer, &request.asker.id, &asker_name, &target.id, &message)?.id,
+    };
+    let handoff = crate::handoffs::record(db, &chat, kind.as_str(), &message, crate::handoffs::Status::Waiting)?;
+    familiars.changed();
+    let chat_id = chat.clone();
+    let turn = Box::pin(async move {
+        let _hold = hold;
+        familiars.side_turn(&chat_id, handoff, &asker, &message).await
+    });
+    Ok((chat, turn))
 }
 
 /// Closes side conversations that Grimoire quit in the middle of: each gets an error row, so it no
 /// longer shows as working, and the familiar who started it hears that no reply is coming. The note
 /// waits in its current chat and comes with its next turn, rather than starting a turn as the app
 /// opens. Their requests show as failed in the handoffs list. Helpers' chats are left to
-/// `helpers::interrupt_leftovers`. Run once at startup.
+/// `helpers::interrupt_leftovers`. A familiar on a linked Mac that asked hears nothing; its own Mac
+/// stops waiting when it restarts. Run once at startup.
 pub fn recover(db: &Db) -> Result<usize, String> {
     crate::handoffs::fail_unfinished(db)?;
     let unfinished = side::unfinished(db)?;
     for chat in &unfinished {
         let name = db.get_agent(&chat.target_id)?.map_or_else(|| "The other familiar".to_string(), |a| a.name);
         db.insert_message_in(&chat.id, &chat.target_id, "error", "Grimoire closed before this reply finished.", "done", None)?;
+        if crate::link::is_remote(&chat.asker_id) {
+            continue;
+        }
         let text = reply_text(&name, &chat.id, TurnOutcome::Failed("Grimoire closed before it finished. Ask again if you still need it.".into()));
         crate::runtime::hold(db, &chat.asker_id, None, &text, &format!("{REPLY_SOURCE}{name}"))?;
     }
@@ -664,6 +1153,74 @@ mod tests {
             .unwrap();
         assert_eq!(held, vec![note.text]);
         assert_eq!(recover(&db).unwrap(), 0, "each conversation closes once");
+    }
+
+    #[test]
+    fn a_conversation_cut_off_for_a_familiar_on_a_linked_mac_closes_without_a_note_here() {
+        let (db, _, b, ..) = setup();
+        let cut = side::create_remote(&db, "mac-b", "ada", "Ada", &b.id, "draft it").unwrap();
+        assert_eq!(cut.asker_id, "peer:mac-b:ada", "the asker stays a familiar on its own Mac");
+        assert_eq!(recover(&db).unwrap(), 1);
+        assert_eq!(side::messages(&db, &cut.id).unwrap().pop().unwrap().role, "error");
+        let notes: i64 = db.with(|c| c.query_row("SELECT COUNT(*) FROM pending_notes", [], |r| r.get(0))).unwrap();
+        assert_eq!(notes, 0);
+    }
+
+    fn scribe_on(mac: &str) -> Linked {
+        Linked {
+            id: "peer:m1:s1".into(),
+            peer: "m1".into(),
+            agent: "s1".into(),
+            name: "Scribe".into(),
+            mac: mac.into(),
+            online: true,
+            provider: None,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn a_familiar_on_a_linked_mac_is_never_in_your_coven() {
+        let (db, ..) = setup();
+        // Researcher's coven-mate here is also called Scribe, so the one on NigelBot needs its Mac.
+        let linked = [scribe_on("NigelBot")];
+        let args = || json!({ "familiar": "Scribe on NigelBot", "message": "hi" });
+        assert!(matches!(prepare(&db, &linked, None, "a", args()).unwrap(), Prepared::Away(_)));
+        save(&db, Settings { scope: Scope::Coven, approve: false }).unwrap();
+        let err = prepare(&db, &linked, None, "a", args()).unwrap_err();
+        assert_eq!(err, "You can only ask familiars in your own coven, and Scribe on NigelBot isn't in yours.");
+        assert!(matches!(prepare(&db, &linked, None, "a", json!({ "familiar": "b", "message": "hi" })).unwrap(), Prepared::Here(_)));
+        save(&db, Settings { scope: Scope::Nobody, approve: false }).unwrap();
+        assert!(prepare(&db, &linked, None, "a", args()).unwrap_err().contains("turned it off"));
+    }
+
+    #[test]
+    fn follows_up_on_a_linked_mac_only_in_its_own_threads() {
+        let (db, ..) = setup();
+        let linked = [scribe_on("NigelBot")];
+        let sent = |asker: &'static str, thread: &'static str| crate::handoffs::Away { thread: Some(thread), peer: "m1", asker_id: asker, target_id: "s1", target_name: "Scribe" };
+        crate::handoffs::record_away(&db, &sent("a", "t1"), "ask", "x", crate::handoffs::Status::Done).unwrap();
+        crate::handoffs::record_away(&db, &sent("c", "t2"), "ask", "x", crate::handoffs::Status::Done).unwrap();
+        let follow = |thread: &str| prepare(&db, &linked, None, "a", json!({ "familiar": "peer:m1:s1", "message": "more", "thread": thread }));
+        match follow("t1").unwrap() {
+            Prepared::Away(out) => assert_eq!(out.thread.as_deref(), Some("t1")),
+            other => panic!("{other:?}"),
+        }
+        assert!(follow("t2").unwrap_err().contains("isn't one you started with Scribe on NigelBot"));
+        assert!(follow("nope").is_err());
+    }
+
+    #[test]
+    fn chains_carry_across_macs_as_install_and_familiar_ids() {
+        let chains = Chains::default();
+        let held = chains.begin_chain(vec!["peer:mac-b:x".into(), "a".into()], "b", "Scribe").unwrap();
+        assert_eq!(chains.chain_to("b"), ["peer:mac-b:x", "a", "b"]);
+        let global: Vec<String> = chains.chain_to("b").iter().map(|id| global_id("mac-a", id)).collect();
+        assert_eq!(global, ["mac-b:x", "mac-a:a", "mac-a:b"]);
+        assert_eq!(global.iter().map(|id| local_id("mac-b", id).unwrap()).collect::<Vec<_>>(), ["x", "peer:mac-a:a", "peer:mac-a:b"]);
+        assert_eq!(local_id("mac-b", "../x:y"), None);
+        drop(held);
+        assert_eq!(chains.chain_to("b"), ["b"]);
     }
 
     #[test]

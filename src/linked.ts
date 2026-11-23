@@ -26,6 +26,12 @@ export function remoteSideLabel(label: string, agent: Pick<Agent, "home">): stri
   return agent.home ? `${label} (open it on ${agent.home.name})` : null;
 }
 
+/**
+ * Whether a side row's source points at a conversation on a linked Mac (`peer:<peerId>:<threadId>`),
+ * which only that Mac can open.
+ */
+export const isRemoteThread = (source: string | null) => !!source && parseRemoteId(source) !== null;
+
 /** Lives on a linked Mac that can't be reached right now. */
 export const homeOffline = (agent: Pick<Agent, "home">) => !!agent.home && !agent.home.online;
 

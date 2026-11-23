@@ -152,10 +152,16 @@ export type HandoffStatus = "waiting" | "accepted" | "done" | "failed";
 /** One ask_familiar or message_familiar request. Follow-ups in the same thread get their own. */
 export interface Handoff {
   id: number;
-  /** The side conversation it was sent in. */
+  /** The side conversation it was sent in. For a familiar on a linked Mac, the thread on that Mac. */
   chatId: string;
+  /** A familiar on a linked Mac has its `peer:` id. */
   fromId: string;
   toId: string;
+  fromName: string;
+  toName: string;
+  /** The linked Mac a familiar lives on, or null for this Mac. */
+  fromMac: string | null;
+  toMac: string | null;
   kind: "ask" | "message";
   /** The request, trimmed. */
   what: string;

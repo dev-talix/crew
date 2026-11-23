@@ -1,6 +1,7 @@
 import { createMemo, createSignal, For, Match, onSettled, Show, Switch } from "solid-js";
 import { api, onEvent, onMountAsync, type Message, type SideDeltaEvent, type SideMessageEvent } from "./api";
 import { ChevronIcon, TalkIcon } from "./icons";
+import { isRemoteThread } from "./linked";
 import { openLinks, renderMarkdown } from "./markdown";
 import { appendChunk, mergeSnapshot, partnerName, sideState, upsert } from "./side";
 import { classifyTool } from "./timeline";
@@ -12,6 +13,21 @@ const STATE_NOTES = { working: "working", replied: "replied", failed: "couldn't 
  * the side conversation in place, live while the other familiar works.
  */
 export default function SideConversation(props: { message: Message; asker: string; startOpen?: boolean }) {
+  // A conversation with a familiar on a linked Mac lives on that Mac, so the row only names it.
+  if (isRemoteThread(props.message.source)) {
+    return (
+      <div class="row side" data-slot="message" data-role="side" data-message-id={props.message.id}>
+        <div class="tool-line">
+          <TalkIcon />
+          <span>{props.message.text}</span>
+        </div>
+      </div>
+    );
+  }
+  return <LocalConversation {...props} />;
+}
+
+function LocalConversation(props: { message: Message; asker: string; startOpen?: boolean }) {
   const chatId = () => props.message.source ?? "";
   const partner = () => partnerName(props.message.text);
   const [open, setOpen] = createSignal(props.startOpen ?? false);

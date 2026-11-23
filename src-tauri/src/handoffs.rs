@@ -5,7 +5,8 @@
 use crate::db::{now_ms, Db};
 use crate::runtime::TurnOutcome;
 use crate::AppState;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashMap;
 use serde::Serialize;
 use tauri::State;
 
@@ -63,6 +64,41 @@ const BACKFILL_REQUESTS: &str = "INSERT INTO handoffs (chat_id, kind, text, stat
   WHERE c.handoff IS NOT NULL AND c.side_of IS NOT NULL AND c.id NOT IN (SELECT chat_id FROM helpers)
   ORDER BY m.id";
 
+/// Schema version 26: handoffs between Macs. On the home Mac, a side conversation asked by a familiar
+/// on a linked Mac keeps that Mac (`remote_peer`) and the asker's id and name there. Its `side_of`
+/// holds the asked familiar itself, as a helper's chat does, so every side-chat filter still finds it.
+/// On the asking Mac, a handoff to a linked Mac's familiar has no chat here: `chat_id` is NULL and the
+/// row keeps the home Mac's thread id, the Mac, the asker, and the familiar asked.
+pub(crate) fn migrate_linked(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "BEGIN;
+         ALTER TABLE chats ADD COLUMN remote_peer TEXT;
+         ALTER TABLE chats ADD COLUMN remote_asker TEXT;
+         ALTER TABLE chats ADD COLUMN remote_name TEXT;
+         CREATE TABLE handoffs_new (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           chat_id TEXT REFERENCES chats(id) ON DELETE CASCADE,
+           kind TEXT NOT NULL,
+           text TEXT NOT NULL,
+           status TEXT NOT NULL,
+           created_at INTEGER NOT NULL,
+           thread_id TEXT,
+           peer_id TEXT,
+           asker_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
+           target_id TEXT,
+           target_name TEXT
+         );
+         INSERT INTO handoffs_new (id, chat_id, kind, text, status, created_at)
+           SELECT id, chat_id, kind, text, status, created_at FROM handoffs;
+         DROP TABLE handoffs;
+         ALTER TABLE handoffs_new RENAME TO handoffs;
+         CREATE INDEX handoffs_by_chat ON handoffs(chat_id);
+         CREATE INDEX handoffs_by_thread ON handoffs(thread_id);
+         PRAGMA user_version = 26;
+         COMMIT;",
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -115,6 +151,80 @@ pub fn record(db: &Db, chat_id: &str, kind: &str, text: &str, status: Status) ->
     })
 }
 
+/// A familiar on a linked Mac that a familiar here handed something to.
+pub struct Away<'a> {
+    /// The home Mac's thread, once it has answered, or the one being followed up.
+    pub thread: Option<&'a str>,
+    pub peer: &'a str,
+    pub asker_id: &'a str,
+    /// The familiar's id on its home Mac.
+    pub target_id: &'a str,
+    pub target_name: &'a str,
+}
+
+/// Records a request sent to a familiar on a linked Mac.
+pub fn record_away(db: &Db, away: &Away, kind: &str, text: &str, status: Status) -> Result<i64, String> {
+    db.with(|c| {
+        c.execute(
+            "INSERT INTO handoffs (chat_id, kind, text, status, created_at, thread_id, peer_id, asker_id, target_id, target_name)
+             VALUES (NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![kind, text, status.as_str(), now_ms(), away.thread, away.peer, away.asker_id, away.target_id, away.target_name],
+        )?;
+        Ok(c.last_insert_rowid())
+    })
+}
+
+/// Saves the home Mac's thread on a request sent to a linked Mac.
+pub fn set_thread(db: &Db, id: i64, thread: &str) -> Result<(), String> {
+    db.with(|c| c.execute("UPDATE handoffs SET thread_id = ?2 WHERE id = ?1 AND chat_id IS NULL", params![id, thread]).map(|_| ()))
+}
+
+/// The Mac, asker, and familiar of a thread on a linked Mac that a familiar here started.
+pub fn away_thread(db: &Db, thread: &str) -> Result<Option<(String, String, String)>, String> {
+    db.with(|c| {
+        c.query_row(
+            "SELECT peer_id, asker_id, target_id FROM handoffs WHERE thread_id = ?1 AND chat_id IS NULL ORDER BY id LIMIT 1",
+            params![thread],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+    })
+}
+
+/// A request a familiar here sent to a linked Mac, as its reply finds it.
+#[derive(Debug)]
+pub struct Sent {
+    pub peer: String,
+    pub thread: Option<String>,
+    pub asker_id: String,
+    pub target_name: String,
+    /// The linked Mac's name, while it stays linked.
+    pub mac: Option<String>,
+    pub status: Status,
+}
+
+pub fn sent(db: &Db, id: i64) -> Result<Option<Sent>, String> {
+    db.with(|c| {
+        c.query_row(
+            "SELECT h.peer_id, h.thread_id, h.asker_id, h.target_name, p.name, h.status
+             FROM handoffs h LEFT JOIN link_peers p ON p.id = h.peer_id
+             WHERE h.id = ?1 AND h.chat_id IS NULL AND h.peer_id IS NOT NULL AND h.asker_id IS NOT NULL",
+            params![id],
+            |r| {
+                Ok(Sent {
+                    peer: r.get(0)?,
+                    thread: r.get(1)?,
+                    asker_id: r.get(2)?,
+                    target_name: r.get::<_, Option<String>>(3)?.unwrap_or_else(|| "A familiar".into()),
+                    mac: r.get(4)?,
+                    status: Status::parse(&r.get::<_, String>(5)?),
+                })
+            },
+        )
+        .optional()
+    })
+}
+
 /// Moves one request on to `status`.
 pub fn set(db: &Db, id: i64, status: Status) -> Result<(), String> {
     db.with(|c| c.execute("UPDATE handoffs SET status = ?2 WHERE id = ?1", params![id, status.as_str()]).map(|_| ()))
@@ -129,10 +239,16 @@ pub fn fail_unfinished(db: &Db) -> Result<usize, String> {
 #[serde(rename_all = "camelCase")]
 pub struct Handoff {
     pub id: i64,
-    /// The side conversation it was sent in.
+    /// The side conversation it was sent in. For a familiar on a linked Mac, the thread there.
     pub chat_id: String,
+    /// Ids as `list_agents` shows them: a familiar on a linked Mac has its `peer:` id.
     pub from_id: String,
     pub to_id: String,
+    pub from_name: String,
+    pub to_name: String,
+    /// The linked Mac a familiar lives on, or None for this Mac.
+    pub from_mac: Option<String>,
+    pub to_mac: Option<String>,
     /// "ask" or "message".
     pub kind: String,
     /// The request, trimmed.
@@ -149,28 +265,107 @@ fn trimmed(text: &str) -> String {
     }
 }
 
+/// One row of the list as stored, before names are filled in.
+struct Row {
+    id: i64,
+    chat_id: Option<String>,
+    thread_id: Option<String>,
+    kind: String,
+    text: String,
+    created_at: i64,
+    status: String,
+    side_of: Option<String>,
+    agent_id: Option<String>,
+    remote_peer: Option<String>,
+    remote_asker: Option<String>,
+    remote_name: Option<String>,
+    asker_id: Option<String>,
+    peer_id: Option<String>,
+    target_id: Option<String>,
+    target_name: Option<String>,
+    mac: Option<String>,
+}
+
 /// The latest `limit` requests, newest first.
 pub fn list(db: &Db, limit: usize) -> Result<Vec<Handoff>, String> {
-    db.with(|c| {
+    let names: HashMap<String, String> = db.list_agents()?.into_iter().map(|a| (a.id, a.name)).collect();
+    let rows = db.with(|c| {
         let mut stmt = c.prepare(
-            "SELECT h.id, h.chat_id, c.side_of, c.agent_id, h.kind, h.text, h.created_at, h.status
-             FROM handoffs h JOIN chats c ON c.id = h.chat_id
+            "SELECT h.id, h.chat_id, h.thread_id, h.kind, h.text, h.created_at, h.status,
+                    c.side_of, c.agent_id, c.remote_peer, c.remote_asker, c.remote_name,
+                    h.asker_id, h.peer_id, h.target_id, h.target_name, p.name
+             FROM handoffs h
+             LEFT JOIN chats c ON c.id = h.chat_id
+             LEFT JOIN link_peers p ON p.id = COALESCE(c.remote_peer, h.peer_id)
              ORDER BY h.created_at DESC, h.id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |r| {
-            Ok(Handoff {
+            Ok(Row {
                 id: r.get(0)?,
                 chat_id: r.get(1)?,
-                from_id: r.get(2)?,
-                to_id: r.get(3)?,
-                kind: r.get(4)?,
-                what: trimmed(&r.get::<_, String>(5)?),
-                created_at: r.get(6)?,
-                status: Status::parse(&r.get::<_, String>(7)?),
+                thread_id: r.get(2)?,
+                kind: r.get(3)?,
+                text: r.get(4)?,
+                created_at: r.get(5)?,
+                status: r.get(6)?,
+                side_of: r.get(7)?,
+                agent_id: r.get(8)?,
+                remote_peer: r.get(9)?,
+                remote_asker: r.get(10)?,
+                remote_name: r.get(11)?,
+                asker_id: r.get(12)?,
+                peer_id: r.get(13)?,
+                target_id: r.get(14)?,
+                target_name: r.get(15)?,
+                mac: r.get(16)?,
             })
         })?;
-        rows.collect()
-    })
+        rows.collect::<rusqlite::Result<Vec<Row>>>()
+    })?;
+    let name_of = |id: &str| names.get(id).cloned().unwrap_or_else(|| "A familiar".into());
+    let local = |id: Option<String>| {
+        let id = id.unwrap_or_default();
+        (name_of(&id), id)
+    };
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let mac = Some(row.mac.clone().unwrap_or_else(|| "a linked Mac".into()));
+            let ((from_name, from_id, from_mac), (to_name, to_id, to_mac), chat_id) = match (row.chat_id, row.remote_peer) {
+                // Asked here by a familiar on a linked Mac.
+                (Some(chat), Some(peer)) => {
+                    let from = crate::link::remote_id(&peer, &row.remote_asker.unwrap_or_default());
+                    let (to_name, to_id) = local(row.agent_id);
+                    ((row.remote_name.unwrap_or_else(|| "A familiar".into()), from, mac), (to_name, to_id, None), chat)
+                }
+                (Some(chat), None) => {
+                    let ((from_name, from_id), (to_name, to_id)) = (local(row.side_of), local(row.agent_id));
+                    ((from_name, from_id, None), (to_name, to_id, None), chat)
+                }
+                // Sent from here to a familiar on a linked Mac.
+                (None, _) => {
+                    let (from_name, from_id) = local(row.asker_id);
+                    let to = crate::link::remote_id(&row.peer_id.unwrap_or_default(), &row.target_id.unwrap_or_default());
+                    let to_name = row.target_name.unwrap_or_else(|| "A familiar".into());
+                    ((from_name, from_id, None), (to_name, to, mac), row.thread_id.unwrap_or_default())
+                }
+            };
+            Handoff {
+                id: row.id,
+                chat_id,
+                from_id,
+                to_id,
+                from_name,
+                to_name,
+                from_mac,
+                to_mac,
+                kind: row.kind,
+                what: trimmed(&row.text),
+                created_at: row.created_at,
+                status: Status::parse(&row.status),
+            }
+        })
+        .collect())
 }
 
 #[tauri::command]

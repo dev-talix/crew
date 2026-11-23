@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { AgentHome } from "./api";
-import { countdown, groupByHome, homeOffline, homeTitle, isRemote, offlineNotice, parseRemoteId, peerState, reloadsOpenChat, remoteSideLabel, runsOnOptions } from "./linked";
+import { countdown, groupByHome, homeOffline, homeTitle, isRemote, isRemoteThread, offlineNotice, parseRemoteId, peerState, reloadsOpenChat, remoteSideLabel, runsOnOptions } from "./linked";
 
 const studio: AgentHome = { peerId: "p1", name: "Studio", online: true };
 const air: AgentHome = { peerId: "p2", name: "Air", online: false };
@@ -82,4 +82,10 @@ test("names the home Mac on a linked familiar's side conversation rows", () => {
   expect(remoteSideLabel("Asked Scribe", { home: studio })).toBe("Asked Scribe (open it on Studio)");
   expect(remoteSideLabel("Asked Scribe", { home: null })).toBeNull();
   expect(remoteSideLabel("Asked Scribe", {})).toBeNull();
+});
+
+test("tells rows for a thread on a linked Mac from local side conversations", () => {
+  expect(isRemoteThread("peer:p1:3f2c9a")).toBe(true);
+  expect(isRemoteThread("3f2c9a")).toBe(false);
+  expect(isRemoteThread(null)).toBe(false);
 });

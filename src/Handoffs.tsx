@@ -1,7 +1,7 @@
 import { createSignal, For, Show } from "solid-js";
 import BotAvatar from "./BotAvatar";
 import { api, onEvent, onMountAsync, relativeTime, type Agent, type Handoff, type Message } from "./api";
-import { linkLabel, STATUS_LABELS } from "./handoffList";
+import { familiarLabel, linkLabel, STATUS_LABELS } from "./handoffList";
 import SideConversation from "./SideConversation";
 import { EmptyState, Page } from "./ui";
 import "./handoffs.css";
@@ -42,7 +42,8 @@ export default function HandoffsPage(props: { agents: Agent[]; onOpenAgent: (id:
               {(h) => {
                 const from = () => agentById(h.fromId);
                 const to = () => agentById(h.toId);
-                const toName = () => to()?.name ?? "A familiar";
+                const fromName = familiarLabel(h.fromName, h.fromMac);
+                const toName = () => familiarLabel(h.toName, h.toMac);
                 const isOpen = () => open() === h.id;
                 // The same row a chat shows for this conversation, so SideConversation opens it the same way.
                 const link = (): Message => ({
@@ -58,11 +59,11 @@ export default function HandoffsPage(props: { agents: Agent[]; onOpenAgent: (id:
                 return (
                   <div class="handoff">
                     <div class="handoff-head">
-                      <Familiar agent={from()} onOpen={props.onOpenAgent} />
+                      <Familiar agent={from()} label={fromName} onOpen={props.onOpenAgent} />
                       <span class="handoff-arrow" aria-label={h.kind === "ask" ? "asked" : "messaged"}>
                         →
                       </span>
-                      <Familiar agent={to()} onOpen={props.onOpenAgent} />
+                      <Familiar agent={to()} label={toName()} onOpen={props.onOpenAgent} />
                       <span class="spacer" />
                       <span class={["handoff-status", h.status]}>{STATUS_LABELS[h.status]}</span>
                     </div>
@@ -73,12 +74,15 @@ export default function HandoffsPage(props: { agents: Agent[]; onOpenAgent: (id:
                       <span>
                         {h.kind === "ask" ? "Asked" : "Messaged"} {relativeTime(h.createdAt)}
                       </span>
-                      <button class="ghost small" aria-expanded={isOpen() ? "true" : "false"} onClick={() => setOpen(isOpen() ? null : h.id)}>
-                        {isOpen() ? "Hide thread" : "Open thread"}
-                      </button>
+                      {/* A thread sent to a linked Mac lives there. */}
+                      <Show when={!h.toMac} fallback={<span>Thread on {h.toMac}</span>}>
+                        <button class="ghost small" aria-expanded={isOpen() ? "true" : "false"} onClick={() => setOpen(isOpen() ? null : h.id)}>
+                          {isOpen() ? "Hide thread" : "Open thread"}
+                        </button>
+                      </Show>
                     </div>
                     <Show when={isOpen()}>
-                      <SideConversation message={link()} asker={from()?.name ?? "A familiar"} startOpen />
+                      <SideConversation message={link()} asker={fromName} startOpen />
                     </Show>
                   </div>
                 );
@@ -91,11 +95,11 @@ export default function HandoffsPage(props: { agents: Agent[]; onOpenAgent: (id:
   );
 }
 
-function Familiar(props: { agent: Agent | undefined; onOpen: (id: string) => void }) {
+function Familiar(props: { agent: Agent | undefined; label: string; onOpen: (id: string) => void }) {
   return (
     <button class="handoff-familiar" disabled={!props.agent} onClick={() => props.agent && props.onOpen(props.agent.id)}>
       <Show when={props.agent}>{(a) => <BotAvatar avatar={a().avatar} size={20} alive={false} />}</Show>
-      <span>{props.agent?.name ?? "A familiar"}</span>
+      <span>{props.label}</span>
     </button>
   );
 }

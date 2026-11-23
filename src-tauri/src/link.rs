@@ -11,6 +11,7 @@
 
 use crate::db::{Access, Avatar, Db, Message, Provider};
 use crate::http;
+use crate::runtime::TurnOutcome;
 use crate::vault::SecretStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -55,8 +56,12 @@ const PAIR_WINDOW: Duration = Duration::from_secs(2 * 60);
 const TAILNET_RECHECK: Duration = Duration::from_secs(10);
 const TAILSCALE_TIMEOUT: Duration = Duration::from_secs(5);
 const INSTALL_ID: &str = "link_install_id";
+/// How often the home Mac tries to bring a handoff's reply back before it gives up, and the longest
+/// wait between tries: about 25 minutes in all.
+const REPLY_TRIES: usize = 10;
+const REPLY_BACKOFF_MAX: Duration = Duration::from_secs(5 * 60);
 
-type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// What a linked Mac may do with this Mac's familiars. The app runs it through the runtime.
 pub trait Local: Send + Sync {
@@ -65,6 +70,34 @@ pub trait Local: Send + Sync {
     fn busy(&self) -> Vec<String>;
     /// Makes a familiar here and returns it as `list_agents` shows it.
     fn create(&self, input: NewFamiliar) -> BoxFuture<'_, Result<Value, String>>;
+    /// A familiar on `peer` (called `mac`) asks or messages one here: see `delegation::incoming`.
+    /// `here` is this Mac's install id. Returns the side conversation's id and its exchange.
+    fn handoff(&self, here: &str, peer: &str, mac: &str, request: &crate::delegation::Incoming) -> Result<(String, BoxFuture<'static, TurnOutcome>), String>;
+    /// `peer` brings back the reply to a handoff sent from here: see `delegation::away_reply`.
+    fn handoff_reply(&self, peer: &str, thread: &str, request: i64, outcome: TurnOutcome) -> Result<(), String>;
+}
+
+/// A familiar on a linked Mac, as familiars here pick it for `ask_familiar` or `message_familiar`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Linked {
+    /// Its `peer:` id.
+    pub id: String,
+    pub peer: String,
+    /// Its id on its home Mac.
+    pub agent: String,
+    pub name: String,
+    /// Its home Mac's name.
+    pub mac: String,
+    pub online: bool,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+impl Linked {
+    /// "Scribe on NigelBot".
+    pub fn label(&self) -> String {
+        format!("{} on {}", self.name, self.mac)
+    }
 }
 
 /// What Tailscale knows about this Mac: its CLI in the app, a fake in tests.
@@ -106,7 +139,7 @@ pub struct NewFamiliar {
 // ---------- Ids and addresses ----------
 
 /// An install id or a familiar id: a uuid, or anything as plain, so it can't reach into a path.
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
@@ -303,7 +336,7 @@ fn clean_address(address: &str) -> Result<String, String> {
     }
 }
 
-fn clean_mac_name(name: &str) -> Option<String> {
+pub(crate) fn clean_mac_name(name: &str) -> Option<String> {
     let name = name.trim();
     (!name.is_empty() && name.chars().count() <= 80 && !name.chars().any(char::is_control)).then(|| name.to_string())
 }
@@ -985,6 +1018,8 @@ impl Link {
                 Err(e) => Err(e),
             },
             ("GET", ["events"]) => Ok(self.events_here(&head.query).await),
+            ("POST", ["handoffs"]) => self.handoff_here(&peer, &request.body),
+            ("POST", ["handoffs", thread, "reply"]) => self.reply_here(&peer, thread, &request.body),
             _ => return (404, error("Not found.")),
         };
         match result {
@@ -1029,6 +1064,66 @@ impl Link {
         }
         let from = peer_row(&self.db, peer)?.map_or_else(|| "a linked Mac".into(), |p| p.name);
         self.local.send(id, text, &format!("From {from}")).map(|m| message_value(&m))
+    }
+
+    /// A familiar on `peer` asks or messages one here. The exchange runs in the background and its
+    /// reply goes back to `peer` alone, with this Mac's token for it.
+    fn handoff_here(self: &Arc<Self>, peer: &str, body: &[u8]) -> Result<Value, String> {
+        let request: crate::delegation::Incoming = serde_json::from_slice(body).map_err(|e| format!("Bad handoff: {e}"))?;
+        let mac = peer_row(&self.db, peer)?.map_or_else(|| "a linked Mac".into(), |p| p.name);
+        let (thread, turn) = self.local.handoff(&self.install_id, peer, &mac, &request)?;
+        let (link, peer, reply_to) = (self.clone(), peer.to_string(), thread.clone());
+        tokio::spawn(async move {
+            let outcome = turn.await;
+            link.send_reply(&peer, &reply_to, request.request_id, outcome).await;
+        });
+        Ok(json!({ "threadId": thread }))
+    }
+
+    /// `peer` brings back the reply to a handoff a familiar here sent it.
+    fn reply_here(&self, peer: &str, thread: &str, body: &[u8]) -> Result<Value, String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Reply {
+            request_id: i64,
+            status: String,
+            text: String,
+        }
+        if !valid_id(thread) {
+            return Err("Bad reply.".into());
+        }
+        let reply: Reply = serde_json::from_slice(body).map_err(|_| "Bad reply.")?;
+        let outcome = match reply.status.as_str() {
+            "done" => TurnOutcome::Done(reply.text),
+            "stopped" => TurnOutcome::Stopped,
+            "failed" => TurnOutcome::Failed(reply.text),
+            _ => return Err("Bad reply.".into()),
+        };
+        self.local.handoff_reply(peer, thread, reply.request_id, outcome).map(|_| json!({}))
+    }
+
+    /// Takes a handoff's reply back to the Mac that asked, trying again while it's offline. A Mac that
+    /// refuses it, or unlinked this one, won't take it later either.
+    async fn send_reply(&self, peer: &str, thread: &str, request: i64, outcome: TurnOutcome) {
+        let (status, text) = match outcome {
+            TurnOutcome::Done(text) => ("done", text),
+            TurnOutcome::Stopped => ("stopped", String::new()),
+            TurnOutcome::Failed(reason) => ("failed", reason),
+        };
+        let body = json!({ "requestId": request, "status": status, "text": text });
+        let target = format!("/v1/handoffs/{thread}/reply");
+        let mut wait = BACKOFF_MIN;
+        for _ in 0..REPLY_TRIES {
+            match self.peer_call(peer, "POST", &target, Some(&body), CALL_TIMEOUT).await {
+                Ok(_) => return,
+                Err(CallError::Refused(_, why)) => return eprintln!("A linked Mac refused a handoff's reply: {why}"),
+                Err(_) => {
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(REPLY_BACKOFF_MAX);
+                }
+            }
+        }
+        eprintln!("Gave up bringing a handoff's reply back to a linked Mac that stayed offline.");
     }
 
     async fn events_here(&self, query: &str) -> Value {
@@ -1345,6 +1440,47 @@ impl Link {
         all
     }
 
+    /// Every linked Mac's familiars as last fetched, for familiars here to ask or message.
+    pub fn linked(&self) -> Vec<Linked> {
+        let mut all = Vec::new();
+        for row in peer_rows(&self.db).unwrap_or_default() {
+            let online = self.online(&row.id);
+            for familiar in &row.familiars {
+                let (Some(agent), Some(name)) = (familiar["id"].as_str().filter(|id| valid_id(id)), familiar["name"].as_str()) else { continue };
+                let text = |key: &str| familiar[key].as_str().map(String::from);
+                all.push(Linked {
+                    id: remote_id(&row.id, agent),
+                    peer: row.id.clone(),
+                    agent: agent.into(),
+                    name: name.into(),
+                    mac: row.name.clone(),
+                    online,
+                    provider: text("provider"),
+                    model: text("activeModel").or_else(|| text("model")),
+                });
+            }
+        }
+        all
+    }
+
+    /// This Mac's name, as linked Macs show it.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn install_id(&self) -> &str {
+        &self.install_id
+    }
+
+    /// Sends a handoff (see `delegation::away`) to `target`'s home Mac and returns its thread id there.
+    pub async fn hand_off(&self, target: &Linked, body: &Value) -> Result<String, String> {
+        match self.peer_call(&target.peer, "POST", "/v1/handoffs", Some(body), CALL_TIMEOUT).await {
+            Ok(reply) => reply["threadId"].as_str().filter(|t| valid_id(t)).map(String::from).ok_or_else(|| "The other Mac sent an odd answer.".into()),
+            Err(CallError::Offline) => Err(format!("{} is offline, so {} can't be reached right now.", target.mac, target.name)),
+            Err(CallError::Refused(_, why) | CallError::Untrusted(why)) => Err(why),
+        }
+    }
+
     pub fn remote_busy(&self) -> Vec<String> {
         let Ok(live) = self.live.lock() else { return Vec::new() };
         live.iter().flat_map(|(peer, state)| state.busy.iter().map(move |agent| remote_id(peer, agent))).collect()
@@ -1460,6 +1596,21 @@ impl Local for AppLocal {
             serde_json::to_value(status).map_err(|e| e.to_string())
         })
     }
+
+    fn handoff(&self, here: &str, peer: &str, mac: &str, request: &crate::delegation::Incoming) -> Result<(String, BoxFuture<'static, TurnOutcome>), String> {
+        let familiars = Arc::new(self.familiars());
+        crate::delegation::incoming(&self.db, &crate::delegation::CHAINS, familiars, here, peer, mac, request)
+    }
+
+    fn handoff_reply(&self, peer: &str, thread: &str, request: i64, outcome: TurnOutcome) -> Result<(), String> {
+        crate::delegation::away_reply(&self.db, &crate::delegation::WAITERS, &self.familiars(), peer, thread, request, outcome)
+    }
+}
+
+impl AppLocal {
+    fn familiars(&self) -> crate::delegation::AppFamiliars {
+        crate::delegation::AppFamiliars { app: self.app.clone(), db: self.db.clone(), runtime: self.runtime.clone() }
+    }
 }
 
 /// Starts the link: the server on the tailnet, and a relay for each linked Mac.
@@ -1522,6 +1673,11 @@ pub fn remote_busy() -> Vec<String> {
     LINK.get().map(|l| l.remote_busy()).unwrap_or_default()
 }
 
+/// The link, once it runs.
+pub fn current() -> Option<Arc<Link>> {
+    LINK.get().cloned()
+}
+
 pub async fn messages(id: &str, before: Option<i64>, limit: Option<i64>) -> Result<Vec<Value>, String> {
     running()?.messages(id, before, limit).await
 }
@@ -1562,15 +1718,51 @@ pub async fn link_unlink(peer_id: String) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::db::Agent;
+    use crate::delegation::{away, AwayOut, Chains, Familiars, Kind, Limiter, Reach, Waiters};
     use crate::vault::MemoryStore;
 
     struct FakeLocal {
         db: Arc<Db>,
         sent: Mutex<Vec<(String, String, String)>>,
         created: Mutex<Vec<NewFamiliar>>,
+        familiars: Arc<FakeFamiliars>,
+        chains: &'static Chains,
+        waiters: Waiters,
+    }
+
+    /// Familiars that answer at once with who asked what, and keep what they deliver and link.
+    struct FakeFamiliars {
+        db: Arc<Db>,
+        delivered: Mutex<Vec<(String, String, String)>>,
+        rows: Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl Familiars for FakeFamiliars {
+        fn side_turn(&self, chat_id: &str, handoff: i64, asker: &str, message: &str) -> BoxFuture<'static, TurnOutcome> {
+            let (db, chat, reply) = (self.db.clone(), chat_id.to_string(), format!("{asker} asked: {message}"));
+            Box::pin(async move {
+                db.insert_message_in(&chat, &crate::side::get(&db, &chat).unwrap().unwrap().target_id, "assistant", &reply, "done", None).unwrap();
+                crate::handoffs::set(&db, handoff, crate::handoffs::Status::Done).unwrap();
+                TurnOutcome::Done(reply)
+            })
+        }
+        fn deliver(&self, asker_id: &str, _: Option<String>, text: String, source: &str) {
+            self.delivered.lock().unwrap().push((asker_id.into(), text, source.into()));
+        }
+        fn link_row(&self, _: Option<&str>, agent_id: &str, label: &str, source: &str) -> Result<(), String> {
+            self.rows.lock().unwrap().push((agent_id.into(), label.into(), source.into()));
+            Ok(())
+        }
+        fn changed(&self) {}
     }
 
     impl Local for FakeLocal {
+        fn handoff(&self, here: &str, peer: &str, mac: &str, request: &crate::delegation::Incoming) -> Result<(String, BoxFuture<'static, TurnOutcome>), String> {
+            crate::delegation::incoming(&self.db, self.chains, self.familiars.clone(), here, peer, mac, request)
+        }
+        fn handoff_reply(&self, peer: &str, thread: &str, request: i64, outcome: TurnOutcome) -> Result<(), String> {
+            crate::delegation::away_reply(&self.db, &self.waiters, self.familiars.as_ref(), peer, thread, request, outcome)
+        }
         fn send(&self, agent_id: &str, text: String, source: &str) -> Result<Message, String> {
             self.sent.lock().unwrap().push((agent_id.into(), text.clone(), source.into()));
             self.db.insert_message_from(agent_id, "user", &text, "done", Some(source))
@@ -1642,7 +1834,15 @@ mod tests {
     }
 
     fn mac_with(name: &str, db: Arc<Db>, secrets: Arc<MemoryStore>, tailnet: Arc<FakeTailnet>) -> Mac {
-        let local = Arc::new(FakeLocal { db: db.clone(), sent: Mutex::new(Vec::new()), created: Mutex::new(Vec::new()) });
+        let familiars = Arc::new(FakeFamiliars { db: db.clone(), delivered: Mutex::new(Vec::new()), rows: Mutex::new(Vec::new()) });
+        let local = Arc::new(FakeLocal {
+            db: db.clone(),
+            sent: Mutex::new(Vec::new()),
+            created: Mutex::new(Vec::new()),
+            familiars,
+            chains: Box::leak(Box::default()),
+            waiters: Waiters::default(),
+        });
         let ui = Arc::new(Events::default());
         let link = Link::new(db.clone(), secrets.clone(), local.clone(), ui.clone(), tailnet, name.into()).unwrap();
         Mac { link, db, secrets, local, ui }
@@ -2175,4 +2375,190 @@ mod tests {
         drop(idle);
         eventually("the pool to empty", || a.link.pre_auth.available_permits() == PRE_AUTH_CONNECTIONS).await;
     }
+
+    // ----- Familiars asking familiars on another Mac -----
+
+    fn never_asked(_: crate::approvals::Request) -> std::future::Ready<crate::approvals::Decision> {
+        panic!("should not ask the person")
+    }
+
+    /// Ada on B ("Laptop") hands something to Scribe on A ("Studio").
+    async fn hand(b: &Mac, kind: Kind, message: &str, thread: Option<String>) -> Result<String, String> {
+        let target = b.link.linked().into_iter().find(|f| f.name == "Scribe").expect("B lists A's Scribe");
+        let out = AwayOut { asker: agent("ada", "Ada"), target, message: message.into(), thread };
+        let (chains, limiter) = (Chains::default(), Limiter::default());
+        let reach = Reach { db: &b.db, chains: &chains, limiter: &limiter, waiters: &b.local.waiters, link: &b.link, familiars: b.local.familiars.as_ref() };
+        away(&reach, out, kind, None, Some("home-chat".into()), crate::delegation::TIMEOUT, Instant::now().into_std(), never_asked).await
+    }
+
+    async fn linked_with_ada() -> (Mac, Mac, String) {
+        let (a, b, peer) = linked().await;
+        b.db.insert_agent(&agent("ada", "Ada")).unwrap();
+        (a, b, peer)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_ask_to_a_familiar_on_another_mac_returns_its_reply_and_shows_on_both_macs() {
+        let (a, b, peer) = linked_with_ada().await;
+        let reply = hand(&b, Kind::Ask, " Summarize the notes ", None).await.unwrap();
+        assert!(reply.starts_with("Ada on Laptop asked: Summarize the notes\n\n(Conversation "), "{reply}");
+        assert!(reply.contains("with Scribe on Studio"), "{reply}");
+
+        // The home Mac ran it in Scribe's side chat, asked by Ada as a familiar on B, never as one of A's.
+        let home = crate::handoffs::list(&a.db, 10).unwrap();
+        assert_eq!(home.len(), 1);
+        let thread = home[0].chat_id.clone();
+        assert_eq!(crate::side::get(&a.db, &thread).unwrap().unwrap().asker_id, remote_id(&b.link.install_id, "ada"));
+        let shown = (home[0].from_id.as_str(), home[0].from_name.as_str(), home[0].from_mac.as_deref(), home[0].to_id.as_str(), home[0].to_mac.as_deref());
+        assert_eq!(shown, (remote_id(&b.link.install_id, "ada").as_str(), "Ada", Some("Laptop"), "f1", None));
+        assert_eq!(home[0].status, crate::handoffs::Status::Done);
+        assert!(a.db.get_agent("ada").unwrap().is_none(), "the asker isn't a familiar on A");
+
+        // The asking Mac lists it too, with the thread on A, and its chat links there without opening it.
+        let asked = crate::handoffs::list(&b.db, 10).unwrap();
+        let shown = (asked[0].from_id.as_str(), asked[0].to_id.as_str(), asked[0].to_name.as_str(), asked[0].to_mac.as_deref(), asked[0].chat_id.as_str());
+        assert_eq!(shown, ("ada", remote_id(&peer, "f1").as_str(), "Scribe", Some("Studio"), thread.as_str()));
+        assert_eq!(asked[0].status, crate::handoffs::Status::Done);
+        let rows = b.local.familiars.rows.lock().unwrap().clone();
+        assert_eq!(rows, [("ada".to_string(), "Asked Scribe on Studio".to_string(), remote_id(&peer, &thread))]);
+
+        // The thread id follows up in the same conversation on A.
+        let again = hand(&b, Kind::Ask, "And the second part?", Some(thread.clone())).await.unwrap();
+        assert!(again.contains(&format!("Conversation {thread} with")), "{again}");
+        let texts: Vec<String> = crate::side::messages(&a.db, &thread).unwrap().into_iter().map(|m| m.text).collect();
+        assert_eq!(texts.len(), 2, "both replies are in the one conversation: {texts:?}");
+        assert!(b.local.familiars.delivered.lock().unwrap().is_empty(), "the waiting call got each reply");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_message_to_a_familiar_on_another_mac_comes_back_as_a_new_message() {
+        let (_a, b, _) = linked_with_ada().await;
+        let sent = hand(&b, Kind::Message, "Draft the summary", None).await.unwrap();
+        assert!(sent.starts_with("Sent to Scribe on Studio."), "{sent}");
+        eventually("the reply", || !b.local.familiars.delivered.lock().unwrap().is_empty()).await;
+        let (asker, text, source) = b.local.familiars.delivered.lock().unwrap()[0].clone();
+        assert_eq!((asker.as_str(), source.as_str()), ("ada", "Reply from Scribe on Studio"));
+        assert!(text.starts_with("Scribe on Studio replied to your message:\n\nAda on Laptop asked: Draft the summary"), "{text}");
+        assert_eq!(crate::handoffs::list(&b.db, 10).unwrap()[0].status, crate::handoffs::Status::Done);
+    }
+
+    #[tokio::test]
+    async fn a_familiar_on_an_offline_mac_fails_fast() {
+        let b = mac("Laptop");
+        b.db.insert_agent(&agent("ada", "Ada")).unwrap();
+        save_peer(&b.db, "mac-a", "NigelBot", "127.0.0.1:1").unwrap();
+        cache_familiars(&b.db, "mac-a", &[json!({ "id": "f1", "name": "Scribe" })]);
+        b.link.tokens.lock().unwrap().insert("mac-a".into(), tokens(&new_token(), &[&new_token()]));
+        let (chains, limiter) = (Chains::default(), Limiter::default());
+        let reach = Reach { db: &b.db, chains: &chains, limiter: &limiter, waiters: &b.local.waiters, link: &b.link, familiars: b.local.familiars.as_ref() };
+        let out = || AwayOut { asker: agent("ada", "Ada"), target: b.link.linked().remove(0), message: "hi".into(), thread: None };
+        let offline = "NigelBot is offline, so Scribe can't be reached right now.";
+        assert_eq!(away(&reach, out(), Kind::Ask, None, None, crate::delegation::TIMEOUT, Instant::now().into_std(), never_asked).await.unwrap_err(), offline);
+        assert!(crate::handoffs::list(&b.db, 10).unwrap().is_empty(), "nothing went out");
+        // Listed as online, but nobody answers there.
+        b.link.set_online("mac-a", true);
+        assert_eq!(away(&reach, out(), Kind::Message, None, None, crate::delegation::TIMEOUT, Instant::now().into_std(), never_asked).await.unwrap_err(), offline);
+        assert_eq!(crate::handoffs::list(&b.db, 10).unwrap()[0].status, crate::handoffs::Status::Failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_chain_limit_and_loops_hold_across_macs() {
+        let (a, b, peer) = linked_with_ada().await;
+        let on_b = |id: &str| format!("{}:{id}", b.link.install_id);
+        let body = |chain: Vec<String>| {
+            json!({ "targetId": "f1", "asker": { "id": "ada", "name": "Ada", "mac": "Laptop" }, "message": "hi", "kind": "ask",
+                    "depth": chain.len(), "chainIds": chain, "requestId": 1 })
+        };
+        // Three on B already waiting on each other, so Scribe would be a fourth.
+        let deep = body(vec![on_b("x"), on_b("y"), on_b("ada")]);
+        assert!(b.link.peer_call(&peer, "POST", "/v1/handoffs", Some(&deep), CALL_TIMEOUT).await.is_ok(), "three in a row is the limit, not over it");
+        let deeper = body(vec![on_b("w"), on_b("x"), on_b("y"), on_b("ada")]);
+        match b.link.peer_call(&peer, "POST", "/v1/handoffs", Some(&deeper), CALL_TIMEOUT).await {
+            Err(CallError::Refused(400, why)) => assert!(why.contains("more than 3 familiars"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        // B can't claim the asker is a familiar on some other Mac.
+        let forged = json!({ "targetId": "f1", "asker": { "id": "ada", "name": "Ada", "mac": "Laptop" }, "message": "hi", "kind": "ask",
+                             "depth": 1, "chainIds": [format!("{}:ada", a.link.install_id)], "requestId": 1 });
+        assert!(matches!(b.link.peer_call(&peer, "POST", "/v1/handoffs", Some(&forged), CALL_TIMEOUT).await, Err(CallError::Refused(400, _))));
+
+        // While a question from B to Scribe runs, the chain counts on A: Scribe asks Critic, and Critic
+        // asking anyone would be a fourth.
+        a.db.insert_agent(&agent("c", "Critic")).unwrap();
+        a.db.insert_agent(&agent("e", "Editor")).unwrap();
+        let request: crate::delegation::Incoming = serde_json::from_value(body(vec![on_b("x"), on_b("ada")])).unwrap();
+        let (_, turn) = a.local.handoff(&a.link.install_id, &b.link.install_id, "Laptop", &request).unwrap();
+        let chains = a.local.chains;
+        let scribe_critic = chains.begin(&agent("f1", "Scribe"), &agent("c", "Critic")).unwrap();
+        assert!(chains.begin(&agent("c", "Critic"), &agent("e", "Editor")).err().unwrap().contains("more than 3"));
+        // And nobody in the chain can be asked back.
+        let back: crate::delegation::Incoming = serde_json::from_value(json!({ "targetId": "f1", "asker": { "id": "z", "name": "Zed", "mac": "Laptop" },
+            "message": "hi", "kind": "ask", "depth": 2, "chainIds": [format!("{}:f1", a.link.install_id), on_b("z")], "requestId": 2 })).unwrap();
+        assert!(a.local.handoff(&a.link.install_id, &b.link.install_id, "Laptop", &back).err().unwrap().contains("waiting on you"));
+        drop((scribe_critic, turn));
+        assert!(chains.begin(&agent("c", "Critic"), &agent("e", "Editor")).is_ok(), "the chain ends with the question");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_the_mac_a_request_went_to_can_reply_to_it() {
+        let (a, b, peer) = linked_with_ada().await;
+        let c = mac("Other");
+        listen(&c).await;
+        let b_address = b.link.server.lock().unwrap().addresses[0].clone();
+        let code = b.link.start_pairing().unwrap().code;
+        let b_from_c = c.link.pair(&b_address, &code).await.unwrap().id;
+
+        let row = crate::handoffs::Away { thread: None, peer: &peer, asker_id: "ada", target_id: "f1", target_name: "Scribe" };
+        let id = crate::handoffs::record_away(&b.db, &row, "message", "hi", crate::handoffs::Status::Waiting).unwrap();
+        let reply = json!({ "requestId": id, "status": "done", "text": "Forged" });
+        match c.link.peer_call(&b_from_c, "POST", "/v1/handoffs/t1/reply", Some(&reply), CALL_TIMEOUT).await {
+            Err(CallError::Refused(400, why)) => assert!(why.contains("isn't for a request"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(crate::handoffs::list(&b.db, 10).unwrap()[0].status, crate::handoffs::Status::Waiting);
+        assert!(b.local.familiars.delivered.lock().unwrap().is_empty());
+
+        // The Mac it went to can, once.
+        let real = json!({ "requestId": id, "status": "done", "text": "Real" });
+        assert!(a.link.peer_call(&b.link.install_id, "POST", "/v1/handoffs/t1/reply", Some(&real), CALL_TIMEOUT).await.is_ok());
+        assert_eq!(b.local.familiars.delivered.lock().unwrap().len(), 1);
+        assert!(a.link.peer_call(&b.link.install_id, "POST", "/v1/handoffs/t1/reply", Some(&real), CALL_TIMEOUT).await.is_err(), "a second reply is refused");
+        // A reply names the thread the request went to.
+        let other = crate::handoffs::record_away(&b.db, &crate::handoffs::Away { thread: Some("t9"), ..row }, "message", "hi", crate::handoffs::Status::Waiting).unwrap();
+        let wrong_thread = json!({ "requestId": other, "status": "done", "text": "x" });
+        assert!(a.link.peer_call(&b.link.install_id, "POST", "/v1/handoffs/t1/reply", Some(&wrong_thread), CALL_TIMEOUT).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handoff_requests_are_checked_before_anything_runs() {
+        let (a, b, peer) = linked_with_ada().await;
+        let on_b = format!("{}:ada", b.link.install_id);
+        let post = |body: Value| {
+            let b = &b.link;
+            let peer = peer.clone();
+            async move { b.peer_call(&peer, "POST", "/v1/handoffs", Some(&body), CALL_TIMEOUT).await }
+        };
+        let good = json!({ "targetId": "f1", "asker": { "id": "ada", "name": "Ada", "mac": "Laptop" }, "message": "hi", "kind": "ask", "depth": 1, "chainIds": [on_b], "requestId": 1 });
+        for (field, value) in [("targetId", json!("../f1")), ("targetId", json!("nobody")), ("kind", json!("order")), ("message", json!("  ")), ("message", json!("x".repeat(MAX_BODY_TEST)))] {
+            let mut bad = good.clone();
+            bad[field] = value;
+            assert!(post(bad).await.is_err(), "{field}");
+        }
+        let mut extra = good.clone();
+        extra["tools"] = json!(["vault_use"]);
+        assert!(post(extra).await.is_err(), "unknown fields are refused");
+        // The who-can-ask setting on the home Mac applies too.
+        crate::delegation::save(&a.db, crate::delegation::Settings { scope: crate::delegation::Scope::Nobody, approve: false }).unwrap();
+        assert!(post(good.clone()).await.is_err());
+        crate::delegation::save(&a.db, crate::delegation::Settings::default()).unwrap();
+        // A thread another asker started can't be followed up.
+        let theirs = crate::side::create_remote(&a.db, &b.link.install_id, "zed", "Zed", "f1", "x").unwrap();
+        let mut follow = good.clone();
+        follow["thread"] = json!(theirs.id);
+        assert!(post(follow).await.is_err());
+        assert!(crate::handoffs::list(&a.db, 10).unwrap().is_empty(), "nothing was recorded");
+        assert!(post(good).await.is_ok());
+    }
+
+    const MAX_BODY_TEST: usize = 200_001;
 }
