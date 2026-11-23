@@ -1,4 +1,4 @@
-// Writes the two app icon variants as SVG: paper (the bundle icon) and night.
+// Writes the two app icon variants as SVG, paper (the bundle icon) and night, and the menu bar mark.
 // Run `bun scripts/icons.mjs`; the README's App icons section has the rest of the steps.
 import { writeFileSync } from "node:fs";
 
@@ -67,3 +67,16 @@ function icon({ background, ribbon, wax, press }) {
 }
 
 for (const [name, colors] of Object.entries(VARIANTS)) writeFileSync(`src/assets/icon-${name}.svg`, icon(colors));
+
+// The menu bar mark: the seal in one color, with its ring and a familiar's eyes pressed out. macOS
+// tints it as a template image, so only the alpha matters. The eyes sit on whole pixels at 18 and 36 px.
+const tray = `<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
+  <mask id="press">
+    <rect width="36" height="36" fill="#fff"/>
+    <circle cx="18" cy="18" r="11" fill="none" stroke="#000" stroke-width="2"/>
+    ${pill(14, 18, 4, 8, "#000")}${pill(22, 18, 4, 8, "#000")}
+  </mask>
+  <path d="${sealEdge(18, 18, 15.6, 9, 1.1)}" fill="#000" mask="url(#press)"/>
+</svg>
+`;
+writeFileSync("src/assets/tray.svg", tray);
