@@ -31,6 +31,13 @@ export const GearIcon = () => (
   </Icon>
 );
 
+export const MemoryIcon = () => (
+  <Icon>
+    <path d="M3 3.5C3 2.7 3.7 2 4.5 2H13v10H4.5C3.7 12 3 12.7 3 13.5zM3 13.5c0 .8.7 1.5 1.5 1.5H13v-3" />
+    <path d="M6 5h4M6 7.5h3" />
+  </Icon>
+);
+
 export const FolderIcon = () => (
   <Icon>
     <path d="M2 4.5c0-.8.7-1.5 1.5-1.5h2.6l1.4 1.5h5c.8 0 1.5.7 1.5 1.5v5.5c0 .8-.7 1.5-1.5 1.5h-9c-.8 0-1.5-.7-1.5-1.5z" />

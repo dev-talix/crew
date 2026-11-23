@@ -1,0 +1,17 @@
+/* Memory: a familiar's or coven's notes, in the Memory sheet and the coven editor. */
+.memory-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.memory-usage {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.memory-usage.danger {
+  color: var(--danger);
+}

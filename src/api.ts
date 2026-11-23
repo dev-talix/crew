@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createEffect, createSignal, onSettled, type Accessor } from "solid-js";
 import type { Avatar } from "./avatar";
 import type { ThemeFile } from "./theme";
+import type { Memory, MemoryScope } from "./memory";
 
 export type Provider = "codex" | "claude";
 export type Access = "workspace" | "full";
@@ -269,6 +270,8 @@ export const api = {
   listCovens: () => invoke<Coven[]>("list_covens"),
   saveCoven: (id: string | null, name: string, members: string[]) => invoke<Coven>("save_coven", { id, name, members }),
   deleteCoven: (id: string) => invoke<void>("delete_coven", { id }),
+  getMemory: (scope: MemoryScope, id: string) => invoke<Memory>("get_memory", { scope, id }),
+  saveMemory: (scope: MemoryScope, id: string, text: string) => invoke<Memory>("save_memory", { scope, id, text }),
   listVault: () => invoke<VaultItem[]>("list_vault"),
   vaultSecret: (id: string) => invoke<Record<string, string>>("vault_secret", { id }),
   saveVaultItem: (input: VaultItemInput) => invoke<VaultItem>("save_vault_item", { input }),
@@ -321,7 +324,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

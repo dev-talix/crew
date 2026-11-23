@@ -6,6 +6,7 @@ import BotAvatar from "./BotAvatar";
 import Chat from "./Chat";
 import { createChatStore } from "./chatStore";
 import HomePage from "./HomePage";
+import { MemorySheet } from "./MemoryEditor";
 import RoutinesPage from "./RoutinesPage";
 import { SettingsDialog } from "./SettingsPage";
 import WorkflowsPage, { type SpellIntent } from "./WorkflowsPage";
@@ -41,6 +42,7 @@ export default function App() {
   const [unread, setUnread] = createStore<Record<string, boolean>>({});
   const [view, setView] = createSignal<View>("home");
   const [editing, setEditing] = createSignal(false);
+  const [memoryOpen, setMemoryOpen] = createSignal(false);
   const [loaded, setLoaded] = createSignal(false);
   const [loadError, setLoadError] = createSignal("");
   const [spells, setSpells] = createSignal<Workflow[]>([]);
@@ -85,6 +87,7 @@ export default function App() {
       u[id] = false;
     });
     setEditing(false);
+    setMemoryOpen(false);
     setView({ agent: id });
   };
 
@@ -288,12 +291,16 @@ export default function App() {
                     mood={moodOf(agent().id)}
                     store={chat}
                     onEdit={() => setEditing(true)}
+                    onMemory={() => setMemoryOpen(true)}
                     onAgentUpdated={replaceAgent}
                   />
                   <Show when={editing()}>
                     <Sheet label="Familiar settings" wide onClose={() => setEditing(false)}>
                       <AgentForm agent={agent()} covens={covens()} onSaved={updated} onCancel={() => setEditing(false)} onDeleted={deleted} />
                     </Sheet>
+                  </Show>
+                  <Show when={memoryOpen()}>
+                    <MemorySheet agent={agent()} agents={agents()} covens={covens()} onClose={() => setMemoryOpen(false)} />
                   </Show>
                 </div>
               )}

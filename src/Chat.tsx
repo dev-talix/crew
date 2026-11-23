@@ -16,6 +16,7 @@ import {
   FileIcon,
   GearIcon,
   GlobeIcon,
+  MemoryIcon,
   LockIcon,
   LockOpenIcon,
   MicIcon,
@@ -206,6 +207,7 @@ export default function Chat(props: {
   mood?: Mood;
   store: ChatStore;
   onEdit: () => void;
+  onMemory?: () => void;
   onAgentUpdated: (agent: Agent) => void;
   compact?: { onClose: () => void; onOpenMain: () => void };
 }) {
@@ -360,6 +362,13 @@ export default function Chat(props: {
           >
             <ComposeIcon />
           </button>
+          <Show when={!props.compact && props.onMemory}>
+            {(open) => (
+              <button class="icon-button" aria-label="Memory" title="Memory" onClick={open()}>
+                <MemoryIcon />
+              </button>
+            )}
+          </Show>
           <Show
             when={props.compact}
             fallback={
