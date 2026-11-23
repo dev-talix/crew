@@ -1,6 +1,6 @@
 import { createSignal, For, onCleanup, Show } from "solid-js";
 import { api, errorText } from "./api";
-import { Sheet } from "./ui";
+import { Sheet, Toggle } from "./ui";
 import { canImport, groupPreview, importedSummary, previewSummary, type ExportKind, type Picked } from "./transfer";
 import "./transfer.css";
 
@@ -118,6 +118,7 @@ const TAG = { conflict: "Renamed", skipped: "Can't import", fresh: "New", replac
 export function ImportSheet(props: { picked: Picked; onClose: () => void; onDone: (summary: string) => void }) {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
+  const [keepFullAccess, setKeepFullAccess] = createSignal(false);
   const preview = () => props.picked.preview;
 
   const apply = async (e: Event) => {
@@ -125,7 +126,7 @@ export function ImportSheet(props: { picked: Picked; onClose: () => void; onDone
     setBusy(true);
     setError("");
     try {
-      props.onDone(importedSummary(await api.applyImport()));
+      props.onDone(importedSummary(await api.applyImport(keepFullAccess())));
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -168,6 +169,19 @@ export function ImportSheet(props: { picked: Picked; onClose: () => void; onDone
             </section>
           )}
         </For>
+        <Show when={preview().fullAccess}>
+          <div class="list">
+            <div class="list-row">
+              <div class="list-main">
+                <div class="list-title">Keep full access</div>
+                <p class="list-sub">
+                  This file gives a familiar full access: commands run anywhere on this Mac, without a sandbox. Off, it gets the same access as "Workspace only" when you summon a familiar.
+                </p>
+              </div>
+              <Toggle label="Keep full access" checked={keepFullAccess()} onChange={setKeepFullAccess} />
+            </div>
+          </div>
+        </Show>
         <p class="hint">Everything gets a new id, and nothing you have now changes, except settings and the covens that familiars move into.</p>
         <Show when={error()}>
           <p class="error-box" role="alert">

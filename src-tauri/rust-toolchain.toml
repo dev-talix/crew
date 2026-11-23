@@ -1,0 +1,5 @@
+# The compiler that local builds and CI share, so clippy finds the same lints in both.
+# Cargo.toml's rust-version is the oldest compiler the code supports.
+[toolchain]
+channel = "1.96.1"
+components = ["clippy"]

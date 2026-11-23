@@ -100,7 +100,7 @@ it. The model chip in the composer shows the model it is running and switches it
 ## Attachments
 
 Drop files on the chat, paste a screenshot, or click the paperclip in the composer. You can attach up
-to 10 files to a message, and each image can be up to 20 MB. The composer shows images as thumbnails
+to 10 files to a message, and each file can be up to 20 MB. The composer shows images as thumbnails
 and other files as chips, each with a button to remove it.
 
 - **Images** (PNG, JPEG, GIF, WebP) go to the model as images: Codex gets a `localImage` input, and
@@ -320,7 +320,8 @@ grants never do.
 A name you already have gets " (2)". Spell steps, rituals, and coven members point at the familiars
 the file brings, or else at yours with the same name; anything that can't be placed is listed and left
 out. Imported familiars get new workspace folders under `~/Grimoire`, and the rows go in one
-transaction.
+transaction. A familiar the file gives full access comes in with workspace access, unless you turn on
+"Keep full access" in the preview.
 
 ## Updates
 
@@ -361,6 +362,9 @@ any text editor works. "Make a copy to edit" opens the same file in the built-in
   set on `sidebar`, `sidebar-row`, `page`, `chat`, `chat-header`, `message` (with `data-role` of
   `user`, `assistant`, or `tools`), `composer`, and `dock`. `--font-ui` and `--font-display` set the
   two typefaces. Remote files don't load, because the app's content security policy blocks them.
+  Approval cards sit in their own layer that theme CSS can't style or cover.
+- A theme a familiar made never applies on its own. Clicking it in Settings shows a preview with
+  Apply and Cancel, and a familiar's `set_theme` call can only switch to built-in or your own themes.
 - A file that fails to load shows its error under the theme list.
 
 ## App icons
@@ -402,8 +406,9 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
   for Claude, thread config for Codex) with `list_familiars`, `list_spells`, `create_spell`,
   `list_themes`, `create_theme`, `set_theme`, `vault_search`, `vault_use`, `ask_familiar`,
   `read_memory`, `remember`, and `rewrite_memory`. The CLI starts `grimoire mcp <socket> <agent-id>`,
-  which relays calls to the app over `grimoire.sock` in its data folder (owner-only). Familiars can't
-  cast, edit, or delete spells.
+  which relays calls to the app over `grimoire.sock` in its data folder (owner-only). Each server gets
+  a random token for its familiar in `GRIMOIRE_TOOLS_TOKEN`, and the app refuses a call whose token
+  doesn't match the familiar it names. Familiars can't cast, edit, or delete spells.
 - **Claude billing.** With "Claude subscription" (the default), Grimoire removes
   `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` from the `claude` process
   so it uses your claude.ai Pro or Max sign-in. "API key" leaves them in place.
@@ -418,11 +423,15 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
 
 ```sh
 bun run test                     # timeline, models, chat store, palette, moods, themes, spells, budgets, imports
+bun run build                    # typechecks the app and its tests, then builds dist/
 cd src-tauri
 cargo test                       # unit tests
 cargo test -- --ignored          # live turns against the real codex and claude CLIs (costs tokens)
 cargo clippy --all-targets -- -D warnings
 ```
+
+GitHub Actions runs all of these on macOS for each push to main and each pull request, except the live
+CLI tests. `src-tauri/rust-toolchain.toml` pins the Rust version, so local clippy matches CI.
 
 ## License
 

@@ -9,8 +9,9 @@ use crate::vault::{self, Kind, SecretStore};
 use crate::{memory, themes, workflows};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -34,6 +35,11 @@ pub const CALL_TIMEOUT_SECS: u64 = 15 * 60;
 
 /// How a CLI starts the tool server: this executable and the app's socket.
 pub(crate) static LAUNCH: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+/// The environment variable that hands each tool server the token for its familiar.
+pub const TOKEN_ENV: &str = "GRIMOIRE_TOOLS_TOKEN";
+/// A random token per familiar or side conversation, so a process that reaches the socket can't
+/// act as a familiar it has no token for. New tokens each time the app starts.
+static TOKENS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 pub fn definitions() -> Value {
     let colors = json!({
@@ -98,7 +104,7 @@ pub fn definitions() -> Value {
         },
         {
             "name": "create_theme",
-            "description": "Save a new Grimoire color theme. Give colors for the dark appearance, the light one, or both; a theme with only one follows that appearance. Use calm, readable colors: text must stay legible on canvas. The theme is not applied until you call set_theme.",
+            "description": "Save a new Grimoire color theme. Give colors for the dark appearance, the light one, or both; a theme with only one follows that appearance. Use calm, readable colors: text must stay legible on canvas. The user previews and applies it in Settings; you can't switch to it yourself.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -158,7 +164,7 @@ pub fn definitions() -> Value {
         },
         {
             "name": "set_theme",
-            "description": "Switch Grimoire to a theme, by id or name from list_themes.",
+            "description": "Switch Grimoire to a built-in or user-made theme, by id or name from list_themes. A theme a familiar made must be previewed and applied by the user in Settings.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "theme": { "type": "string", "description": "Theme id or name." } },
@@ -177,14 +183,58 @@ pub fn claude_tool_names() -> String {
     TOOL_NAMES.iter().chain(&memory::TOOL_NAMES).map(|name| format!("mcp__{SERVER_NAME}__{name}")).collect::<Vec<_>>().join(",")
 }
 
-/// The command and arguments a CLI runs to give `agent_id` the Grimoire tools, once the socket is up.
+/// How a CLI starts the Grimoire tool server for one familiar.
+pub struct ServerCommand {
+    pub command: String,
+    pub args: Vec<String>,
+    /// Goes in the server's environment as `TOKEN_ENV`, never in its arguments.
+    pub token: String,
+}
+
+/// The command a CLI runs to give `agent_id` the Grimoire tools, once the socket is up.
 /// In a side conversation `agent_id` is its lane key, so the tools know where the familiar is working.
-pub fn server_command(agent_id: &str) -> Option<(String, Vec<String>)> {
+pub fn server_command(agent_id: &str) -> Option<ServerCommand> {
     let (exe, socket) = LAUNCH.get()?;
-    Some((
-        exe.to_string_lossy().into_owned(),
-        vec!["mcp".into(), socket.to_string_lossy().into_owned(), agent_id.into()],
-    ))
+    Some(ServerCommand {
+        command: exe.to_string_lossy().into_owned(),
+        args: vec!["mcp".into(), socket.to_string_lossy().into_owned(), agent_id.into()],
+        token: token_for(agent_id),
+    })
+}
+
+/// Where Claude MCP configs go: next to the socket, readable only by this user.
+fn config_dir(socket: &Path) -> PathBuf {
+    socket.with_file_name("mcp-config")
+}
+
+/// Saves `config` as `agent_id`'s Claude MCP config in an owner-only file and returns its path, so the
+/// token in it stays out of process arguments, which `ps` shows to every user.
+pub fn claude_config_file(agent_id: &str, config: &Value) -> Option<PathBuf> {
+    let (_, socket) = LAUNCH.get()?;
+    let path = write_config(&config_dir(socket), agent_id, config);
+    if path.is_none() {
+        eprintln!("Grimoire tools are off for this turn: could not write the MCP config in {}", config_dir(socket).display());
+    }
+    path
+}
+
+fn write_config(dir: &Path, agent_id: &str, config: &Value) -> Option<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).ok()?;
+    let name: String = agent_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+    let path = dir.join(format!("{name}.json"));
+    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path).ok()?;
+    file.write_all(config.to_string().as_bytes()).ok()?;
+    Some(path)
+}
+
+fn tokens() -> std::sync::MutexGuard<'static, HashMap<String, String>> {
+    TOKENS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn token_for(agent_id: &str) -> String {
+    tokens().entry(agent_id.to_string()).or_insert_with(|| uuid::Uuid::new_v4().simple().to_string()).clone()
 }
 
 #[derive(Debug, PartialEq)]
@@ -336,7 +386,11 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
             }
             let theme = json!({ "name": input.name, "variants": variants, "css": input.css });
             let saved = themes::save(themes_dir, None, &theme, creator)?;
-            let text = format!("Saved the theme \"{}\" with id {}. Call set_theme to switch to it.", saved.theme["name"].as_str().unwrap_or_default(), saved.id);
+            let text = format!(
+                "Saved the theme \"{}\" with id {}. Ask the user to preview and apply it in Settings, under Appearance.",
+                saved.theme["name"].as_str().unwrap_or_default(),
+                saved.id
+            );
             (text, Some("themes_changed"))
         }
         "set_theme" => {
@@ -351,8 +405,13 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
                     _ => return Err(format!("More than one theme is called \"{wanted}\". Use its id instead.")),
                 },
             };
+            let name = theme.theme["name"].as_str().unwrap_or_default();
+            // Theme CSS restyles the whole window, so the user sees a familiar's theme before it applies.
+            if theme.theme.get("createdBy").is_some_and(|by| !by.is_null()) {
+                return Err(format!("A familiar made \"{name}\", so only the user can apply it, after a preview in Settings, under Appearance. Ask them to."));
+            }
             themes::set_active(db, themes_dir, &theme.id)?;
-            (format!("Grimoire now uses the theme \"{}\".", theme.theme["name"].as_str().unwrap_or_default()), Some("themes_changed"))
+            (format!("Grimoire now uses the theme \"{name}\"."), Some("themes_changed"))
         }
         "vault_search" => {
             let query = arguments.get("query").and_then(Value::as_str).unwrap_or_default().trim().to_lowercase();
@@ -461,6 +520,8 @@ where
 /// Familiars only get the tools once this succeeds.
 pub fn serve(ctx: Arc<Context>, socket: &Path) -> std::io::Result<()> {
     let _ = std::fs::remove_file(socket);
+    // Configs from the last run hold tokens that no longer work.
+    let _ = std::fs::remove_dir_all(config_dir(socket));
     // Bind with std here: setup runs outside the async runtime, so tokio takes the socket over in the task.
     let listener = std::os::unix::net::UnixListener::bind(socket)?;
     listener.set_nonblocking(true)?;
@@ -484,16 +545,28 @@ pub fn serve(ctx: Arc<Context>, socket: &Path) -> std::io::Result<()> {
 #[derive(Deserialize)]
 struct Request {
     agent: String,
+    #[serde(default)]
+    token: String,
     tool: String,
     #[serde(default)]
     arguments: Value,
+}
+
+/// Reads one relayed call and checks that its token belongs to the familiar it names.
+fn authorize(line: &str) -> Result<Request, String> {
+    let request: Request = serde_json::from_str(line).map_err(|e| format!("Bad request: {e}"))?;
+    let known = tokens().get(&request.agent).is_some_and(|token| !request.token.is_empty() && *token == request.token);
+    if !known {
+        return Err("This tool server isn't allowed to act for that familiar.".into());
+    }
+    Ok(request)
 }
 
 async fn handle_connection(stream: UnixStream, ctx: Arc<Context>) {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        let reply = match serde_json::from_str::<Request>(&line) {
+        let reply = match authorize(&line) {
             Ok(request) => {
                 // A familiar answering in a side conversation calls as "familiar~chat".
                 let (caller, lane) = crate::side::split(&request.agent);
@@ -524,7 +597,7 @@ async fn handle_connection(stream: UnixStream, ctx: Arc<Context>) {
                     Err(error) => json!({ "ok": false, "error": error }),
                 }
             }
-            Err(e) => json!({ "ok": false, "error": format!("Bad request: {e}") }),
+            Err(error) => json!({ "ok": false, "error": error }),
         };
         if write.write_all(format!("{reply}\n").as_bytes()).await.is_err() {
             break;
@@ -710,6 +783,36 @@ mod tests {
     }
 
     #[test]
+    fn refuses_calls_that_name_another_familiar() {
+        let (researcher, writer) = (token_for("tok-r1"), token_for("tok-w1"));
+        assert_ne!(researcher, writer);
+        assert_eq!(token_for("tok-r1"), researcher, "one token per familiar for the app's run");
+        let line = |agent: &str, token: &str| json!({ "agent": agent, "token": token, "tool": "list_familiars" }).to_string();
+
+        assert_eq!(authorize(&line("tok-r1", &researcher)).unwrap().agent, "tok-r1");
+        let refused = "This tool server isn't allowed to act for that familiar.";
+        assert_eq!(authorize(&line("tok-w1", &researcher)).err().unwrap(), refused, "the researcher's token can't act as the writer");
+        assert_eq!(authorize(&line("tok-r1", "")).err().unwrap(), refused);
+        assert_eq!(authorize(&line("nobody", "")).err().unwrap(), refused, "no token was ever issued for this id");
+        let no_token = json!({ "agent": "tok-r1", "tool": "list_familiars" }).to_string();
+        assert_eq!(authorize(&no_token).err().unwrap(), refused);
+        assert!(authorize("not json").err().unwrap().starts_with("Bad request"));
+    }
+
+    #[test]
+    fn claude_configs_are_owner_only_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("grimoire-mcp-{}", uuid::Uuid::new_v4())).join("mcp-config");
+        let config = json!({ "mcpServers": { "grimoire": { "env": { TOKEN_ENV: "secret" } } } });
+        let path = write_config(&dir, "a1~../chat", &config).unwrap();
+        assert_eq!(path.parent().unwrap(), dir, "a lane key can't leave the folder");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), config.to_string());
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn creates_and_switches_themes() {
         let (db, dir) = setup();
         let args = json!({ "name": "Rainy library", "dark": { "canvas": "#14181c", "accent": "#8fb3c9" } });
@@ -720,11 +823,17 @@ mod tests {
         let bad = json!({ "name": "Loud", "dark": { "canvas": "black", "accent": "#fff" } });
         assert!(call(&db, &dir, "r1", "create_theme", bad).unwrap_err().contains("hex color"));
 
-        call(&db, &dir, "r1", "set_theme", json!({ "theme": "rainy LIBRARY" })).unwrap();
+        // A familiar's theme waits for the user's preview, even for the familiar that made it.
+        let refused = call(&db, &dir, "r1", "set_theme", json!({ "theme": "rainy LIBRARY" })).unwrap_err();
+        assert!(refused.contains("only the user can apply it"), "{refused}");
         let list: Vec<Value> = serde_json::from_str(&call(&db, &dir, "w1", "list_themes", json!({})).unwrap().text).unwrap();
         let rainy = list.iter().find(|t| t["id"] == "rainy-library").unwrap();
-        assert_eq!(rainy["active"], true);
+        assert_eq!(rainy["active"], false);
         assert_eq!(rainy["createdBy"], "Researcher");
+
+        let switched = call(&db, &dir, "w1", "set_theme", json!({ "theme": "lapis" })).unwrap();
+        assert_eq!(switched.changed, Some("themes_changed"));
+        assert_eq!(themes::list(&db, &dir).unwrap().active, "lapis");
         assert!(call(&db, &dir, "r1", "set_theme", json!({ "theme": "Neon" })).unwrap_err().contains("No theme"));
         std::fs::remove_dir_all(dir).unwrap();
     }

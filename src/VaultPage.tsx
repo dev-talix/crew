@@ -153,6 +153,7 @@ export default function VaultPage(props: { agents: Agent[] }) {
               agents={props.agents}
               onEdit={() => setEditing({ kind: item().kind, item: item() })}
               onClose={() => setOpen(null)}
+              onError={setError}
             />
           </Sheet>
         )}
@@ -168,7 +169,7 @@ export default function VaultPage(props: { agents: Agent[] }) {
   );
 }
 
-function ItemDetails(props: { item: VaultItem; agents: Agent[]; onEdit: () => void; onClose: () => void }) {
+function ItemDetails(props: { item: VaultItem; agents: Agent[]; onEdit: () => void; onClose: () => void; onError: (message: string) => void }) {
   // Secrets load only when asked for, and leave with the sheet.
   const [secret, setSecret] = createSignal<Record<string, string> | null>(null);
   const [revealed, setRevealed] = createSignal<string[]>([]);
@@ -212,7 +213,9 @@ function ItemDetails(props: { item: VaultItem; agents: Agent[]; onEdit: () => vo
       await api.deleteVaultItem(props.item.id);
       props.onClose();
     } catch (e) {
+      // The page shows it too: when only the Keychain step failed, the item is gone and this sheet closes.
       setError(errorText(e));
+      props.onError(errorText(e));
     }
   };
 

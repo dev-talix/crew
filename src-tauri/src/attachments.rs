@@ -11,7 +11,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
 pub const MAX_FILES: usize = 10;
-pub const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+pub const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 const STAGING: &str = "staging";
 /// The header that carries a staged file's name, percent-encoded.
 const NAME_HEADER: &str = "x-file-name";
@@ -134,8 +134,8 @@ pub fn stage(root: &Path, name: &str, bytes: &[u8]) -> Result<StagedFile, String
     let name = clean_name(name);
     let kind = Kind::of(bytes);
     let size = bytes.len() as u64;
-    if kind == Kind::Image && size > MAX_IMAGE_BYTES {
-        return Err(format!("{name} is over 20 MB. Images can be up to 20 MB."));
+    if size > MAX_FILE_BYTES {
+        return Err(format!("{name} is over 20 MB. Attachments can be up to 20 MB."));
     }
     let token = uuid::Uuid::new_v4().to_string();
     let dir = root.join(STAGING).join(&token);
@@ -462,11 +462,14 @@ mod tests {
     }
 
     #[test]
-    fn refuses_big_images_bad_tokens_and_too_many_files() {
+    fn refuses_big_files_bad_tokens_and_too_many_files() {
         let root = temp_dir();
         let mut big = PNG.to_vec();
-        big.resize(MAX_IMAGE_BYTES as usize + 1, 0);
+        big.resize(MAX_FILE_BYTES as usize + 1, 0);
         assert!(stage(&root, "big.png", &big).unwrap_err().contains("20 MB"));
+        let video = vec![0u8; MAX_FILE_BYTES as usize + 1];
+        assert_eq!(stage(&root, "video.mov", &video).unwrap_err(), "video.mov is over 20 MB. Attachments can be up to 20 MB.");
+        assert!(stage(&root, "notes.pdf", &vec![0u8; MAX_FILE_BYTES as usize]).is_ok(), "exactly 20 MB is fine");
         assert!(Staged::new(root.clone(), vec!["../../x".into()]).is_err());
         let many = (0..=MAX_FILES).map(|_| uuid::Uuid::new_v4().to_string()).collect();
         assert!(Staged::new(root.clone(), many).is_err());

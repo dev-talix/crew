@@ -309,6 +309,8 @@ pub struct Preview {
     pub items: Vec<PreviewItem>,
     /// Chat messages that come with the familiars.
     pub history: usize,
+    /// A familiar in the file asks for full access. It comes in workspace-only unless the person keeps it.
+    pub full_access: bool,
 }
 
 struct NewFamiliar {
@@ -386,11 +388,13 @@ fn valid_settings(settings: &SettingsDoc) -> Result<(), String> {
 
 /// Works out an import: new ids for everything, "(2)" for taken names, and spell steps, rituals, and
 /// coven members pointed at the familiars this file brings, or else at yours with the same name.
-pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path) -> Result<Plan, String> {
+/// `keep_full_access` lets familiars that ask for full access keep it; otherwise they get workspace access.
+pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_full_access: bool) -> Result<Plan, String> {
     let existing = db.list_agents()?;
     let mut items = Vec::new();
     let now = now_ms();
 
+    let full_access = file.familiars.iter().any(|f| f.access == Access::Full);
     // Familiars first, so everything else can point at them.
     let mut taken: Vec<String> = existing.iter().map(|a| a.name.clone()).collect();
     let mut familiars = Vec::new();
@@ -418,6 +422,17 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path) -> Resu
         if !doc.history.is_empty() {
             line.notes.push(format!("Brings {} chat messages.", doc.history.len()));
         }
+        let access = match doc.access {
+            Access::Full if keep_full_access => {
+                line.notes.push("Keeps full access: it can run any command on this Mac, outside its folder and without a sandbox.".into());
+                Access::Full
+            }
+            Access::Full => {
+                line.notes.push("Asks for full access, which runs any command without a sandbox. It comes in with workspace access unless you keep full access.".into());
+                Access::Workspace
+            }
+            other => other,
+        };
         items.push(line);
         imported.entry(name.to_lowercase()).or_insert((id.clone(), final_name.clone()));
         let history = doc.history.into_iter().filter(|m| HISTORY_ROLES.contains(&m.role.as_str())).collect();
@@ -428,7 +443,7 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path) -> Resu
                 provider: doc.provider,
                 model: crate::clean_model(doc.model),
                 workspace: workspace.to_string_lossy().into_owned(),
-                access: doc.access,
+                access,
                 session_id: None,
                 avatar: doc.avatar,
                 effort,
@@ -610,7 +625,7 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path) -> Resu
     };
 
     let history = familiars.iter().map(|f| f.history.len()).sum();
-    Ok(Plan { preview: Preview { kind: file.kind, items, history }, familiars, spells, rituals, covens, themes, settings })
+    Ok(Plan { preview: Preview { kind: file.kind, items, history, full_access }, familiars, spells, rituals, covens, themes, settings })
 }
 
 /// What an import added.
@@ -755,8 +770,8 @@ async fn save_dialog(app: &AppHandle, name: &str) -> Option<PathBuf> {
     rx.await.ok().flatten().and_then(|p| p.into_path().ok())
 }
 
-/// The file the person picked to import, so applying it can't be pointed at another path.
-static PICKED: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// The file the person previewed, as read then, so applying it can't pick up a changed or different file.
+static PICKED: Mutex<Option<GrimoireFile>> = Mutex::new(None);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -789,17 +804,18 @@ pub(crate) async fn pick_import(app: AppHandle, state: State<'_, crate::AppState
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog().file().add_filter("Grimoire file", &["json"]).pick_file(move |path| drop(tx.send(path)));
     let Some(path) = rx.await.ok().flatten().and_then(|p| p.into_path().ok()) else { return Ok(None) };
-    let plan = plan(&state.db, &state.themes_dir, read(&path)?, &crate::home()?)?;
+    let picked = read(&path)?;
+    let plan = plan(&state.db, &state.themes_dir, picked.clone(), &crate::home()?, false)?;
     let file = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-    *PICKED.lock().map_err(|_| "import state poisoned")? = Some(path);
+    *PICKED.lock().map_err(|_| "import state poisoned")? = Some(picked);
     Ok(Some(Picked { file, preview: plan.preview }))
 }
 
-/// Imports the picked file. The plan is worked out again, so changes since the preview count.
+/// Imports the previewed file. The plan is worked out again, so changes to your Grimoire since the preview count.
 #[tauri::command]
-pub(crate) async fn apply_import(app: AppHandle, state: State<'_, crate::AppState>) -> Result<Imported, String> {
-    let path = PICKED.lock().map_err(|_| "import state poisoned")?.take().ok_or("Pick a file to import first.")?;
-    let plan = plan(&state.db, &state.themes_dir, read(&path)?, &crate::home()?)?;
+pub(crate) async fn apply_import(app: AppHandle, state: State<'_, crate::AppState>, keep_full_access: bool) -> Result<Imported, String> {
+    let picked = PICKED.lock().map_err(|_| "import state poisoned")?.take().ok_or("Pick a file to import first.")?;
+    let plan = plan(&state.db, &state.themes_dir, picked, &crate::home()?, keep_full_access)?;
     let done = apply(&state.db, &state.themes_dir, &plan)?;
     if done.settings {
         // Settings the app holds in memory follow the database again.
@@ -932,7 +948,7 @@ mod tests {
         })
         .unwrap();
         let text = serde_json::to_string(&export_backup(&db, &themes, false).unwrap()).unwrap();
-        let plan = plan(&db, &themes, parse(&text).unwrap(), &home).unwrap();
+        let plan = plan(&db, &themes, parse(&text).unwrap(), &home, false).unwrap();
         let line = plan.preview.items.iter().find(|i| i.what == "ritual" && i.name == "Weekly brief").unwrap();
         assert_eq!(line.notes, ["Casts the imported Topic brief (2)."]);
         apply(&db, &themes, &plan).unwrap();
@@ -952,7 +968,7 @@ mod tests {
         let text = serde_json::to_string_pretty(&export_backup(&db, &themes, true).unwrap()).unwrap();
 
         // Import into the same Grimoire: every name is taken.
-        let plan = plan(&db, &themes, parse(&text).unwrap(), &home).unwrap();
+        let plan = plan(&db, &themes, parse(&text).unwrap(), &home, false).unwrap();
         let line = |what: &str, name: &str| plan.preview.items.iter().find(|i| i.what == what && i.name == name).unwrap().clone();
         assert_eq!(line("familiar", "Researcher").final_name, "Researcher (2)");
         assert!(line("familiar", "Researcher").conflict);
@@ -963,6 +979,8 @@ mod tests {
         assert_eq!(line("ritual", "Morning").notes, ["Runs for the imported Researcher (2)."]);
         assert_eq!(plan.preview.history, 2);
         assert!(plan.preview.items.iter().all(|i| !i.skipped));
+        assert!(plan.preview.full_access);
+        assert!(line("familiar", "Researcher").notes.iter().any(|n| n.contains("comes in with workspace access")));
 
         let done = apply(&db, &themes, &plan).unwrap();
         assert_eq!((done.familiars, done.spells, done.rituals, done.covens, done.themes, done.settings), (2, 1, 1, 1, 1, true));
@@ -974,7 +992,7 @@ mod tests {
         assert_eq!(copy.session_id, None);
         assert!(copy.workspace.starts_with(&home.to_string_lossy().into_owned()));
         assert!(Path::new(&copy.workspace).is_dir());
-        assert_eq!((copy.model.as_deref(), copy.effort.as_deref(), &copy.access), (Some("claude-opus-5-5"), Some("high"), &Access::Full));
+        assert_eq!((copy.model.as_deref(), copy.effort.as_deref(), &copy.access), (Some("claude-opus-5-5"), Some("high"), &Access::Workspace));
         assert_eq!(budgets::get(&db, &copy.id).unwrap(), Some(Budget { tokens: 50_000, period: Period::Day }));
         assert_eq!(db.list_messages(&copy.id, None, 10).unwrap().len(), 2);
 
@@ -993,6 +1011,23 @@ mod tests {
     }
 
     #[test]
+    fn full_access_comes_in_only_when_kept() {
+        let themes = temp_dir("themes");
+        let home = temp_dir("home");
+        let db = stocked(&themes);
+        let text = serde_json::to_string_pretty(&export_one(&db, &themes, Kind::Familiar, "r").unwrap().0).unwrap();
+        let access = |keep: bool| {
+            let plan = plan(&db, &themes, parse(&text).unwrap(), &home, keep).unwrap();
+            assert!(plan.preview.full_access);
+            plan.familiars[0].agent.access.clone()
+        };
+        assert_eq!(access(false), Access::Workspace);
+        assert_eq!(access(true), Access::Full);
+        std::fs::remove_dir_all(themes).unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn single_spells_use_your_familiars_by_name() {
         let themes = temp_dir("themes");
         let home = temp_dir("home");
@@ -1006,12 +1041,12 @@ mod tests {
         // Another Grimoire with only a Researcher can't place step 2.
         let other = Db::open_in_memory().unwrap();
         familiar(&other, "x", "researcher");
-        let p = plan(&other, &themes, parse(&text).unwrap(), &home).unwrap();
+        let p = plan(&other, &themes, parse(&text).unwrap(), &home, false).unwrap();
         assert!(p.preview.items[0].skipped);
         assert_eq!(p.preview.items[0].notes, ["Step 2 needs a familiar named Scribe, and there isn't one."]);
 
         familiar(&other, "y", "Scribe");
-        let p = plan(&other, &themes, parse(&text).unwrap(), &home).unwrap();
+        let p = plan(&other, &themes, parse(&text).unwrap(), &home, false).unwrap();
         assert_eq!(p.preview.items[0].notes, ["Step 1 goes to your researcher.", "Step 2 goes to your Scribe."]);
         apply(&other, &themes, &p).unwrap();
         let steps = &other.list_workflows().unwrap()[0].steps;
@@ -1048,7 +1083,7 @@ mod tests {
             history: vec![],
         });
         file.themes.push(json!({ "name": "Ink", "colors": { "canvas": "#000000", "accent": "#ffffff" } }));
-        let mut p = plan(&db, &themes, file, &home).unwrap();
+        let mut p = plan(&db, &themes, file, &home, false).unwrap();
         p.spells.push(Workflow { id: "dup".into(), name: "A".into(), steps: vec![], created_at: 0, created_by: None });
         p.spells.push(Workflow { id: "dup".into(), name: "B".into(), steps: vec![], created_at: 0, created_by: None });
         assert!(apply(&db, &themes, &p).is_err());

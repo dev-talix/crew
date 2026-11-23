@@ -102,12 +102,13 @@ fn thread_params(agent: &Agent, tools_key: &str) -> Value {
     if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
         params["model"] = json!(model);
     }
-    if let Some((command, args)) = crate::tools::server_command(tools_key) {
+    if let Some(tools) = crate::tools::server_command(tools_key) {
         // Codex refuses MCP calls that need approval under approvalPolicy "never", so pre-approve Grimoire's own tools.
         // Codex gives up on a tool call after 60 seconds by default; ask_familiar can wait minutes for a reply.
         let server = json!({
-            "command": command,
-            "args": args,
+            "command": tools.command,
+            "args": tools.args,
+            "env": { (crate::tools::TOKEN_ENV): tools.token },
             "default_tools_approval_mode": "approve",
             "tool_timeout_sec": crate::tools::CALL_TIMEOUT_SECS,
         });

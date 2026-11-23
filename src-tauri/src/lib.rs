@@ -143,10 +143,39 @@ fn workspace_for(requested: Option<&str>, name: &str, id: &str, home: &Path) -> 
     if !path.is_absolute() {
         return Err("The workspace must be a full path, like ~/Projects/site.".into());
     }
-    if path.parent().is_none() || path == home {
-        return Err("Pick a folder inside your home folder, not the disk root or the home folder itself.".into());
+    let path = resolve_dots(&path);
+    if !strictly_inside(&path, home) {
+        return Err("Pick a folder inside your home folder, not the home folder itself or a place outside it.".into());
     }
     Ok(path)
+}
+
+/// `path` with `.` and `..` worked out from the text alone, since the folder may not exist yet.
+fn resolve_dots(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Whether `path` sits below `home`, also after following symlinks in the part that already exists.
+fn strictly_inside(path: &Path, home: &Path) -> bool {
+    if path == home || !path.starts_with(home) {
+        return false;
+    }
+    let Ok(real_home) = home.canonicalize() else { return true };
+    let Some(existing) = path.ancestors().find(|a| a.exists()) else { return false };
+    let Ok(real) = existing.canonicalize() else { return false };
+    // A new folder may go straight into home, but an existing one must not lead back to home.
+    real.starts_with(&real_home) && (existing != path || real != real_home)
 }
 
 #[tauri::command]
@@ -494,9 +523,10 @@ fn save_vault_item(app: AppHandle, state: State<AppState>, input: vault::ItemInp
 
 #[tauri::command]
 fn delete_vault_item(app: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
-    vault::delete(&state.db, state.secrets.as_ref(), &id)?;
+    let deleted = vault::delete(&state.db, state.secrets.as_ref(), &id);
+    // The list changes even when only the Keychain step failed.
     let _ = app.emit("vault_changed", ());
-    Ok(())
+    deleted
 }
 
 #[derive(Serialize)]
@@ -599,7 +629,8 @@ pub fn run() {
             std::fs::create_dir_all(&dir)?;
             memory::init(&dir);
             attachments::clear_staging(&attachments::root(&dir));
-            let db = Arc::new(Db::open(&dir.join("grimoire.db"))?);
+            // A setup error ends the app with a panic nobody sees, so say what's wrong first.
+            let db = Arc::new(Db::open(&dir.join("grimoire.db")).inspect_err(|e| startup_alert(&e.to_string()))?);
             let billing = db.setting(CLAUDE_BILLING).ok().flatten();
             providers::USE_CLAUDE_SUBSCRIPTION.store(billing.as_deref() != Some("api"), Ordering::Relaxed);
             let runtime = Runtime::new(db.clone(), app.handle().clone());
@@ -741,6 +772,14 @@ pub fn run() {
         });
 }
 
+/// Shows why Grimoire can't start, with macOS's own alert, since no window is up yet. Waits for OK.
+fn startup_alert(message: &str) {
+    eprintln!("Grimoire can't start: {message}");
+    let _ = std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", "on run argv", "-e", "display alert \"Grimoire can't start\" message (item 1 of argv) as critical", "-e", "end run", message])
+        .status();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,5 +816,28 @@ mod tests {
         assert!(workspace_for(Some("~"), "a", "abcdef", home).is_err());
         assert!(workspace_for(Some("/"), "a", "abcdef", home).is_err());
         assert!(workspace_for(Some("relative/dir"), "a", "abcdef", home).is_err());
+    }
+
+    #[test]
+    fn refuses_folders_outside_home() {
+        let home = Path::new("/Users/me");
+        for outside in ["/etc", "~/../../etc", "/tmp/grimoire", "/Users/other/project", "/Users/me/../other", "/Users/me/code/../.."] {
+            assert!(workspace_for(Some(outside), "a", "abcdef", home).is_err(), "{outside} should be refused");
+        }
+        assert!(workspace_for(Some("/Users/meme/app"), "a", "abcdef", home).is_err(), "a sibling with the same prefix is outside");
+        assert_eq!(workspace_for(Some("~/code/../site/./app"), "a", "abcdef", home).unwrap(), Path::new("/Users/me/site/app"));
+    }
+
+    #[test]
+    fn refuses_symlinks_that_lead_out_of_home() {
+        let home = std::env::temp_dir().join(format!("grimoire-home-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(home.join("code")).unwrap();
+        std::os::unix::fs::symlink("/etc", home.join("etc-link")).unwrap();
+        std::os::unix::fs::symlink(&home, home.join("home-link")).unwrap();
+        assert!(workspace_for(Some(home.join("etc-link/app").to_str().unwrap()), "a", "abcdef", &home).is_err());
+        assert!(workspace_for(Some(home.join("home-link").to_str().unwrap()), "a", "abcdef", &home).is_err());
+        assert!(workspace_for(Some(home.join("code").to_str().unwrap()), "a", "abcdef", &home).is_ok());
+        assert!(workspace_for(Some(home.join("new").to_str().unwrap()), "a", "abcdef", &home).is_ok());
+        std::fs::remove_dir_all(home).unwrap();
     }
 }
