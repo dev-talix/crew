@@ -51,7 +51,7 @@ pub(crate) fn migrate_requests(conn: &Connection) -> rusqlite::Result<()> {
 const BACKFILL_REQUESTS: &str = "INSERT INTO handoffs (chat_id, kind, text, status, created_at)
   SELECT m.chat_id, c.handoff, m.text,
     CASE WHEN EXISTS (SELECT 1 FROM messages r WHERE r.chat_id = m.chat_id AND r.id > m.id AND r.id < m.next
-                      AND (r.role = 'error' OR (r.role = 'assistant' AND r.status IN ('interrupted', 'stopped', 'cancelled'))))
+                      AND (r.role = 'error' OR (r.role = 'assistant' AND r.status IN ('interrupted', 'stopped', 'cancelled', 'streaming'))))
            THEN 'failed'
          WHEN EXISTS (SELECT 1 FROM messages r WHERE r.chat_id = m.chat_id AND r.id > m.id AND r.id < m.next) THEN 'done'
          ELSE 'failed' END,
@@ -261,7 +261,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let (a, b) = (familiar(&db, "a"), familiar(&db, "b"));
         let chat = crate::side::create(&db, &a.id, &b.id, "q").unwrap();
-        let rows = [("user", "q1", "done"), ("assistant", "a1", "done"), ("user", "q2", "done"), ("error", "no", "done"), ("user", "q3", "done")];
+        let rows = [("user", "q1", "done"), ("assistant", "a1", "done"), ("user", "q2", "done"), ("error", "no", "done"), ("user", "q3", "done"), ("assistant", "cut off", "streaming")];
         for (role, text, state) in rows {
             db.insert_message_in(&chat.id, &b.id, role, text, state, None).unwrap();
         }

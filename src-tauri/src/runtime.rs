@@ -109,6 +109,8 @@ pub fn origin_of(source: Option<&str>) -> &'static str {
 struct AgentState {
     busy: bool,
     queue: VecDeque<Job>,
+    /// Set by a stop. A turn still checking its Mac sees it before it starts the CLI.
+    stop_requested: bool,
 }
 
 pub struct Runtime {
@@ -250,7 +252,13 @@ impl Runtime {
     pub async fn stop(self: &Arc<Self>, agent_id: &str) -> Result<(), String> {
         let cancelled: Vec<Job> = {
             let mut agents = self.agents.lock().map_err(|_| "runtime state poisoned")?;
-            agents.get_mut(agent_id).map(|s| s.queue.drain(..).collect()).unwrap_or_default()
+            agents
+                .get_mut(agent_id)
+                .map(|s| {
+                    s.stop_requested = s.busy;
+                    s.queue.drain(..).collect()
+                })
+                .unwrap_or_default()
         };
         for job in cancelled {
             self.update_status(job.message_id, agent_id, "cancelled");
@@ -266,6 +274,11 @@ impl Runtime {
             }
             None => Ok(()),
         }
+    }
+
+    /// Clears a pending stop for `agent_id`, returning whether there was one.
+    fn take_stop(&self, agent_id: &str) -> bool {
+        self.agents.lock().is_ok_and(|mut a| a.get_mut(agent_id).is_some_and(|s| std::mem::take(&mut s.stop_requested)))
     }
 
     pub fn is_busy(&self, agent_id: &str) -> bool {
@@ -493,8 +506,13 @@ impl Runtime {
         };
         let mut writer = TurnWriter::new(&self.db, &self.app, &agent);
         writer.origin = origin_of(source);
+        self.take_stop(agent_id);
         if let Err(outcome) = gate(&mut writer, &self.db, &agent, crate::remote::quick_setup).await {
             return outcome;
+        }
+        // A stop that came while the gate checked the other Mac found no CLI turn to interrupt.
+        if self.take_stop(agent_id) {
+            return TurnOutcome::Stopped;
         }
         let mut input = match crate::attachments::turn_input(std::path::Path::new(&agent.workspace), text, attachments) {
             Ok(input) => input,

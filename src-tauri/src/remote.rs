@@ -7,12 +7,12 @@
 
 use crate::db::{Agent, Db};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::process::Command;
 
@@ -25,8 +25,6 @@ const QUICK: Duration = Duration::from_secs(8);
 const RETRY_EVERY: Duration = Duration::from_secs(180);
 /// How long the check before a turn waits for the other Mac to accept a connection.
 const PROBE_CONNECT_SECS: u32 = 5;
-/// How long a Mac that answered counts as online, so the next turn skips the check.
-const FRESH: Duration = Duration::from_secs(60);
 
 /// The SSH destination, like `me@studio.local` or an alias from ~/.ssh/config. Empty means this Mac.
 pub fn clean_host(host: Option<&str>) -> Result<Option<String>, String> {
@@ -174,9 +172,14 @@ const REFUSED_SIGNS: &[&str] = &[
     "Too many authentication failures",
 ];
 
+/// Whether ssh reached a Mac and was turned away, which the person has to fix.
+fn refused_text(stderr: &str) -> bool {
+    REFUSED_SIGNS.iter().any(|sign| stderr.contains(sign))
+}
+
 /// Whether a failed process's stderr says ssh couldn't reach the other Mac or lost it.
 pub fn offline_text(stderr: &str) -> bool {
-    if REFUSED_SIGNS.iter().any(|sign| stderr.contains(sign)) {
+    if refused_text(stderr) {
         return false;
     }
     stderr.lines().map(str::trim).any(|line| {
@@ -264,8 +267,6 @@ pub async fn quick_setup(host: String, workspace: String) -> Result<(), SshError
 /// Hosts that didn't answer the last time Grimoire tried them. Only this run of the app knows: a host
 /// counts as online until a try fails.
 static OFFLINE: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
-/// When each host last answered, so a turn right after another skips the check.
-static ANSWERED: Mutex<BTreeMap<String, Instant>> = Mutex::new(BTreeMap::new());
 
 static APP: OnceLock<(AppHandle, Arc<Db>)> = OnceLock::new();
 
@@ -273,19 +274,8 @@ pub fn is_offline(host: &str) -> bool {
     OFFLINE.lock().is_ok_and(|hosts| hosts.contains(host))
 }
 
-fn answered_recently(host: &str) -> bool {
-    ANSWERED.lock().is_ok_and(|hosts| hosts.get(host).is_some_and(|at| at.elapsed() < FRESH))
-}
-
 /// Records what the last try found, and tells the UI when that changed.
 pub fn set_offline(host: &str, offline: bool) {
-    if let Ok(mut hosts) = ANSWERED.lock() {
-        if offline {
-            hosts.remove(host);
-        } else {
-            hosts.insert(host.to_string(), Instant::now());
-        }
-    }
     let changed = OFFLINE.lock().is_ok_and(|mut hosts| if offline { hosts.insert(host.to_string()) } else { hosts.remove(host) });
     if changed {
         agents_changed();
@@ -330,8 +320,8 @@ pub fn with_status(db: &Db, agents: Vec<Agent>) -> Result<Vec<AgentStatus>, Stri
 
 /// Gets a remote familiar ready for a turn, so nothing spawns for a Mac that won't answer. One saved
 /// while its Mac was offline, or whose Mac didn't answer last time, gets a setup try first: success
-/// clears the pending flag and the turn goes on. Any other familiar whose Mac hasn't answered in the
-/// last minute gets a quick `probe`. A failure returns what to tell the person instead. `setup` is
+/// clears the pending flag and the turn goes on. Any other familiar gets a quick `probe` before every
+/// turn, so a Mac that went offline since the last turn is caught before anything starts. A failure returns what to tell the person instead. `setup` is
 /// `quick_setup` and `probe` is `probe` in the app.
 pub async fn ready<F, Fut>(db: &Db, agent: &Agent, setup: F, probe: Probe) -> Result<(), String>
 where
@@ -341,9 +331,6 @@ where
     let Some(host) = &agent.host else { return Ok(()) };
     let pending = db.pending_setups()?.contains(&agent.id);
     if !pending && !is_offline(host) {
-        if answered_recently(host) {
-            return Ok(());
-        }
         return match probe(host.clone()).await {
             Ok(()) => {
                 set_offline(host, false);
@@ -382,6 +369,10 @@ async fn ready_now(db: &Db, agent: &Agent) -> Result<(), String> {
 /// plain offline message. ssh can end before it prints anything Grimoire reads, say when the CLI's
 /// stdin closes first, so an unclear failure gets one `probe` to see whether the Mac answers at all.
 pub async fn explain(name: &str, host: &str, reason: String, probe: Probe) -> String {
+    // A refused key or changed host key is the person's to fix, whatever a later check finds.
+    if refused_text(&reason) {
+        return reason;
+    }
     if offline_text(&reason) || probe(host.to_string()).await == Err(SshError::Offline) {
         set_offline(host, true);
         return offline_message(name, host, false);
@@ -528,11 +519,6 @@ mod tests {
     fn no_setup(_: String, _: String) -> std::future::Ready<Result<(), SshError>> {
         panic!("a set-up familiar needs no setup")
     }
-    /// Makes Grimoire forget when `host` last answered, as if a minute went by.
-    fn age(host: &str) {
-        ANSWERED.lock().unwrap().insert(host.into(), Instant::now() - FRESH);
-    }
-
     #[tokio::test]
     async fn a_set_up_familiar_checks_its_mac_before_a_turn() {
         let host = "probe-test.local";
@@ -550,21 +536,18 @@ mod tests {
         }
 
         // Its Mac went offline since Grimoire last heard from it: the first turn is refused plainly.
-        assert!(!is_offline(host) && !answered_recently(host), "nothing known yet");
+        assert!(!is_offline(host), "nothing known yet");
         assert_eq!(ready(&db, &agent, no_setup, down).await, Err(offline_message("Ada", host, false)));
         assert!(is_offline(host));
 
-        // Back online. A turn right after another skips the check.
+        // Back online, then gone again right after a turn: every turn checks, so the second is refused.
         set_offline(host, false);
-        assert_eq!(ready(&db, &agent, no_setup, down).await, Ok(()), "answered moments ago");
-        age(host);
         assert_eq!(ready(&db, &agent, no_setup, up).await, Ok(()));
-        assert!(answered_recently(host), "the check counts as an answer");
-        assert_eq!(ready(&db, &agent, no_setup, down).await, Ok(()));
-        assert_eq!(CHECKS.load(Ordering::SeqCst), 2, "one check per stale minute");
+        assert_eq!(ready(&db, &agent, no_setup, down).await, Err(offline_message("Ada", host, false)));
+        assert_eq!(CHECKS.load(Ordering::SeqCst), 3, "one check per turn");
 
         // A refused key is the person's to fix, so it's shown as is.
-        age(host);
+        set_offline(host, false);
         assert_eq!(ready(&db, &agent, no_setup, probe_refused).await, Err("studio: Permission denied (publickey).".into()));
         assert!(!is_offline(host));
     }
@@ -578,6 +561,8 @@ mod tests {
         let silent = explain("Ada", host, "claude stopped unexpectedly.".into(), probe_offline).await;
         assert_eq!(silent, offline, "an unclear failure checks the Mac");
         assert!(is_offline(host));
+        let refused = explain("Ada", host, "studio: Permission denied (publickey).".into(), probe_offline).await;
+        assert_eq!(refused, "studio: Permission denied (publickey).", "a refused key isn't called offline");
         let real = explain("Ada", host, "quota".into(), probe_online).await;
         assert_eq!(real, "quota", "the Mac answered, so the failure was something else");
     }
@@ -641,9 +626,9 @@ mod tests {
         assert!(db.pending_setups().unwrap().is_empty(), "setup is done");
         assert!(!is_offline(host));
 
-        // A familiar that's set up on a Mac that just answered goes straight to its turn.
-        assert_eq!(ready(&db, &agent, offline, probe_offline).await, Ok(()));
-        assert_eq!(tries.load(Ordering::SeqCst), 1, "no ssh try");
+        // A familiar that's set up needs only the quick check, not another setup try.
+        assert_eq!(ready(&db, &agent, offline, probe_online).await, Ok(()));
+        assert_eq!(tries.load(Ordering::SeqCst), 1, "no setup try");
         // Once its Mac stops answering, the person gets told to try again later.
         set_offline(host, true);
         assert_eq!(ready(&db, &agent, offline, probe_offline).await.unwrap_err(), offline_message("Ada", host, false));

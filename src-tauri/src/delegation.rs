@@ -338,6 +338,8 @@ fn open(ctx: &crate::tools::Context, lane: Option<&str>, out: &Outgoing, verb: &
     };
     side::link(&ctx.app, &ctx.db, lane, &out.asker.id, &format!("{verb} {}", out.target.name), &chat)?;
     let handoff = crate::handoffs::record(&ctx.db, &chat, kind, &out.message, crate::handoffs::Status::Waiting)?;
+    // An ask can wait a while behind the other familiar's current turn, so show it as Waiting now.
+    let _ = ctx.app.emit(crate::handoffs::CHANGED, ());
     Ok((chat, handoff))
 }
 
