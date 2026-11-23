@@ -106,7 +106,7 @@ mod tests {
 
         let list = respond(&request("tools/list", json!({})), |_, _| unreachable!()).unwrap();
         let names: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["list_familiars", "list_spells", "create_spell", "list_themes", "create_theme", "vault_search", "vault_use", "ask_familiar", "message_familiar", "set_theme", "read_memory", "remember", "forget_memory", "ask_person", "read_ledger", "update_ledger", "start_helper", "list_helpers", "stop_helper"]);
+        assert_eq!(names, ["list_familiars", "list_spells", "create_spell", "list_themes", "create_theme", "vault_search", "vault_use", "ask_familiar", "message_familiar", "set_theme", "read_memory", "remember", "forget_memory", "ask_person", "read_ledger", "update_ledger", "start_helper", "list_helpers", "stop_helper", "draft_message"]);
     }
 
     #[test]

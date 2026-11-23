@@ -521,6 +521,10 @@ export const api = {
     invoke<Ledger>("save_ledger", { agentId, patch }),
   listHelpers: (agentId: string) => invoke<Helper[]>("list_helpers", { agentId }),
   stopHelper: (id: string) => invoke<void>("stop_helper", { id }),
+  listDrafts: () => invoke<Draft[]>("list_drafts"),
+  /** Marks a draft sent, with the person's edits, or discarded. The familiar hears which. */
+  closeDraft: (id: string, sent: boolean, edits: DraftEdits | null) => invoke<Draft>("close_draft", { id, sent, edits }),
+  openDraftLink: (id: string, url: string) => invoke<void>("open_draft_link", { id, url }),
 };
 
 export interface InboxOption {
@@ -580,7 +584,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));
@@ -658,4 +662,22 @@ export function relativeTime(ms: number, now = Date.now()): string {
 
 export function shortPath(path: string): string {
   return path.replace(/^\/Users\/[^/]+/, "~");
+}
+
+export type DraftChannel = "email" | "slack" | "post";
+
+export interface DraftEdits {
+  to: string[];
+  subject: string | null;
+  body: string;
+}
+
+export interface Draft extends DraftEdits {
+  id: string;
+  agentId: string;
+  channel: DraftChannel;
+  note: string | null;
+  state: "draft" | "sent" | "discarded";
+  createdAt: number;
+  closedAt: number | null;
 }

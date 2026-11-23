@@ -177,13 +177,14 @@ pub fn definitions() -> Value {
         list.extend(inbox::definitions());
         list.extend(ledger::definitions());
         list.extend(crate::helpers::definitions().as_array().cloned().unwrap_or_default());
+        list.extend(crate::drafts::definitions());
     }
     list
 }
 
 /// Tool names as Claude's `--allowedTools` expects them.
 pub fn claude_tool_names() -> String {
-    TOOL_NAMES.iter().chain(&memory::TOOL_NAMES).chain(&inbox::TOOL_NAMES).chain(&ledger::TOOL_NAMES).chain(&crate::helpers::TOOL_NAMES).map(|name| format!("mcp__{SERVER_NAME}__{name}")).collect::<Vec<_>>().join(",")
+    TOOL_NAMES.iter().chain(&memory::TOOL_NAMES).chain(&inbox::TOOL_NAMES).chain(&ledger::TOOL_NAMES).chain(&crate::helpers::TOOL_NAMES).chain(&[crate::drafts::TOOL]).map(|name| format!("mcp__{SERVER_NAME}__{name}")).collect::<Vec<_>>().join(",")
 }
 
 /// How a CLI starts the Grimoire tool server for one familiar.
@@ -584,6 +585,8 @@ async fn handle_connection(stream: UnixStream, ctx: Arc<Context>) {
                     crate::delegation::run(&ctx, &caller, lane, request.arguments).await.map(|text| Outcome { text, changed: None })
                 } else if request.tool == "message_familiar" {
                     crate::delegation::run_message(&ctx, &caller, lane, request.arguments).await.map(|text| Outcome { text, changed: None })
+                } else if request.tool == crate::drafts::TOOL {
+                    crate::drafts::run(&ctx.app, &ctx.db, &caller, &request.arguments).map(|text| Outcome { text, changed: None })
                 } else if request.tool == "vault_use" {
                     let ask = |question| ctx.approvals.ask(&ctx.app, question);
                     let used = vault_use(&ctx.db, ctx.secrets.as_ref(), &caller, request.arguments, ask).await;

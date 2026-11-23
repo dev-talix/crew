@@ -230,6 +230,14 @@ pub fn approval_closed(request: &Request) {
     mac::withdraw(&Target::Approval { agent_id: request.agent_id.clone(), id: request.id.clone() }.identifier());
 }
 
+/// A familiar drafted a message for the person to send. `what` reads like "email draft to a@example.com".
+pub fn draft_ready(app: &AppHandle, agent_id: &str, what: &str, body: &str) {
+    send(app, Kind::Approval, |n| {
+        let body = clip(&format!("{}: {}", capitalize(what), first_line(body)));
+        Some(Note { title: format!("{} wrote a draft for you to send", n.agent_name(agent_id)), body, target: Target::Agent(agent_id.into()) })
+    });
+}
+
 pub fn ritual_fired(app: &AppHandle, ritual: &str, agent_id: &str) {
     send(app, Kind::Run, |n| {
         let (title, body) = ritual_text(ritual, &n.agent_name(agent_id));

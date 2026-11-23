@@ -5,6 +5,7 @@ import Approvals from "./Approvals";
 import BotAvatar from "./BotAvatar";
 import Chat, { type ChatIntent } from "./Chat";
 import CommandPalette, { type PaletteActions } from "./CommandPalette";
+import Drafts from "./Drafts";
 import { createChatStore } from "./chatStore";
 import HomePage from "./HomePage";
 import InboxPage, { InboxLink } from "./Inbox";
@@ -382,6 +383,7 @@ export default function App() {
         />
       </Show>
       <Approvals agents={agents()} />
+      <Drafts agents={agents()} />
     </div>
   );
 }

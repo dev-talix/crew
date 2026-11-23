@@ -41,6 +41,10 @@
   library" and it saves it through Grimoire's own tools, credited to it.
 - **The vault** keeps logins, API keys, and cards in your macOS Keychain. Familiars can use a
   secret in a command without ever seeing it, and Grimoire asks you first.
+- **Drafts, not sends.** A familiar never sends email, Slack messages, or posts. It drafts them with
+  `draft_message`, and the draft shows up as a card in the corner, with a notification when approval
+  notifications are on. Edit it, open it in Mail or copy it, then mark it sent or discard it; the
+  familiar hears which, with your edits. "Drafts" in the corner lists recent ones.
 - **The dock** pins your familiars to the edge of the screen, so you can chat without opening
   the main window. Pick which familiars it shows in Settings, General; new ones show up until you
   turn them off.
@@ -277,7 +281,8 @@ Settings, Permissions decides when familiars need your OK before a shell command
 
 - **Never ask** (the default): familiars act on their own, within the access you gave each one.
 - **Ask when a rule matches**: Grimoire asks when a command matches an "Always ask" rule. It starts
-  with `git push*`, `rm -rf *`, and `sudo *`.
+  with `git push*`, `rm -rf *`, and `sudo *`, plus rules that catch a familiar sending messages
+  itself (`*sendmail *`, `*osascript*Mail*`, `*hooks.slack.com*`, `*gh * comment*`).
 - **Ask before every command**: Grimoire asks unless an "Allow without asking" rule matches. An
   "Always ask" rule wins when both match.
 

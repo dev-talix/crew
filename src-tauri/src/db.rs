@@ -246,7 +246,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -484,6 +484,9 @@ impl Db {
         }
         if version < 18 {
             crate::helpers::migrate(&conn)?;
+        }
+        if version < 19 {
+            crate::drafts::migrate(&conn)?;
         }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",

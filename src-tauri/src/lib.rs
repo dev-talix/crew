@@ -7,6 +7,7 @@ mod covens;
 mod db;
 mod delegation;
 mod dock;
+mod drafts;
 mod exports;
 mod helpers;
 mod inbox;
@@ -770,7 +771,10 @@ pub fn run() {
             ledger::save_ledger,
             helpers::list_helpers,
             helpers::stop_helper,
-            memory::add_memory
+            memory::add_memory,
+            drafts::list_drafts,
+            drafts::close_draft,
+            drafts::open_draft_link
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {
