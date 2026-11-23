@@ -3,6 +3,7 @@ import { api, errorText, type Agent, type ThemeEntry } from "./api";
 import { mix, modesOf, palette, ROLE_LABELS, ROLES, seeds, type Colors, type Mode, type Role, type ThemeFile } from "./theme";
 import { activeTheme, previewMode, previewTheme, themes } from "./themeStore";
 import { Segmented, Sheet } from "./ui";
+import { ExportButton } from "./ImportExport";
 import "./themes.css";
 
 const MODES: Mode[] = ["dark", "light"];
@@ -325,6 +326,7 @@ function ThemeEditor(props: { id: string | null; theme: ThemeFile; startMode: Mo
           <button type="button" class="ghost danger" onClick={() => void remove()}>
             {confirmDelete() ? "Click again to delete" : "Delete theme"}
           </button>
+          <ExportButton kind="theme" id={props.id!} onError={setError} />
         </Show>
         <span class="spacer" />
         <button type="button" class="ghost" onClick={() => props.onClose()}>

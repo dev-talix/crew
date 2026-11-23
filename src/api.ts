@@ -3,6 +3,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createEffect, createSignal, onSettled, type Accessor } from "solid-js";
 import type { Avatar } from "./avatar";
 import type { ThemeFile } from "./theme";
+import type * as Budgets from "./budgets";
+import type * as Transfer from "./transfer";
 
 export type Provider = "codex" | "claude";
 export type Access = "workspace" | "full";
@@ -282,6 +284,18 @@ export const api = {
   planLimits: () => invoke<PlanLimits>("plan_limits"),
   checkForUpdates: () => invoke<UpdateCheck>("check_for_updates"),
   savePermissions: (permissions: Permissions) => invoke<Permissions>("save_permissions", { permissions }),
+  listBudgets: () => invoke<Budgets.BudgetStatus[]>("list_budgets"),
+  setBudget: (agentId: string, budget: Budgets.Budget | null) => invoke<void>("set_budget", { agentId, budget }),
+  getPlanGuard: () => invoke<Budgets.PlanGuard>("get_plan_guard"),
+  savePlanGuard: (guard: Budgets.PlanGuard) => invoke<Budgets.PlanGuard>("save_plan_guard_setting", { guard }),
+  ritualPause: () => invoke<string | null>("ritual_pause"),
+  ritualSkips: () => invoke<Budgets.RitualSkip[]>("ritual_skips"),
+  /** Asks where to save, then writes the file. Null when cancelled. */
+  exportItem: (kind: Transfer.ExportKind, id: string) => invoke<string | null>("export_item", { kind, id }),
+  exportBackup: (includeHistory: boolean) => invoke<string | null>("export_backup_file", { includeHistory }),
+  /** Asks for a file and previews it. Null when cancelled. */
+  pickImport: () => invoke<Transfer.Picked | null>("pick_import"),
+  applyImport: () => invoke<Transfer.Imported>("apply_import"),
 };
 
 /**
@@ -321,7 +335,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "budgets_changed",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

@@ -3,6 +3,7 @@ import { createMemo, createSignal, createStore, For, onCleanup, Show } from "sol
 import BotAvatar, { type Mood } from "./BotAvatar";
 import { api, describeSchedule, onEvent, onMountAsync, PROVIDER_NAMES, relativeTime, type Agent, type Message, type Coven, type Routine, type Workflow } from "./api";
 import CovenEditor from "./CovenEditor";
+import { RitualPauseNotice } from "./BudgetControls";
 import HomeCircle from "./HomeCircle";
 import { PlusIcon } from "./icons";
 import { EmptyState, Page, Sheet } from "./ui";
@@ -127,6 +128,7 @@ export default function HomePage(props: {
         }
       >
         <div class="home">
+          <RitualPauseNotice />
           <div class="coven-chips" role="tablist" aria-label="Covens">
             <button role="tab" aria-selected={!coven() ? "true" : "false"} class={["coven-chip", { on: !coven() }]} onClick={() => choose(null)}>
               All <span class="coven-chip-count">{props.agents.length}</span>

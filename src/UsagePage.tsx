@@ -4,6 +4,8 @@ import { api, errorText, relativeTime, type Agent, type PlanLimits } from "./api
 import { RefreshIcon } from "./icons";
 import { Page, Segmented } from "./ui";
 import { claudeWindows, codexWindows, compact, ORIGINS, since, summarize, type LimitWindow, type Origin, type UsageRow } from "./usage";
+import { BudgetBar, PlanGuardSetting } from "./BudgetControls";
+import { familiarRows, type BudgetStatus } from "./budgets";
 import "./usage.css";
 
 const DAYS = 7;
@@ -66,12 +68,14 @@ export default function UsagePage(props: { agents: Agent[] }) {
   const [error, setError] = createSignal("");
   const [view, setView] = createSignal<"source" | "familiar">("source");
   const [hovered, setHovered] = createSignal<number | null>(null);
+  const [budgets, setBudgets] = createSignal<BudgetStatus[]>([]);
 
   const load = async () => {
     setLoading(true);
     setError("");
     const now = Date.now();
     const [plan, usage] = await Promise.allSettled([api.planLimits(), api.usageSince(since(now, DAYS))]);
+    setBudgets(await api.listBudgets().catch(() => []));
     if (plan.status === "fulfilled") setLimits(plan.value);
     else setError(errorText(plan.reason));
     if (usage.status === "fulfilled") setRows(usage.value);
@@ -117,6 +121,8 @@ export default function UsagePage(props: { agents: Agent[] }) {
           />
         </div>
 
+        <PlanGuardSetting />
+
         <h2 class="section-title">Grimoire, last {DAYS} days</h2>
         <div class="list usage-activity">
           <div class="usage-activity-head">
@@ -143,7 +149,7 @@ export default function UsagePage(props: { agents: Agent[] }) {
               when={view() === "source"}
               fallback={
                 <ul class="usage-familiars">
-                  <For each={summary().byAgent}>
+                  <For each={familiarRows(summary().byAgent, budgets())}>
                     {(entry) => {
                       const agent = () => agentById(entry.agentId);
                       return (
@@ -156,6 +162,7 @@ export default function UsagePage(props: { agents: Agent[] }) {
                             <span style={{ width: `${(entry.tokens / top()) * 100}%`, background: agent()?.avatar.color ?? "var(--faint)" }} />
                           </span>
                           <span class="usage-familiar-value">{compact(entry.tokens)}</span>
+                          <Show when={entry.budget}>{(b) => <BudgetBar status={b()} />}</Show>
                         </li>
                       );
                     }}

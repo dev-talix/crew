@@ -4,6 +4,7 @@ import BotAvatar from "./BotAvatar";
 import { AgentSelect, EmptyState, Page, Sheet } from "./ui";
 import { SpellArt, SPELL_TEMPLATES, type SpellTemplate } from "./EmptyArt";
 import { api, errorText, onEvent, onMountAsync, type Agent, type Workflow, type WorkflowProgress } from "./api";
+import { ExportButton } from "./ImportExport";
 import "./workflows.css";
 
 type Run = Omit<WorkflowProgress, "workflowId">;
@@ -574,6 +575,7 @@ function WorkflowEditor(props: {
           <button type="button" class="ghost danger" onClick={destroy}>
             {confirmDelete() ? "Click again to delete" : "Delete spell"}
           </button>
+          <ExportButton kind="spell" id={props.workflow!.id} onError={setError} />
         </Show>
         <span class="spacer" />
         <button type="button" class="ghost" onClick={() => props.onCancel()}>
