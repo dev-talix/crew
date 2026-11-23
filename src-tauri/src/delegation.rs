@@ -381,4 +381,137 @@ mod tests {
         assert!(preview(&long).ends_with('…'));
         assert!(preview(&long).chars().count() <= 401);
     }
+
+    struct Quiet;
+
+    impl crate::runtime::Sink for Quiet {
+        fn message(&self, _: &crate::db::Message) {}
+        fn delta(&self, _: &str, _: i64, _: &str) {}
+        fn model(&self, _: &str, _: &str) {}
+    }
+
+    /// Two cheap familiars ask each other through the real CLIs and the dev build's `grimoire mcp`
+    /// relay. A stand-in for the app serves the socket: ask_familiar runs as in the app, and the
+    /// target's turn runs on the real provider. Codex's question is held for 75 seconds, past
+    /// Codex's default 60-second tool timeout. Run `cargo build` first.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "runs the real codex and claude CLIs"]
+    async fn live_familiars_ask_each_other() {
+        use crate::providers::{claude::Claude, codex::Codex};
+        use crate::runtime::{stream_turn, TurnWriter};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let exe = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/grimoire");
+        assert!(exe.exists(), "run cargo build first");
+        let id = &uuid::Uuid::new_v4().to_string()[..8];
+        let socket = std::path::PathBuf::from(format!("/tmp/grim-deleg-{id}.sock"));
+        let workspace = std::env::temp_dir().join(format!("grimoire-deleg-{id}"));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let live = |id: &str, name: &str, provider: Provider, model: &str, effort: Option<&str>| {
+            let agent = Agent {
+                id: id.into(),
+                name: name.into(),
+                provider,
+                model: Some(model.into()),
+                workspace: workspace.to_string_lossy().into_owned(),
+                access: Access::Workspace,
+                session_id: None,
+                avatar: Avatar::for_seed(id),
+                effort: effort.map(String::from),
+                active_model: None,
+                coven_id: None,
+                created_at: now_ms(),
+            };
+            db.insert_agent(&agent).unwrap();
+            agent
+        };
+        let researcher = live("r", "Researcher", Provider::Claude, "claude-haiku-5-5", None);
+        let scribe = live("s", "Scribe", Provider::Codex, "gpt-6.2-sol", Some("low"));
+        install(db.clone());
+        crate::tools::LAUNCH.set((exe, socket.clone())).unwrap();
+
+        let codex = Arc::new(Codex::default());
+        let claude = Arc::new(Claude::default());
+        let chains = Arc::new(Chains::default());
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = {
+            let (db, codex, claude, chains) = (db.clone(), codex.clone(), claude.clone(), chains.clone());
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    let (db, codex, claude, chains) = (db.clone(), codex.clone(), claude.clone(), chains.clone());
+                    tokio::spawn(async move {
+                        let (read, mut write) = stream.into_split();
+                        let Ok(Some(line)) = BufReader::new(read).lines().next_line().await else { return };
+                        let request: Value = serde_json::from_str(&line).unwrap();
+                        let (caller, tool) = (request["agent"].as_str().unwrap(), request["tool"].as_str().unwrap());
+                        let arguments = request["arguments"].clone();
+                        let result = if tool == "ask_familiar" {
+                            let turn_db = db.clone();
+                            let send = |target: String, text: String, source: String| async move {
+                                let db = turn_db;
+                                db.insert_message_from(&target, "user", &text, "done", Some(&source)).unwrap();
+                                let agent = db.get_agent(&target).unwrap().unwrap();
+                                if caller == "s" {
+                                    tokio::time::sleep(Duration::from_secs(75)).await;
+                                }
+                                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                                match agent.provider {
+                                    Provider::Codex => codex.start_turn(&agent, &text, tx).await.unwrap(),
+                                    Provider::Claude => claude.start_turn(&agent, &text, tx).await.unwrap(),
+                                }
+                                stream_turn(&mut TurnWriter::new(&db, &Quiet, &agent), rx).await
+                            };
+                            ask(&db, &chains, caller, arguments, TIMEOUT, never_asked, send).await
+                        } else {
+                            crate::tools::call(&db, std::path::Path::new("/tmp"), caller, tool, arguments).map(|o| o.text)
+                        };
+                        let reply = match result {
+                            Ok(text) => json!({ "ok": true, "text": text }),
+                            Err(error) => json!({ "ok": false, "error": error }),
+                        };
+                        let _ = write.write_all(format!("{reply}\n").as_bytes()).await;
+                    });
+                }
+            })
+        };
+
+        let turn = |asker: Agent, target: &str, word: &str| {
+            let prompt = format!(
+                "Use the ask_familiar tool to ask the familiar named {target} to reply with only the word {word}. \
+                 Then reply with exactly what {target} said and nothing else."
+            );
+            let (db, codex, claude) = (db.clone(), codex.clone(), claude.clone());
+            async move {
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                match asker.provider {
+                    Provider::Codex => codex.start_turn(&asker, &prompt, tx).await.unwrap(),
+                    Provider::Claude => claude.start_turn(&asker, &prompt, tx).await.unwrap(),
+                }
+                stream_turn(&mut TurnWriter::new(&db, &Quiet, &asker), rx).await
+            }
+        };
+        let rows = |id: &str| -> Vec<(String, String, Option<String>)> {
+            db.list_messages(id, None, 50).unwrap().into_iter().map(|m| (m.role, m.text, m.source)).collect()
+        };
+
+        let outcome = tokio::time::timeout(Duration::from_secs(300), turn(researcher.clone(), "Scribe", "periwinkle")).await.unwrap();
+        let (asker_rows, target_rows) = (rows("r"), rows("s"));
+        eprintln!("Claude asks Codex: {outcome:?}\n{asker_rows:#?}\n{target_rows:#?}");
+        assert!(matches!(&outcome, TurnOutcome::Done(t) if t.to_lowercase().contains("periwinkle")));
+        assert!(asker_rows.iter().any(|(role, text, _)| role == "tool" && text == "Asked Scribe"));
+        assert!(target_rows.iter().any(|(role, _, source)| role == "user" && source.as_deref() == Some("Asked by Researcher")));
+
+        let outcome = tokio::time::timeout(Duration::from_secs(420), turn(scribe.clone(), "Researcher", "marigold")).await.unwrap();
+        let (asker_rows, target_rows) = (rows("s"), rows("r"));
+        eprintln!("Codex asks Claude after 75 s: {outcome:?}\n{asker_rows:#?}\n{target_rows:#?}");
+        assert!(matches!(&outcome, TurnOutcome::Done(t) if t.to_lowercase().contains("marigold")));
+        assert!(asker_rows.iter().any(|(role, text, _)| role == "tool" && text == "Asked Researcher"));
+        assert!(target_rows.iter().any(|(role, _, source)| role == "user" && source.as_deref() == Some("Asked by Scribe")));
+
+        server.abort();
+        claude.forget("r");
+        let _ = std::fs::remove_file(&socket);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
 }

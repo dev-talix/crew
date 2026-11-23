@@ -32,7 +32,7 @@ const TOOL_NAMES: [&str; 9] = [
 pub const CALL_TIMEOUT_SECS: u64 = 15 * 60;
 
 /// How a CLI starts the tool server: this executable and the app's socket.
-static LAUNCH: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+pub(crate) static LAUNCH: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
 
 pub fn definitions() -> Value {
     let colors = json!({
