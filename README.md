@@ -23,6 +23,9 @@
 - **Spells** chain familiars: research, then write, then review. Each step gets the last reply.
   Steps can run together, and a check can send work back, like an editor returning a draft. Click a
   spell in the sidebar to cast it, and open any past cast to see each step.
+- **The inbox** gathers every familiar's open questions and approvals in one list. A familiar asks
+  with a few short options and the one it recommends, then keeps working; your tap goes back to it
+  as a new message.
 - **Memory** carries notes from one chat to the next, for each familiar and each coven.
 - **Rituals** send a familiar the same message, or cast a spell, on a schedule, like a morning summary.
   A ritual can also run when something happens: a pull request opens in a GitHub repo (through `gh`),

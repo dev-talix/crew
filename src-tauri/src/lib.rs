@@ -8,6 +8,7 @@ mod db;
 mod delegation;
 mod dock;
 mod exports;
+mod inbox;
 mod mcp;
 mod memory;
 mod notify;
@@ -755,7 +756,10 @@ pub fn run() {
             exports::export_backup_file,
             exports::pick_import,
             exports::apply_import,
-            triggers::trigger_status
+            triggers::trigger_status,
+            inbox::inbox,
+            inbox::answer_question,
+            inbox::dismiss_question
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {

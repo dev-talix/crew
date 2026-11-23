@@ -7,6 +7,7 @@ import Chat, { type ChatIntent } from "./Chat";
 import CommandPalette, { type PaletteActions } from "./CommandPalette";
 import { createChatStore } from "./chatStore";
 import HomePage from "./HomePage";
+import InboxPage, { InboxLink } from "./Inbox";
 import { MemorySheet } from "./MemoryEditor";
 import RoutinesPage from "./RoutinesPage";
 import { SettingsDialog } from "./SettingsPage";
@@ -21,7 +22,7 @@ import { shownIcon } from "./themeStore";
 import { startUpdateChecks, updateCheck } from "./updateStore";
 import type { SettingsSection } from "./SettingsPage";
 
-type View = "home" | "routines" | "workflows" | "new" | { agent: string };
+type View = "home" | "inbox" | "routines" | "workflows" | "new" | { agent: string };
 
 function NavItem(props: { label: string; icon: JSX.Element; active: boolean; onClick: () => void; shortcut?: string }) {
   return (
@@ -227,6 +228,7 @@ export default function App() {
         </div>
         <nav class="nav" aria-label="Sections">
           <NavItem label="Home" icon={<HomeIcon />} active={is("home")} onClick={() => setView("home")} />
+          <InboxLink active={is("inbox")} onClick={() => setView("inbox")} />
           <NavItem label="Rituals" icon={<ClockIcon />} active={is("routines")} onClick={() => setView("routines")} />
         </nav>
         <div class="sidebar-caption">
@@ -341,6 +343,9 @@ export default function App() {
               <div class="form-page" data-tauri-drag-region>
                 <AgentForm covens={covens()} onSaved={created} onCancel={agents().length ? () => setView("home") : undefined} />
               </div>
+            </Match>
+            <Match when={is("inbox")}>
+              <InboxPage agents={agents()} onOpenAgent={openAgent} />
             </Match>
             <Match when={is("routines")}>
               <RoutinesPage agents={agents()} onOpenAgent={openAgent} />

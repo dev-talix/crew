@@ -494,7 +494,32 @@ export const api = {
   /** Asks for a file and previews it. Null when cancelled. */
   pickImport: () => invoke<Transfer.Picked | null>("pick_import"),
   applyImport: (keepFullAccess: boolean) => invoke<Transfer.Imported>("apply_import", { keepFullAccess }),
+  /** Open questions from familiars and pending approvals, in one list. */
+  inbox: () => invoke<InboxItem[]>("inbox"),
+  /** An option's value, or the person's own words. */
+  answerQuestion: (id: string, answer: string) => invoke<void>("answer_question", { id, answer }),
+  dismissQuestion: (id: string) => invoke<void>("dismiss_question", { id }),
 };
+
+export interface InboxOption {
+  /** The option text for a question, or once/always/deny for an approval. */
+  value: string;
+  label: string;
+}
+
+/** A familiar's question from ask_person, or a pending approval. */
+export interface InboxItem {
+  id: string;
+  kind: "question" | ApprovalRequest["kind"];
+  agentId: string;
+  title: string;
+  detail: string;
+  options: InboxOption[];
+  /** The value of the recommended option. */
+  recommended: string;
+  /** Null for approvals. */
+  createdAt: number | null;
+}
 
 /**
  * Runs async setup once the component has mounted. Unlisten functions passed to `keep` run when the
@@ -533,7 +558,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

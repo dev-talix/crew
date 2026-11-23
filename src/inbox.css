@@ -1,0 +1,118 @@
+.inbox-badge {
+  margin-left: auto;
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+}
+
+.inbox {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.inbox-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.inbox-familiar {
+  align-self: flex-start;
+  gap: 8px;
+  margin-left: -6px;
+  padding: 3px 8px 3px 6px;
+  font-weight: 600;
+}
+
+.inbox-familiar:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.inbox-item {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+
+.inbox-item + .inbox-item {
+  border-top: 1px solid var(--line);
+}
+
+.inbox-title {
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.inbox-detail {
+  margin-top: 3px;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.inbox-command {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+
+.inbox-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.inbox-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.inbox-recommended {
+  gap: 8px;
+}
+
+.inbox-pick {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--agent-ink) 18%, transparent);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.inbox-own {
+  display: flex;
+  gap: 6px;
+}
+
+.inbox-own input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  user-select: text;
+}
+
+.inbox-own input:focus-visible {
+  outline: none;
+  border-color: var(--agent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--agent) 22%, transparent);
+}
