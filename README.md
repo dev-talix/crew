@@ -69,7 +69,7 @@ Shortcuts: ⌘N new agent, ⌘, settings, ⌘1 to ⌘9 open an agent.
 ## Checks
 
 ```sh
-bun test src                     # timeline grouping and summaries
+bun run test                     # timeline, models, chat store, moods
 cd src-tauri
 cargo test                       # unit tests
 cargo test -- --ignored          # live turns against the real codex and claude CLIs (costs tokens)

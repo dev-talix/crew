@@ -2,7 +2,8 @@ import { createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } 
 import { createStore } from "solid-js/store";
 import AgentForm from "./AgentForm";
 import BotAvatar from "./BotAvatar";
-import Chat, { createChatStore } from "./Chat";
+import Chat from "./Chat";
+import { createChatStore } from "./chatStore";
 import HomePage from "./HomePage";
 import RoutinesPage from "./RoutinesPage";
 import SettingsPage from "./SettingsPage";

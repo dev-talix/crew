@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "bun test --conditions=browser src"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.5",
