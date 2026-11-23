@@ -68,6 +68,7 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
   onMountAsync(async (keep) => {
     try {
       keep(await onEvent<WorkflowProgress>("workflow_progress", ({ workflowId, ...run }) => setRun(workflowId, run)));
+      keep(await onEvent("workflows_changed", () => api.listWorkflows().then(setWorkflows, (e) => setError(errorText(e)))));
       const [list, running] = await Promise.all([api.listWorkflows(), api.runningWorkflows()]);
       setWorkflows(list);
       for (const id of running) {
@@ -157,6 +158,9 @@ export default function WorkflowsPage(props: { agents: Agent[]; onOpenAgent: (id
                     <div class="list-row wf-row">
                       <div class="list-main">
                         <div class="list-title">{workflow.name}</div>
+                        <Show when={workflow.createdBy}>
+                          {(id) => <div class="list-sub">Made by {agentById().get(id())?.name ?? "a deleted agent"}</div>}
+                        </Show>
                         <div class="wf-meta">
                           <ol class="wf-chain" aria-label="Steps">
                             <For each={workflow.steps}>

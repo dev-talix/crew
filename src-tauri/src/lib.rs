@@ -1,9 +1,11 @@
 mod db;
 mod dock;
+mod mcp;
 mod providers;
 mod routines;
 mod runtime;
 mod status;
+mod tools;
 mod workflows;
 
 use db::{now_ms, Access, Agent, Avatar, Db, Message, Provider, Routine, Schedule, Workflow, WorkflowStep};
@@ -357,24 +359,7 @@ fn running_workflows(state: State<AppState>) -> Vec<String> {
 
 #[tauri::command]
 fn save_workflow(state: State<AppState>, input: WorkflowInput) -> Result<Workflow, String> {
-    let existing = match input.id.as_deref() {
-        Some(id) => state.db.list_workflows()?.into_iter().find(|w| w.id == id),
-        None => None,
-    };
-    let workflow = Workflow {
-        id: existing.as_ref().map(|w| w.id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-        name: input.name.trim().to_string(),
-        steps: input
-            .steps
-            .into_iter()
-            .map(|s| WorkflowStep { agent_id: s.agent_id, prompt: s.prompt.trim().to_string() })
-            .collect(),
-        created_at: existing.map(|w| w.created_at).unwrap_or_else(now_ms),
-    };
-    let agents = state.db.list_agents()?;
-    workflows::validate(&workflow, |id| agents.iter().any(|a| a.id == id))?;
-    state.db.save_workflow(&workflow)?;
-    Ok(workflow)
+    workflows::save(&state.db, input.id.as_deref(), &input.name, input.steps, None)
 }
 
 #[tauri::command]
@@ -392,6 +377,11 @@ async fn stop_workflow(state: State<'_, AppState>, id: String) -> Result<(), Str
     state.workflows.stop(&id).await
 }
 
+/// Entry point for `crew mcp`, the tool server a CLI starts for an agent.
+pub fn mcp_main(args: &[String]) -> i32 {
+    mcp::main(args)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -405,6 +395,10 @@ pub fn run() {
             let scheduler = Scheduler::start(db.clone(), &runtime, app.handle().clone());
             let workflows = WorkflowRunner::new(db.clone(), runtime.clone(), app.handle().clone());
             let edge = db.setting(DOCK_EDGE).ok().flatten().and_then(|e| dock::Edge::parse(&e));
+            // Agents get the Crew tools only when this socket is up; Crew still works without them.
+            if let Err(e) = tools::serve(app.handle().clone(), db.clone(), &dir.join("crew.sock")) {
+                eprintln!("Crew tools are off: {e}");
+            }
             app.manage(AppState { db, runtime, scheduler, workflows, dock: dock::Dock::default() });
             if edge.is_some() {
                 let state = app.state::<AppState>();

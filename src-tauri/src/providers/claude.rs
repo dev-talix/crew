@@ -86,6 +86,10 @@ fn args(agent: &Agent) -> Vec<String> {
         Access::Workspace => "acceptEdits".into(),
         Access::Full => "bypassPermissions".into(),
     });
+    if let Some((command, server_args)) = crate::tools::server_command(&agent.id) {
+        let config = json!({ "mcpServers": { (crate::tools::SERVER_NAME): { "command": command, "args": server_args } } });
+        args.extend(["--mcp-config".into(), config.to_string(), "--allowedTools".into(), crate::tools::claude_tool_names()]);
+    }
     if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
         args.extend(["--model".into(), model.into()]);
     }

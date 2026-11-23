@@ -75,6 +75,8 @@ export interface Workflow {
   name: string;
   steps: WorkflowStep[];
   createdAt: number;
+  /** The agent that created it with its Crew tools. */
+  createdBy: string | null;
 }
 
 export interface WorkflowInput {
@@ -208,7 +210,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

@@ -170,13 +170,16 @@ pub struct Workflow {
     pub name: String,
     pub steps: Vec<WorkflowStep>,
     pub created_at: i64,
+    /// The agent that created this workflow through its Crew tools, if any.
+    #[serde(default)]
+    pub created_by: Option<String>,
 }
 
 pub struct Db {
     conn: Mutex<Connection>,
 }
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -277,6 +280,14 @@ impl Db {
                  ALTER TABLE agents ADD COLUMN effort TEXT;
                  ALTER TABLE agents ADD COLUMN active_model TEXT;
                  PRAGMA user_version = 5;
+                 COMMIT;",
+            )?;
+        }
+        if version < 6 {
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE workflows ADD COLUMN created_by TEXT;
+                 PRAGMA user_version = 6;
                  COMMIT;",
             )?;
         }
@@ -467,7 +478,7 @@ impl Db {
 
     pub fn list_workflows(&self) -> Result<Vec<Workflow>, String> {
         self.with(|c| {
-            let mut stmt = c.prepare_cached("SELECT id, name, steps, created_at FROM workflows ORDER BY created_at")?;
+            let mut stmt = c.prepare_cached("SELECT id, name, steps, created_at, created_by FROM workflows ORDER BY created_at")?;
             let rows = stmt.query_map([], |r| {
                 let steps: String = r.get(2)?;
                 Ok(Workflow {
@@ -477,6 +488,7 @@ impl Db {
                         rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
                     })?,
                     created_at: r.get(3)?,
+                    created_by: r.get(4)?,
                 })
             })?;
             rows.collect()
@@ -487,9 +499,9 @@ impl Db {
         let steps = serde_json::to_string(&workflow.steps).map_err(|e| e.to_string())?;
         self.with(|c| {
             c.execute(
-                "INSERT INTO workflows (id, name, steps, created_at) VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO workflows (id, name, steps, created_at, created_by) VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(id) DO UPDATE SET name = ?2, steps = ?3",
-                params![workflow.id, workflow.name, steps, workflow.created_at],
+                params![workflow.id, workflow.name, steps, workflow.created_at, workflow.created_by],
             )
             .map(|_| ())
         })
@@ -659,6 +671,7 @@ mod tests {
             name: "Ship".into(),
             steps: vec![WorkflowStep { agent_id: "a".into(), prompt: "Write notes about {{previous}}".into() }],
             created_at: 1,
+            created_by: Some("a".into()),
         };
         db.save_workflow(&workflow).unwrap();
         assert_eq!(db.list_workflows().unwrap(), vec![workflow]);

@@ -34,6 +34,9 @@ The model chip in the composer shows the model the agent is running and lets you
 - **Workflows** chain agents. Each step sends instructions to one agent and waits for its reply;
   `{{input}}` is the starting text and `{{previous}}` is the last reply (appended automatically
   when a step does not use it).
+- **Agents make workflows too.** Every agent gets three Crew tools: `list_agents`, `list_workflows`, and
+  `create_workflow`. Ask one to "set up a workflow that…" and it saves it; the Workflows page shows
+  which agent made it. Agents cannot run, edit, or delete workflows.
 - **Voice**: the microphone button in the composer dictates with macOS speech recognition.
 
 ## Settings
@@ -63,6 +66,10 @@ Shortcuts: ⌘N new agent, ⌘, settings, ⌘1 to ⌘9 open an agent.
   end of each turn. Markdown renders only once a message is finished.
 - **Queue.** A message sent while the agent works waits and runs next. Stop interrupts the turn
   (Claude through its interrupt request, Codex through `turn/interrupt`) and cancels the queue.
+- **Agent tools.** Crew passes each agent an MCP server named `crew` (`--mcp-config` for Claude, thread
+  config for Codex). The CLI starts `crew mcp <socket> <agent-id>`, which relays tool calls to the app
+  over `crew.sock` in Crew's data folder (owner-only). The tools work in both access modes because they
+  only touch Crew's own data.
 - **Storage.** `~/Library/Application Support/dev.talix.crew/crew.db`. Default workspaces are under
   `~/Crew`. Deleting an agent keeps its workspace folder.
 

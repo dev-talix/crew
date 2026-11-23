@@ -91,6 +91,11 @@ fn thread_params(agent: &Agent) -> Value {
     if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
         params["model"] = json!(model);
     }
+    if let Some((command, args)) = crate::tools::server_command(&agent.id) {
+        // Codex refuses MCP calls that need approval under approvalPolicy "never", so pre-approve Crew's own tools.
+        let server = json!({ "command": command, "args": args, "default_tools_approval_mode": "approve" });
+        params["config"] = json!({ "mcp_servers": { (crate::tools::SERVER_NAME): server } });
+    }
     params
 }
 

@@ -1,4 +1,4 @@
-use crate::db::{Db, Workflow};
+use crate::db::{now_ms, Db, Workflow, WorkflowStep};
 use crate::runtime::{Runtime, TurnOutcome};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -43,6 +43,29 @@ pub fn validate(workflow: &Workflow, agent_exists: impl Fn(&str) -> bool) -> Res
         }
     }
     Ok(())
+}
+
+/// Creates or updates a workflow after trimming and validating it. `created_by` applies only to new
+/// workflows; an edit keeps the original creator.
+pub fn save(db: &Db, id: Option<&str>, name: &str, steps: Vec<WorkflowStep>, created_by: Option<String>) -> Result<Workflow, String> {
+    let existing = match id {
+        Some(id) => db.list_workflows()?.into_iter().find(|w| w.id == id),
+        None => None,
+    };
+    let workflow = Workflow {
+        id: existing.as_ref().map(|w| w.id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        name: name.trim().to_string(),
+        steps: steps.into_iter().map(|s| WorkflowStep { agent_id: s.agent_id, prompt: s.prompt.trim().to_string() }).collect(),
+        created_at: existing.as_ref().map(|w| w.created_at).unwrap_or_else(now_ms),
+        created_by: match existing {
+            Some(w) => w.created_by,
+            None => created_by,
+        },
+    };
+    let agents = db.list_agents()?;
+    validate(&workflow, |id| agents.iter().any(|a| a.id == id))?;
+    db.save_workflow(&workflow)?;
+    Ok(workflow)
 }
 
 pub struct WorkflowRunner {
@@ -155,6 +178,7 @@ mod tests {
             name: "Ship".into(),
             steps: vec![WorkflowStep { agent_id: "a".into(), prompt: "go".into() }],
             created_at: 0,
+            created_by: None,
         };
         assert!(validate(&workflow, |id| id == "a").is_ok());
         assert!(validate(&workflow, |_| false).is_err());
