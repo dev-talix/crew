@@ -1,9 +1,12 @@
-import { createSignal, For, onCleanup, Show } from "solid-js";
+import { createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 import AvatarStudio from "./AvatarStudio";
 import { Segmented } from "./ui";
 import { inkFor, randomAvatar, type Avatar } from "./avatar";
 import { api, createFetch, errorText, PROVIDER_NAMES, shortPath, type Access, type Agent, type Coven, type Provider } from "./api";
 import { effortName, modelCatalog, modelName } from "./models";
+import { BudgetField } from "./BudgetControls";
+import { formatTokens, parseTokens, type BudgetPeriod } from "./budgets";
+import { ExportButton } from "./ImportExport";
 
 const ACCESS_HELP: Record<Provider, Record<Access, string>> = {
   codex: {
@@ -49,12 +52,32 @@ export default function AgentForm(props: {
   const [error, setError] = createSignal("");
   const [saving, setSaving] = createSignal(false);
   const [confirmDelete, setConfirmDelete] = createSignal(false);
+  const [budget, setBudget] = createSignal("");
+  const [period, setPeriod] = createSignal<BudgetPeriod>("day");
+  let hadBudget = false;
+  onSettled(() => {
+    const id = props.agent?.id;
+    if (!id) return;
+    api.listBudgets().then((list) => {
+      const saved = list.find((b) => b.agentId === id);
+      hadBudget = !!saved;
+      if (saved) {
+        setBudget(formatTokens(saved.tokens));
+        setPeriod(saved.period);
+      }
+    }, () => undefined);
+  });
   let confirmTimer: number | undefined;
   onCleanup(() => clearTimeout(confirmTimer));
 
   const submit = async (e: SubmitEvent) => {
     e.preventDefault();
     setError("");
+    const tokens = parseTokens(budget());
+    if (Number.isNaN(tokens)) {
+      setError("Write the budget as a number of tokens, like 50000 or 50k, or leave it empty for no limit.");
+      return;
+    }
     setSaving(true);
     try {
       const saved = props.agent
@@ -69,6 +92,7 @@ export default function AgentForm(props: {
             effort: effort(),
             covenId: coven() || null,
           });
+      if (tokens !== null || hadBudget) await api.setBudget(saved.id, tokens === null ? null : { tokens, period: period() });
       props.onSaved(saved);
     } catch (err) {
       setError(errorText(err));
@@ -169,6 +193,8 @@ export default function AgentForm(props: {
           </label>
         </Show>
 
+        <BudgetField text={budget()} period={period()} onText={setBudget} onPeriod={setPeriod} />
+
         <div class="field wide">
           <span>Access</span>
           <Segmented
@@ -195,6 +221,7 @@ export default function AgentForm(props: {
           <button type="button" class="ghost danger" onClick={remove}>
             {confirmDelete() ? "Click again to delete" : "Delete familiar"}
           </button>
+          <ExportButton kind="familiar" id={props.agent!.id} onError={setError} />
         </Show>
         <span class="spacer" />
         <Show when={props.onCancel}>

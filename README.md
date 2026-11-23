@@ -260,6 +260,42 @@ Settings, Usage shows your plan limits and what Grimoire itself used:
 - **Grimoire, last 7 days**: tokens per turn, input and output together, by source (you, rituals,
   spells) or by familiar, with a daily chart and a table of the numbers.
 
+## Budgets
+
+A familiar's settings can cap its tokens per day or per week, counted from the usage Grimoire records
+for each turn. A day starts at local midnight and a week on Monday. Once a familiar has used its
+budget, Grimoire refuses new turns with a message saying how much it used and when it starts again.
+Its rituals skip and log why, and a spell stops at its step with the same error. Usage, By familiar,
+shows each budget as a bar under the familiar.
+
+The plan limit guard ("Pause rituals when a plan limit passes 90%", on by default) sits under the
+plan limits in Usage. Before a ritual runs, Grimoire checks the familiar's provider: a fresh Codex
+reading for Codex familiars, and Claude's latest snapshot for Claude familiars. When a window that
+hasn't reset is past the percentage, the ritual skips. Home and Rituals show a short notice, and the
+ritual's row says why it skipped. Your own messages, "Run now", and spells still run.
+
+## Export and import
+
+Export a familiar from its settings, a spell from its editor, a coven from "Edit", or one of your
+themes from the theme editor. Each becomes one JSON file, like `Researcher.grimoire.json`, with a
+`kind` and a `version`:
+
+- A familiar carries its name, provider, model, effort, access, avatar, and budget. Never its
+  workspace folder, session, or chat.
+- A spell names the familiar for each step, so it works on another Mac with familiars of those names.
+- A coven carries its members' names. A theme is the same JSON as a file in the themes folder.
+
+Settings, General, "Export a backup" saves familiars, spells, rituals, covens, your themes, and
+settings (Claude billing, the dock, permission rules, and the plan limit guard) in one file. Chat
+history goes in only when you tick "Include chat history". Vault items, Keychain secrets, and vault
+grants never do.
+
+"Import" takes a backup or any shared file and shows what it adds first. Everything gets a new id.
+A name you already have gets " (2)". Spell steps, rituals, and coven members point at the familiars
+the file brings, or else at yours with the same name; anything that can't be placed is listed and left
+out. Imported familiars get new workspace folders under `~/Grimoire`, and the rows go in one
+transaction.
+
 ## Updates
 
 Settings, Updates checks this repository's GitHub releases (the latest release's tag against the
@@ -355,7 +391,7 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
 ## Checks
 
 ```sh
-bun run test                     # timeline, models, chat store, palette ranking, moods, themes
+bun run test                     # timeline, models, chat store, palette, moods, themes, spells, budgets, imports
 cd src-tauri
 cargo test                       # unit tests
 cargo test -- --ignored          # live turns against the real codex and claude CLIs (costs tokens)

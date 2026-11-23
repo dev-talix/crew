@@ -4,6 +4,7 @@ import type { JSX } from "@solidjs/web";
 import { api, createFetch, errorText, PROVIDER_NAMES, type Agent, type DockEdge, type Provider, type ProviderStatus, type Settings } from "./api";
 import { Page, Segmented, Toggle } from "./ui";
 import { ThemePicker } from "./ThemeEditor";
+import { BackupSection } from "./ImportExport";
 import { appIcon, readMode, setAppIcon, setMode, type AppIconSetting, type ModeSetting } from "./themeStore";
 import nightIcon from "./assets/icon-night.svg";
 import paperIcon from "./assets/icon-paper.svg";
@@ -214,6 +215,8 @@ function GeneralSettings() {
         <Show when={menuBarError()}>
           <div class="error-box settings-error">{menuBarError()}</div>
         </Show>
+
+        <BackupSection />
 
         <h2 class="section-title">About</h2>
         <div class="list">

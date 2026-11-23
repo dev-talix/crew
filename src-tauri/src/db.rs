@@ -224,7 +224,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -414,6 +414,25 @@ impl Db {
         }
         if version < 12 {
             crate::workflow_runs::migrate(&conn)?;
+        }
+        if version < 13 {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE budgets (
+                   agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+                   tokens INTEGER NOT NULL,
+                   period TEXT NOT NULL
+                 );
+                 CREATE TABLE ritual_skips (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   routine_id TEXT NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+                   reason TEXT NOT NULL,
+                   at INTEGER NOT NULL
+                 );
+                 CREATE INDEX usage_by_agent ON usage(agent_id, at);
+                 PRAGMA user_version = 13;
+                 COMMIT;",
+            )?;
         }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",

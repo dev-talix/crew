@@ -219,15 +219,17 @@ impl Scheduler {
                 }
             };
             if due <= now {
-                // A spell that is still being cast skips this run; the next one comes as scheduled.
-                match self.caster().and_then(|caster| fire(&routine, &caster)) {
-                    // A spell ritual is announced when the spell ends instead.
-                    Ok(()) => {
-                        if let Some(agent_id) = &routine.agent_id {
-                            crate::notify::ritual_fired(&self.app, &routine.name, agent_id);
+                // Budgets and the plan limit guard can skip the run, and so can a spell still being cast.
+                if let (Some(runtime), Ok(caster)) = (self.runtime.upgrade(), self.caster()) {
+                    let (app, ritual) = (self.app.clone(), routine.clone());
+                    crate::budgets::run_ritual(self.db.clone(), runtime, routine.clone(), self.app.clone(), move || {
+                        fire(&ritual, &caster)?;
+                        // A spell ritual is announced when the spell ends instead.
+                        if let Some(agent_id) = &ritual.agent_id {
+                            crate::notify::ritual_fired(&app, &ritual.name, agent_id);
                         }
-                    }
-                    Err(e) => eprintln!("Ritual {} didn't run: {e}", routine.name),
+                        Ok(())
+                    });
                 }
                 routine.last_run_at = Some(now);
                 routine.next_run_at = next_run_ms(&routine.schedule, now);

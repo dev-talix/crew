@@ -4,6 +4,8 @@ import { createEffect, createSignal, onSettled, type Accessor } from "solid-js";
 import type { Avatar } from "./avatar";
 import type { ThemeFile } from "./theme";
 import type { Memory, MemoryScope } from "./memory";
+import type * as Budgets from "./budgets";
+import type * as Transfer from "./transfer";
 
 export type Provider = "codex" | "claude";
 export type Access = "workspace" | "full";
@@ -420,6 +422,18 @@ export const api = {
   setMenuBarVisible: (visible: boolean) => invoke<boolean>("set_menu_bar_visible", { visible }),
   /** Tells the menu bar which familiar's chat the main window shows. */
   setOpenAgent: (agentId: string | null) => invoke<void>("set_open_agent", { agentId }),
+  listBudgets: () => invoke<Budgets.BudgetStatus[]>("list_budgets"),
+  setBudget: (agentId: string, budget: Budgets.Budget | null) => invoke<void>("set_budget", { agentId, budget }),
+  getPlanGuard: () => invoke<Budgets.PlanGuard>("get_plan_guard"),
+  savePlanGuard: (guard: Budgets.PlanGuard) => invoke<Budgets.PlanGuard>("save_plan_guard_setting", { guard }),
+  ritualPause: () => invoke<string | null>("ritual_pause"),
+  ritualSkips: () => invoke<Budgets.RitualSkip[]>("ritual_skips"),
+  /** Asks where to save, then writes the file. Null when cancelled. */
+  exportItem: (kind: Transfer.ExportKind, id: string) => invoke<string | null>("export_item", { kind, id }),
+  exportBackup: (includeHistory: boolean) => invoke<string | null>("export_backup_file", { includeHistory }),
+  /** Asks for a file and previews it. Null when cancelled. */
+  pickImport: () => invoke<Transfer.Picked | null>("pick_import"),
+  applyImport: () => invoke<Transfer.Imported>("apply_import"),
 };
 
 /**
@@ -459,7 +473,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "chats_changed",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "chats_changed" | "budgets_changed",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

@@ -1,0 +1,87 @@
+/* Token budgets and the plan limit guard. */
+
+.budget-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.budget-field input {
+  flex: 1;
+  min-width: 0;
+}
+
+.budget-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  grid-column: 2 / 4;
+  font-size: 12px;
+}
+
+.budget-bar .usage-track {
+  height: 4px;
+}
+
+.usage-track.over span {
+  background: var(--danger);
+}
+
+.budget-label {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.budget-label.over {
+  color: var(--danger);
+}
+
+.ritual-pause {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.ritual-pause strong {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+.plan-guard {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.plan-guard input {
+  width: 58px;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-guard input:disabled {
+  color: var(--faint);
+}
+
+.routine-skip {
+  font-size: 12px;
+  color: var(--warning);
+}
+
+.routines .ritual-pause {
+  margin-bottom: 0;
+}
+
+.plan-guard-list {
+  margin-top: 12px;
+}

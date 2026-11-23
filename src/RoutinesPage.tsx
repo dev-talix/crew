@@ -6,6 +6,8 @@ import { PlusIcon } from "./icons";
 import { inkFor } from "./avatar";
 import { api, describeSchedule, errorText, onEvent, relativeTime, type Agent, type Routine, type Schedule, type Workflow } from "./api";
 import { ritualAgents, ritualDoes } from "./spells";
+import { RitualPauseNotice } from "./BudgetControls";
+import type { RitualSkip } from "./budgets";
 import "./routines.css";
 
 const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -35,9 +37,11 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
   const [error, setError] = createSignal("");
   const [editing, setEditing] = createSignal<Routine | "new" | { template: RitualTemplate } | null>(null);
   const [now, setNow] = createSignal(Date.now());
+  const [skips, setSkips] = createSignal<RitualSkip[]>([]);
 
   const load = async () => {
     try {
+      void api.ritualSkips().then(setSkips, () => undefined);
       const [list, spellList] = await Promise.all([api.listRoutines(), api.listWorkflows()]);
       setRoutines(list);
       setSpells(spellList);
@@ -104,6 +108,7 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
   return (
     <Page title="Rituals" actions={newButton(true)}>
       <div class="routines">
+        <RitualPauseNotice />
         <Show when={error()}>
           <p class="error-box" role="alert">
             {error()}
@@ -153,6 +158,7 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
                     <RoutineRow
                       routine={routine}
                       does={ritualDoes(routine, spells())}
+                      skip={skips().find((s) => s.routineId === routine.id && s.at >= (routine.lastRunAt ?? 0))}
                       now={now()}
                       onEdit={() => setEditing(routine)}
                       onToggle={(enabled) => void setEnabled(routine, enabled)}
@@ -183,6 +189,7 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
                     <RoutineRow
                       routine={routine}
                       does={ritualDoes(routine, spells())}
+                      skip={skips().find((s) => s.routineId === routine.id && s.at >= (routine.lastRunAt ?? 0))}
                       now={now()}
                       onEdit={() => setEditing(routine)}
                       onToggle={(enabled) => void setEnabled(routine, enabled)}
@@ -223,6 +230,8 @@ function RoutineRow(props: {
   routine: Routine;
   /** What the ritual does on each run. */
   does: string;
+  /** Set when the last run was skipped. */
+  skip?: RitualSkip;
   now: number;
   onEdit: () => void;
   onToggle: (enabled: boolean) => void;
@@ -260,6 +269,13 @@ function RoutineRow(props: {
         <span class="list-title">{props.routine.name}</span>
         <span class="list-sub">{describeSchedule(props.routine.schedule)}</span>
         <span class="list-sub routine-does">{props.does}</span>
+        <Show when={props.skip}>
+          {(skip) => (
+            <span class="routine-skip">
+              Skipped {relativeTime(skip().at, props.now)}. {skip().reason}
+            </span>
+          )}
+        </Show>
       </button>
       <span class="routine-next">{nextRun()}</span>
       <div class="list-actions">

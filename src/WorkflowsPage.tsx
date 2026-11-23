@@ -17,6 +17,7 @@ import {
   type WorkflowRun,
 } from "./api";
 import { describeCheck, fromDrafts, progressLabel, stepGroups, toDrafts, type DraftStep } from "./spells";
+import { ExportButton } from "./ImportExport";
 import "./workflows.css";
 
 type Run = Omit<WorkflowProgress, "workflowId">;
@@ -778,6 +779,7 @@ function WorkflowEditor(props: {
           <button type="button" class="ghost danger" onClick={destroy}>
             {confirmDelete() ? "Click again to delete" : "Delete spell"}
           </button>
+          <ExportButton kind="spell" id={props.workflow!.id} onError={setError} />
         </Show>
         <span class="spacer" />
         <button type="button" class="ghost" onClick={() => props.onCancel()}>

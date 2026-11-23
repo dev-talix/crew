@@ -2,6 +2,7 @@ import { createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 import BotAvatar from "./BotAvatar";
 import { api, errorText, type Agent, type Coven } from "./api";
 import { createMemory, MemoryField } from "./MemoryEditor";
+import { ExportButton } from "./ImportExport";
 
 /** Names a coven and picks its familiars. A familiar picked here leaves its old coven. */
 export default function CovenEditor(props: {
@@ -96,6 +97,7 @@ export default function CovenEditor(props: {
           <button type="button" class="ghost danger" onClick={() => void remove()}>
             {confirmDelete() ? "Click again to delete" : "Delete coven"}
           </button>
+          <ExportButton kind="coven" id={props.coven!.id} onError={setError} />
         </Show>
         <span class="spacer" />
         <button type="button" class="ghost" onClick={props.onCancel}>

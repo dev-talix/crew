@@ -1,10 +1,12 @@
 mod approvals;
 mod chats;
 mod attachments;
+mod budgets;
 mod covens;
 mod db;
 mod delegation;
 mod dock;
+mod exports;
 mod mcp;
 mod memory;
 mod notify;
@@ -533,7 +535,10 @@ struct PlanLimits {
 #[tauri::command]
 async fn plan_limits(state: State<'_, AppState>) -> Result<PlanLimits, String> {
     let (codex, codex_error) = match state.runtime.codex_rate_limits().await {
-        Ok(limits) => (Some(limits), None),
+        Ok(limits) => {
+            budgets::remember_codex(&state.db, &limits);
+            (Some(limits), None)
+        }
         Err(e) => (None, Some(e)),
     };
     let claude = state.db.setting(runtime::CLAUDE_LIMITS)?.and_then(|text| serde_json::from_str(&text).ok());
@@ -587,6 +592,7 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol(attachments::SCHEME, |ctx, request, responder| {
             attachments::protocol(ctx.app_handle(), request, responder)
         })
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -697,7 +703,17 @@ pub fn run() {
             notify::save_notification_settings,
             tray::set_open_agent,
             tray::menu_bar_visible,
-            tray::set_menu_bar_visible
+            tray::set_menu_bar_visible,
+            budgets::list_budgets,
+            budgets::set_budget,
+            budgets::get_plan_guard,
+            budgets::save_plan_guard_setting,
+            budgets::ritual_pause,
+            budgets::ritual_skips,
+            exports::export_item,
+            exports::export_backup_file,
+            exports::pick_import,
+            exports::apply_import
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {
