@@ -4,13 +4,16 @@ import { CheckIcon, MemoryIcon, PlusIcon, TrashIcon } from "./icons";
 import {
   ENTRY_LIMIT,
   entriesSize,
+  entryChanged,
   entryLabel,
   entryProblem,
   lastUpdated,
   MEMORY_KINDS,
   MEMORY_LIMIT,
+  memoryChanges,
   memoryUsage,
   ruleText,
+  type EditedEntry,
   type Memory,
   type MemoryEntry,
   type MemoryKind,
@@ -19,37 +22,39 @@ import {
 import { Sheet } from "./ui";
 import "./memory.css";
 
-/** An entry being edited. `key` tells rows apart; `saved` is the entry it started from, if any. */
-interface Row {
+/** An entry being edited. `key` tells rows apart. */
+interface Row extends EditedEntry {
   key: number;
-  saved?: MemoryEntry;
   kind: MemoryKind;
-  project: string;
-  text: string;
 }
 
 let nextKey = 0;
 const toRow = (entry: MemoryEntry): Row => ({ key: nextKey++, saved: entry, kind: entry.kind, project: entry.project ?? "", text: entry.text });
-const changed = (row: Row) => !row.saved || row.kind !== row.saved.kind || row.text !== row.saved.text || (row.kind === "project" && row.project !== (row.saved.project ?? ""));
 
 /**
  * Loads a memory and keeps an edited copy of its entries. A change a familiar makes while it's open
- * shows up, unless the user has started editing. With no id yet (a coven being created) it starts empty.
+ * shows up, unless the user has started editing; saving then keeps the familiar's change, since it
+ * sends only the entries the user changed and the ones they deleted. With no id yet (a coven being
+ * created) it starts empty.
  */
 export function createMemory(scope: MemoryScope, id: () => string | null) {
   const [saved, setSaved] = createSignal<Memory | null>(null);
   const [rows, setRows] = createSignal<Row[]>([]);
+  const [deleted, setDeleted] = createSignal<string[]>([]);
   const [error, setError] = createSignal("");
-  const removed = () => (saved()?.entries ?? []).filter((e) => !rows().some((r) => r.saved?.id === e.id)).map((e) => e.id);
-  const dirty = () => removed().length > 0 || rows().some(changed);
+  const dirty = () => deleted().length > 0 || rows().some(entryChanged);
+  const reset = (memory: Memory) => {
+    setSaved(memory);
+    setRows(memory.entries.map(toRow));
+    setDeleted([]);
+  };
   const load = async () => {
     const current = id();
     if (!current) return;
     try {
       const memory = await api.getMemory(scope, current);
-      const untouched = !dirty();
-      setSaved(memory);
-      if (untouched) setRows(memory.entries.map(toRow));
+      if (dirty()) setSaved(memory);
+      else reset(memory);
     } catch (err) {
       setError(errorText(err));
     }
@@ -66,17 +71,19 @@ export function createMemory(scope: MemoryScope, id: () => string | null) {
     dirty,
     add: (kind: MemoryKind) => setRows((list) => [...list, { key: nextKey++, kind, project: "", text: "" }]),
     update,
-    remove: (key: number) => setRows((list) => list.filter((r) => r.key !== key)),
+    remove: (key: number) => {
+      const id = rows().find((r) => r.key === key)?.saved?.id;
+      if (id) setDeleted((ids) => [...ids, id]);
+      setRows((list) => list.filter((r) => r.key !== key));
+    },
     usage: () => memoryUsage(entriesSize(rows()), saved()?.limit ?? MEMORY_LIMIT),
     /** Whether every entry would pass the backend's checks. */
     valid: () => rows().every((r) => !entryProblem(r, saved()?.entryLimit ?? ENTRY_LIMIT)),
     /** Saves the edits, to `target` when the owner was only just created. */
     save: async (target = id()) => {
       if (!target) return;
-      const drafts = rows().map((r) => ({ id: r.saved?.id, kind: r.kind, project: r.kind === "project" ? r.project : undefined, text: r.text }));
-      const memory = await api.saveMemory(scope, target, drafts, removed());
-      setSaved(memory);
-      setRows(memory.entries.map(toRow));
+      const { entries, removed } = memoryChanges(rows(), deleted());
+      reset(await api.saveMemory(scope, target, entries, removed));
     },
   };
 }

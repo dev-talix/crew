@@ -47,6 +47,24 @@ export interface MemoryDraft {
   text: string;
 }
 
+/** An entry in the editor: `saved` is the entry it started from, if any. */
+export type EditedEntry = Pick<MemoryDraft, "kind" | "text"> & { project: string; saved?: MemoryEntry };
+
+/** Whether an edited entry is new or differs from the entry it started from. */
+export function entryChanged(row: EditedEntry): boolean {
+  const saved = row.saved;
+  return !saved || row.kind !== saved.kind || row.text !== saved.text || (row.kind === "project" && row.project !== (saved.project ?? ""));
+}
+
+/**
+ * What a save sends: only new or changed entries, and only the ids the person deleted. Entries left
+ * out stay as they are, so one a familiar added while the editor was open survives the save.
+ */
+export function memoryChanges(rows: EditedEntry[], deleted: string[]): { entries: MemoryDraft[]; removed: string[] } {
+  const entries = rows.filter(entryChanged).map((r) => ({ id: r.saved?.id, kind: r.kind, project: r.kind === "project" ? r.project : undefined, text: r.text }));
+  return { entries, removed: deleted };
+}
+
 const kb = (bytes: number) => `${(bytes / 1024).toFixed(1).replace(/\.0$/, "")} KB`;
 
 /** Bytes the backend counts for these entries: their trimmed text and project names in UTF-8. */

@@ -218,8 +218,10 @@ fn strip_bullet(line: &str) -> Option<&str> {
 
 /// Markdown memory from before entries, as fact entries: one per list item or line, with indented
 /// lines joined to the item above. A "YYYY-MM-DD: " prefix (how remember wrote notes) becomes the
-/// date; other lines get `date`. Headings prefix the items under them. Ids are stable ("old1",
-/// "old2"...) so the tools can name them before the file is converted.
+/// date; other lines get `date`. A heading prefixes the first item under it, once, or is an entry of
+/// its own when nothing follows it, so the entries never hold more text than the markdown did and a
+/// memory that fit as markdown still fits. Ids are stable ("old1", "old2"...) so the tools can name
+/// them before the file is converted.
 pub fn from_markdown(text: &str, date: &str) -> Vec<Entry> {
     let mut items: Vec<(String, String)> = Vec::new();
     let mut heading: Option<String> = None;
@@ -232,6 +234,7 @@ pub fn from_markdown(text: &str, date: &str) -> Vec<Entry> {
         }
         if trimmed.starts_with('#') {
             let title = trimmed.trim_start_matches('#').trim();
+            items.extend(heading.take().map(|h| (date.to_string(), h)));
             heading = (!title.is_empty()).then(|| title.to_string());
             open = false;
             continue;
@@ -252,9 +255,10 @@ pub fn from_markdown(text: &str, date: &str) -> Vec<Entry> {
         if body.is_empty() {
             continue;
         }
-        items.push((when, heading.as_ref().map_or_else(|| body.to_string(), |h| format!("{h}: {body}"))));
+        items.push((when, heading.take().map_or_else(|| body.to_string(), |h| format!("{h}: {body}"))));
         open = true;
     }
+    items.extend(heading.map(|h| (date.to_string(), h)));
     let mut entries = Vec::new();
     for (learned_on, text) in items {
         let chars: Vec<char> = text.chars().collect();
@@ -759,16 +763,21 @@ mod tests {
             got,
             [
                 ("old1", "Notes: Uses bun.\nNot npm.", "2026-10-01"),
-                ("old2", "Notes: Lives in Lisbon", "2026-11-20"),
-                ("old3", "Notes: Likes tea.", "2026-11-20"),
-                ("old4", "Notes: First", "2026-11-20"),
-                ("old5", "Notes: Second", "2026-11-20"),
-                ("old6", "Notes: 2026-13-40: Bad date", "2026-11-20"),
+                ("old2", "Lives in Lisbon", "2026-11-20"),
+                ("old3", "Likes tea.", "2026-11-20"),
+                ("old4", "First", "2026-11-20"),
+                ("old5", "Second", "2026-11-20"),
+                ("old6", "2026-13-40: Bad date", "2026-11-20"),
             ]
         );
         assert!(entries.iter().all(|e| e.kind == Kind::Fact && e.source.is_none()));
         let long = from_markdown(&"y".repeat(ENTRY_LIMIT * 2 + 5), DAY);
         assert_eq!(long.iter().map(|e| e.text.chars().count()).collect::<Vec<_>>(), [ENTRY_LIMIT, ENTRY_LIMIT, 5], "long lines split, nothing lost");
+
+        let headings = from_markdown("# Cite sources\n\n## Empty\n## Tone\n- Be brief.\n- Be kind.\n# Last word", DAY);
+        let got: Vec<_> = headings.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(got, ["Cite sources", "Empty", "Tone: Be brief.", "Be kind.", "Last word"], "a heading is kept once, never dropped");
+        assert_eq!(from_markdown("# Cite sources", DAY)[0].text, "Cite sources");
 
         let (db, dir) = (Db::open_in_memory().unwrap(), temp_dir());
         std::fs::create_dir_all(&dir).unwrap();
@@ -785,6 +794,32 @@ mod tests {
         assert_eq!((after.len(), after[0].id.as_str(), after[0].learned_on.as_str()), (1, "old1", "2026-10-01"));
         forget_in(&db, &dir, MINE("scribe")).unwrap();
         assert!(!dir.join("scribe.md.bak").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn markdown_that_fit_still_fits_after_conversion() {
+        // Many headings over short items: repeating each heading in every item used to grow this past the limit.
+        let mut markdown = String::new();
+        let mut section = 0;
+        while markdown.len() < 14_000 {
+            markdown.push_str(&format!("## A fairly long section heading number {section}\n"));
+            for item in 0..8 {
+                markdown.push_str(&format!("- 2026-10-01: Note {item} here.\n"));
+            }
+            section += 1;
+        }
+        assert!(markdown.len() > 13_500 && markdown.len() <= LIMIT, "{}", markdown.len());
+        let entries = from_markdown(&markdown, DAY);
+        assert!(size(&entries) <= markdown.len(), "{} > {}", size(&entries), markdown.len());
+        assert_eq!(entries.len(), section * 8);
+
+        // It saves as it is, and a backup holding it imports every entry.
+        let (db, dir) = (Db::open_in_memory().unwrap(), temp_dir());
+        write_file(&dir, MINE("scribe"), &entries).unwrap();
+        let (kept, dropped) = imported(entries, DAY);
+        assert_eq!((kept.len(), dropped), (section * 8, 0));
+        forget_in(&db, &dir, MINE("scribe")).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -1,6 +1,30 @@
 import { expect, test } from "bun:test";
 import type { Agent } from "./api";
-import { entriesSize, entryLabel, entryProblem, lastUpdated, memoryUsage, ruleText } from "./memory";
+import { entriesSize, entryLabel, entryProblem, lastUpdated, memoryChanges, memoryUsage, ruleText, type MemoryEntry } from "./memory";
+
+test("a save sends only changed entries and the person's deletions", () => {
+  const entry = (id: string, text: string, project?: string): MemoryEntry => ({ id, kind: project ? "project" : "fact", project, text, learnedOn: "2026-11-01", source: null });
+  const kept = entry("kept", "Likes tea.");
+  const edited = entry("edited", "Uses npm.");
+  const moved = entry("moved", "Ships Fridays.", "app");
+  const gone = entry("gone", "Out of date.");
+  // The editor opened on these four; a refresh then brought in "added-by-familiar", which has no row.
+  const rows = [
+    { saved: kept, kind: kept.kind, project: "", text: kept.text },
+    { saved: edited, kind: edited.kind, project: "", text: "Uses bun." },
+    { saved: moved, kind: moved.kind, project: "web", text: moved.text },
+    { kind: "rule" as const, project: "ignored", text: "Be brief." },
+  ];
+  expect(memoryChanges(rows, [gone.id])).toEqual({
+    entries: [
+      { id: "edited", kind: "fact", project: undefined, text: "Uses bun." },
+      { id: "moved", kind: "project", project: "web", text: "Ships Fridays." },
+      { id: undefined, kind: "rule", project: undefined, text: "Be brief." },
+    ],
+    removed: ["gone"],
+  });
+  expect(memoryChanges([{ saved: moved, kind: "project", project: "app", text: moved.text }], [])).toEqual({ entries: [], removed: [] });
+});
 
 test("counts UTF-8 bytes of entries against the limit", () => {
   expect(memoryUsage(0, 16384)).toEqual({ label: "0 KB of 16 KB", over: false });
