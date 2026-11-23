@@ -11,13 +11,24 @@ pub fn main(args: &[String]) -> i32 {
         eprintln!("usage: grimoire mcp <socket> <agent-id>");
         return 2;
     };
-    let stdout = std::io::stdout();
+    let write = |reply: Value| {
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{reply}").and_then(|_| out.flush()).is_ok()
+    };
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
-        if let Some(reply) = respond(&message, |tool, arguments| relay(socket, agent, tool, arguments)) {
-            let mut out = stdout.lock();
-            if writeln!(out, "{reply}").and_then(|_| out.flush()).is_err() {
+        // A tool call can take minutes (ask_familiar waits for a reply), so it runs on its own thread
+        // and pings or other calls still get answered meanwhile.
+        if message["method"] == "tools/call" {
+            let (socket, agent) = (socket.clone(), agent.clone());
+            std::thread::spawn(move || {
+                if let Some(reply) = respond(&message, |tool, arguments| relay(&socket, &agent, tool, arguments)) {
+                    write(reply);
+                }
+            });
+        } else if let Some(reply) = respond(&message, |tool, arguments| relay(socket, agent, tool, arguments)) {
+            if !write(reply) {
                 break;
             }
         }
@@ -82,7 +93,7 @@ mod tests {
 
         let list = respond(&request("tools/list", json!({})), |_, _| unreachable!()).unwrap();
         let names: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["list_familiars", "list_spells", "create_spell", "list_themes", "create_theme", "vault_search", "vault_use", "set_theme", "read_memory", "remember", "rewrite_memory"]);
+        assert_eq!(names, ["list_familiars", "list_spells", "create_spell", "list_themes", "create_theme", "vault_search", "vault_use", "ask_familiar", "set_theme", "read_memory", "remember", "rewrite_memory"]);
     }
 
     #[test]

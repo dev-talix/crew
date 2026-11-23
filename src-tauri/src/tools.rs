@@ -16,11 +16,23 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 pub const SERVER_NAME: &str = "grimoire";
-const TOOL_NAMES: [&str; 8] =
-    ["list_familiars", "list_spells", "create_spell", "list_themes", "create_theme", "set_theme", "vault_search", "vault_use"];
+const TOOL_NAMES: [&str; 9] = [
+    "list_familiars",
+    "list_spells",
+    "create_spell",
+    "list_themes",
+    "create_theme",
+    "set_theme",
+    "vault_search",
+    "vault_use",
+    "ask_familiar",
+];
+/// How long the CLIs let one Grimoire tool call run. ask_familiar waits up to 10 minutes for a reply,
+/// plus up to 2 for the person's OK, so this leaves room for both. Their defaults are far shorter.
+pub const CALL_TIMEOUT_SECS: u64 = 15 * 60;
 
 /// How a CLI starts the tool server: this executable and the app's socket.
-static LAUNCH: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+pub(crate) static LAUNCH: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
 
 pub fn definitions() -> Value {
     let colors = json!({
@@ -104,6 +116,18 @@ pub fn definitions() -> Value {
                     "field": { "type": "string", "description": "password for a login, key for an API key, or number, expiry, or cvc for a card. Defaults to the first." }
                 },
                 "required": ["item"]
+            }
+        },
+        {
+            "name": "ask_familiar",
+            "description": "Send a message to another familiar and wait for its reply, which comes back as this tool's result. Use it when another familiar knows something or can do part of the work better. The message shows in that familiar's chat, labeled as asked by you, and it does not see your conversation, so include what it needs. If it is busy, your message waits in its queue until it finishes, and the wait counts toward a 10-minute limit. You can't ask yourself or a familiar that is waiting on you, chains stop at 3 familiars in a row, and the person may limit who you can ask or approve each message.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "familiar": { "type": "string", "description": "Familiar id or exact name, from list_familiars." },
+                    "message": { "type": "string", "description": "What to ask or ask it to do." }
+                },
+                "required": ["familiar", "message"]
             }
         },
         {
@@ -288,7 +312,7 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
     Ok(Outcome { text, changed })
 }
 
-fn resolve_agent<'a>(agents: &'a [Agent], wanted: &str) -> Result<&'a Agent, String> {
+pub(crate) fn resolve_agent<'a>(agents: &'a [Agent], wanted: &str) -> Result<&'a Agent, String> {
     let wanted = wanted.trim();
     if let Some(agent) = agents.iter().find(|a| a.id == wanted) {
         return Ok(agent);
@@ -312,6 +336,7 @@ pub struct Context {
     pub themes_dir: PathBuf,
     pub approvals: Arc<Approvals>,
     pub secrets: Arc<dyn SecretStore>,
+    pub runtime: Arc<crate::runtime::Runtime>,
 }
 
 /// Hands a vault secret to `caller` through a one-time pipe. `ask` puts the question to the user,
@@ -386,6 +411,7 @@ pub fn serve(ctx: Arc<Context>, socket: &Path) -> std::io::Result<()> {
         std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
     }
     let _ = LAUNCH.set((std::env::current_exe()?, socket.to_path_buf()));
+    crate::delegation::install(ctx.db.clone());
     tauri::async_runtime::spawn(async move {
         let listener = match UnixListener::from_std(listener) {
             Ok(listener) => listener,
@@ -412,7 +438,9 @@ async fn handle_connection(stream: UnixStream, ctx: Arc<Context>) {
     while let Ok(Some(line)) = lines.next_line().await {
         let reply = match serde_json::from_str::<Request>(&line) {
             Ok(request) => {
-                let result = if request.tool == "vault_use" {
+                let result = if request.tool == "ask_familiar" {
+                    crate::delegation::run(&ctx, &request.agent, request.arguments).await.map(|text| Outcome { text, changed: None })
+                } else if request.tool == "vault_use" {
                     let ask = |question| ctx.approvals.ask(&ctx.app, question);
                     let used = vault_use(&ctx.db, ctx.secrets.as_ref(), &request.agent, request.arguments, ask).await;
                     // Every attempt lands in the item's log, allowed or not.

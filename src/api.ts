@@ -201,7 +201,7 @@ export interface VaultActivity {
 export interface ApprovalRequest {
   id: string;
   agentId: string;
-  kind: "vault" | "command" | "file";
+  kind: "vault" | "command" | "file" | "familiar";
   title: string;
   detail: string;
   canRemember: boolean;
@@ -229,6 +229,12 @@ export type RuleKind = "ask" | "allow";
 export interface Permissions {
   mode: PermissionMode;
   rules: { kind: RuleKind; pattern: string }[];
+}
+
+/** Who a familiar may ask with ask_familiar, and whether the person approves each question. */
+export interface Delegation {
+  scope: "anyone" | "coven" | "nobody";
+  approve: boolean;
 }
 
 export const api = {
@@ -285,6 +291,8 @@ export const api = {
   planLimits: () => invoke<PlanLimits>("plan_limits"),
   checkForUpdates: () => invoke<UpdateCheck>("check_for_updates"),
   savePermissions: (permissions: Permissions) => invoke<Permissions>("save_permissions", { permissions }),
+  getDelegation: () => invoke<Delegation>("get_delegation"),
+  saveDelegation: (settings: Delegation) => invoke<Delegation>("save_delegation", { settings }),
 };
 
 /**

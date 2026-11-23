@@ -102,7 +102,13 @@ fn thread_params(agent: &Agent) -> Value {
     }
     if let Some((command, args)) = crate::tools::server_command(&agent.id) {
         // Codex refuses MCP calls that need approval under approvalPolicy "never", so pre-approve Grimoire's own tools.
-        let server = json!({ "command": command, "args": args, "default_tools_approval_mode": "approve" });
+        // Codex gives up on a tool call after 60 seconds by default; ask_familiar can wait minutes for a reply.
+        let server = json!({
+            "command": command,
+            "args": args,
+            "default_tools_approval_mode": "approve",
+            "tool_timeout_sec": crate::tools::CALL_TIMEOUT_SECS,
+        });
         params["config"] = json!({ "mcp_servers": { (crate::tools::SERVER_NAME): server } });
     }
     if let Some(memory) = crate::memory::session_prompt(agent) {
@@ -428,6 +434,9 @@ fn tool_label(item: &Value) -> Option<String> {
                 .unwrap_or_default();
             Some(format!("Edit {}", paths.join(", ")))
         }
+        "mcpToolCall" if text("server") == crate::tools::SERVER_NAME && text("tool") == "ask_familiar" => {
+            Some(crate::delegation::tool_label(&item["arguments"]))
+        }
         "mcpToolCall" => Some(format!("{}.{}", text("server"), text("tool"))),
         "dynamicToolCall" => Some(text("tool")),
         "webSearch" => Some("Web search".into()),
@@ -510,6 +519,8 @@ mod tests {
             ("item/started", json!({"threadId":"t","item":{"type":"commandExecution","id":"c1","command":"ls"}})),
             ("item/started", json!({"threadId":"t","item":{"type":"fileChange","id":"f1","changes":[{"path":"a.rs"},{"path":"b.rs"}]}})),
             ("item/started", json!({"threadId":"t","item":{"type":"reasoning","id":"r1"}})),
+            ("item/started", json!({"threadId":"t","item":{"type":"mcpToolCall","id":"m","server":"grimoire","tool":"ask_familiar","arguments":{"familiar":"Scribe"}}})),
+            ("item/started", json!({"threadId":"t","item":{"type":"mcpToolCall","id":"n","server":"grimoire","tool":"list_spells","arguments":{}}})),
             ("item/agentMessage/delta", json!({"threadId":"t","itemId":"m2","delta":"Done"})),
             ("item/agentMessage/delta", json!({"threadId":"t","itemId":"m2","delta":"!"})),
             ("turn/completed", json!({"threadId":"t","turn":{"status":"completed"}})),
@@ -521,6 +532,8 @@ mod tests {
                 ProviderEvent::Delta("Looking".into()),
                 ProviderEvent::Tool("$ ls".into()),
                 ProviderEvent::Tool("Edit a.rs, b.rs".into()),
+                ProviderEvent::Tool("Asked Scribe".into()),
+                ProviderEvent::Tool("grimoire.list_spells".into()),
                 ProviderEvent::Delta("\n\n".into()),
                 ProviderEvent::Delta("Done".into()),
                 ProviderEvent::Delta("!".into()),

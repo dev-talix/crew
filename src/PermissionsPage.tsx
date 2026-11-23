@@ -1,5 +1,6 @@
 import { createSignal, For, onSettled, Show } from "solid-js";
 import { api, errorText, type Permissions, type PermissionMode, type RuleKind } from "./api";
+import DelegationSettings from "./DelegationSettings";
 import { CloseIcon } from "./icons";
 import { Page } from "./ui";
 
@@ -114,6 +115,8 @@ export default function PermissionsPage(props: { onOpenVault: () => void }) {
                   );
                 }}
               </For>
+
+              <DelegationSettings />
 
               <h2 class="section-title">Vault</h2>
               <div class="list">
