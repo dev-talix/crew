@@ -85,10 +85,17 @@ a familiar.
 
 ## Familiars
 
-Build a familiar's avatar in the avatar studio: one of six shapes (orbit, spark, cloud, drop, ears,
-classic), three eye styles, and any color. Each shape has its own moves, like the orbit's moon or
-the cloud's drizzle, and all motion stops when macOS Reduce Motion is on. The avatar's color tints
+Build a familiar's avatar in the avatar studio: one of twelve shapes (orbit, spark, cloud, drop,
+ears, classic, owl, candle, tome, cauldron, crystal ball, bat), three eye styles, and any color. Each
+shape has its own moves, like the orbit's moon, the candle's flame, or the cauldron's bubbles, and
+all motion stops when macOS Reduce Motion is on. The avatar's color tints
 that familiar's chat.
+
+<p align="center">
+  <img src="docs/screenshots/familiars.png" width="820" alt="Six familiars on the home circle: an owl, a candle, a tome, a cauldron, a crystal ball, and a bat">
+</p>
+
+The owl, candle, tome, cauldron, crystal ball, and bat [in every mood](docs/screenshots/familiar-states.gif).
 
 The gear in the chat header changes a familiar's avatar, name, model, effort, or access, or deletes
 it. The model chip in the composer shows the model it is running and switches it.
