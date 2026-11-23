@@ -103,7 +103,7 @@ export default function HomePage(props: {
                   </span>
                   <span class="home-meta">
                     <span>{PROVIDER_NAMES[agent.provider]}</span>
-                    <Show when={last[agent.id]}>{(m) => <span>{relativeTime(m().createdAt, now())}</span>}</Show>
+                    <Show when={last[agent.id]}>{(m) => <span>{relativeTime(Math.min(m().createdAt, now()), now())}</span>}</Show>
                   </span>
                 </button>
               )}

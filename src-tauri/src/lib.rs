@@ -555,7 +555,6 @@ pub fn run() {
             let billing = db.setting(CLAUDE_BILLING).ok().flatten();
             providers::USE_CLAUDE_SUBSCRIPTION.store(billing.as_deref() != Some("api"), Ordering::Relaxed);
             let runtime = Runtime::new(db.clone(), app.handle().clone());
-            let scheduler = Scheduler::start(db.clone(), &runtime, app.handle().clone());
             let workflows = WorkflowRunner::new(db.clone(), runtime.clone(), app.handle().clone());
             let edge = db.setting(DOCK_EDGE).ok().flatten().and_then(|e| dock::Edge::parse(&e));
             // Agents get the Grimoire tools only when this socket is up; Grimoire still works without them.
@@ -574,6 +573,9 @@ pub fn run() {
             if let Err(e) = tools::serve(Arc::new(tools), &dir.join("grimoire.sock")) {
                 eprintln!("Grimoire tools are off: {e}");
             }
+            // Rituals can fire as soon as the scheduler starts, so the approval gate and the tool socket
+            // have to be up first.
+            let scheduler = Scheduler::start(db.clone(), &runtime, app.handle().clone());
             app.manage(AppState { db, runtime, scheduler, workflows, dock: dock::Dock::default(), themes_dir, approvals, secrets });
             if edge.is_some() {
                 let state = app.state::<AppState>();
