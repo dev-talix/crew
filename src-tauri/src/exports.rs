@@ -909,6 +909,41 @@ mod tests {
     }
 
     #[test]
+    fn spell_rituals_and_step_options_survive_a_round_trip() {
+        let themes = temp_dir("themes");
+        let home = temp_dir("home");
+        let db = stocked(&themes);
+        let spell = db.list_workflows().unwrap().remove(0);
+        let mut steps = spell.steps.clone();
+        steps[1].parallel = true;
+        crate::workflows::save(&db, Some(&spell.id), &spell.name, steps, None).unwrap();
+        db.save_routine(&Routine {
+            id: "cast".into(),
+            agent_id: None,
+            workflow_id: Some(spell.id.clone()),
+            name: "Weekly brief".into(),
+            prompt: "AI news".into(),
+            schedule: Schedule::Daily { time: "08:00".into(), days: vec![1] },
+            enabled: true,
+            last_run_at: None,
+            next_run_at: None,
+            created_at: 1,
+        })
+        .unwrap();
+        let text = serde_json::to_string(&export_backup(&db, &themes, false).unwrap()).unwrap();
+        let plan = plan(&db, &themes, parse(&text).unwrap(), &home).unwrap();
+        let line = plan.preview.items.iter().find(|i| i.what == "ritual" && i.name == "Weekly brief").unwrap();
+        assert_eq!(line.notes, ["Casts the imported Topic brief (2)."]);
+        apply(&db, &themes, &plan).unwrap();
+        let copy = db.list_workflows().unwrap().into_iter().find(|w| w.name == "Topic brief (2)").unwrap();
+        assert!(copy.steps[1].parallel, "step options come along");
+        let ritual = db.list_routines().unwrap().into_iter().find(|r| r.name == "Weekly brief" && r.id != "cast").unwrap();
+        assert_eq!((ritual.agent_id, ritual.workflow_id.as_deref()), (None, Some(copy.id.as_str())));
+        std::fs::remove_dir_all(themes).unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn round_trip_renames_conflicts_and_remaps_spells() {
         let themes = temp_dir("themes");
         let home = temp_dir("home");
