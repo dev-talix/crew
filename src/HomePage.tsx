@@ -8,6 +8,7 @@ import HomeCircle from "./HomeCircle";
 import { PlusIcon } from "./icons";
 import { EmptyState, HostBadge, Page, Sheet } from "./ui";
 import { ritualAgents, ritualWho } from "./spells";
+import { isRemote } from "./linked";
 
 const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
 
@@ -197,7 +198,7 @@ export default function HomePage(props: {
                       </span>
                       <span class="home-meta">
                         <span>{PROVIDER_NAMES[agent.provider]}</span>
-                        <Show when={agent.host}>{(host) => <HostBadge agent={agent} host={host()} />}</Show>
+                        <Show when={agent.host ?? agent.home?.name}>{(host) => <HostBadge agent={agent} host={host()} />}</Show>
                         <Show when={last[agent.id]}>{(m) => <span>{ago(m().createdAt)}</span>}</Show>
                       </span>
                     </button>
@@ -250,7 +251,7 @@ export default function HomePage(props: {
           <Sheet label={target() === "new" ? "New coven" : "Edit coven"} wide onClose={() => setEditing(null)}>
             <CovenEditor
               coven={target() === "new" ? null : (target() as Coven)}
-              agents={props.agents}
+              agents={props.agents.filter((a) => !isRemote(a))}
               covens={props.covens}
               onSaved={(saved) => {
                 setEditing(null);

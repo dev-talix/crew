@@ -2,7 +2,7 @@ import { createEffect, createMemo, createSignal, For, onSettled, Show } from "so
 import type { JSX } from "@solidjs/web";
 import BotAvatar from "./BotAvatar";
 import { api, relativeTime, type Agent, type SearchHit, type Workflow } from "./api";
-import { ClockIcon, ComposeIcon, HomeIcon, PlusIcon, SearchIcon } from "./icons";
+import { ClockIcon, ComposeIcon, HomeIcon, LinkIcon, PlusIcon, SearchIcon } from "./icons";
 import { highlightParts, rank, snippetParts, type PaletteItem } from "./palette";
 import { SETTINGS_SECTIONS, type SettingsSection } from "./SettingsPage";
 import "./palette.css";
@@ -55,7 +55,7 @@ export default function CommandPalette(props: {
     const list: Command[] = props.agents.map((agent) => ({
       id: `agent:${agent.id}`,
       label: agent.name,
-      kind: "Familiar",
+      kind: agent.home ? `Familiar on ${agent.home.name}` : "Familiar",
       icon: () => <BotAvatar avatar={agent.avatar} size={18} alive={false} />,
       run: () => a.openAgent(agent.id),
     }));
@@ -77,12 +77,14 @@ export default function CommandPalette(props: {
       });
     }
     const current = props.current;
-    if (current) {
+    // A linked Mac's familiar keeps its chats on that Mac.
+    if (current && !current.home) {
       list.push({ id: "new-chat", label: `New chat with ${current.name}`, kind: "Action", icon: ComposeIcon, run: () => a.newChat(current.id) });
     }
     list.push(
       { id: "summon", label: "Summon a familiar", kind: "Action", keywords: "new familiar create agent", icon: PlusIcon, run: a.summon },
       { id: "new-spell", label: "New spell", kind: "Action", keywords: "create workflow", icon: PlusIcon, run: a.newSpell },
+      { id: "link-mac", label: "Link a Mac", kind: "Action", keywords: "pair tailscale tailnet linked macs", icon: LinkIcon, run: () => a.openSettings("links") },
     );
     return list;
   });

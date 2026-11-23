@@ -16,6 +16,7 @@ import { SettingsDialog } from "./SettingsPage";
 import WorkflowsPage, { type SpellIntent } from "./WorkflowsPage";
 import { api, errorText, onEvent, onMountAsync, PROVIDER_NAMES, subscribe, withAgent, type Agent, type Coven, type Workflow } from "./api";
 import { inkFor } from "./avatar";
+import { groupByHome, homeOffline, isRemote } from "./linked";
 import { runningModelName } from "./models";
 import { createMoods } from "./moods";
 import { ClockIcon, GearIcon, HomeIcon, PlusIcon, TalkIcon } from "./icons";
@@ -64,13 +65,19 @@ export default function App() {
   const loadSpells = () => api.listWorkflows().then(setSpells, () => {});
   const [covens, setCovens] = createSignal<Coven[]>([]);
   const loadCovens = () => api.listCovens().then(setCovens, () => {});
-  // The sidebar lists familiars coven by coven once there are covens, with the unbound last.
+  // Linked Macs' familiars can't be used in rituals, spells, covens, the vault, or the dock.
+  const localAgents = createMemo(() => agents().filter((a) => !isRemote(a)));
+  // The sidebar lists this Mac's familiars coven by coven once there are covens, with the unbound last,
+  // then each linked Mac's familiars under that Mac's name.
   const sidebarGroups = createMemo(() => {
-    const list = agents();
-    if (!covens().length) return [{ label: null as string | null, agents: list }];
+    const remote = groupByHome(agents())
+      .filter((m) => m.peerId !== null)
+      .map((m) => ({ label: m.online ? m.name : `${m.name} · Offline`, agents: m.agents }));
+    const list = localAgents();
+    if (!covens().length) return [{ label: null as string | null, agents: list }, ...remote].filter((g) => g.agents.length > 0);
     const groups = covens().map((c) => ({ label: c.name as string | null, agents: list.filter((a) => a.covenId === c.id) }));
     const unbound = list.filter((a) => !a.covenId || !covens().some((c) => c.id === a.covenId));
-    return [...groups, { label: "Unbound", agents: unbound }].filter((g) => g.agents.length > 0);
+    return [...groups, { label: "Unbound", agents: unbound }, ...remote].filter((g) => g.agents.length > 0);
   });
   const ordered = () => sidebarGroups().flatMap((g) => g.agents);
   const [palette, setPalette] = createSignal(false);
@@ -132,8 +139,10 @@ export default function App() {
       if (agents().some((a) => a.id === id)) openAgent(id);
     });
     keep(stopOpen);
-    const stopAgents = await onEvent<null>("agents_changed", () => api.listAgents().then(setAgents));
-    keep(stopAgents);
+    // A linked Mac coming or going changes which familiars show and whether they're offline.
+    for (const name of ["agents_changed", "links_changed"] as const) {
+      keep(await onEvent<null>(name, () => api.listAgents().then(setAgents, () => {})));
+    }
     const stop = await subscribe({
       message: (message) => {
         chat.onMessage(message);
@@ -222,6 +231,7 @@ export default function App() {
   };
 
   const status = (agent: Agent) => {
+    if (homeOffline(agent)) return "Offline";
     if (busy[agent.id]) return "Working";
     if (unread[agent.id]) return "New reply";
     const model = runningModelName(agent);
@@ -258,12 +268,13 @@ export default function App() {
                 <For each={group.agents}>
             {(agent) => {
               const index = () => ordered().indexOf(agent);
+              const label = agent.home ? `${agent.name} on ${agent.home.name}` : agent.name;
               return (
               <button
                 class={["agent-row", { active: agent.id === selected() }]}
                 data-slot="sidebar-row"
                 aria-current={agent.id === selected() ? "page" : undefined}
-                title={index() < 9 ? `${agent.name} (⌘${index() + 1})` : agent.name}
+                title={index() < 9 ? `${label} (⌘${index() + 1})` : label}
                 style={{ "--agent": agent.avatar.color }}
                 onClick={() => openAgent(agent.id)}
               >
@@ -288,7 +299,7 @@ export default function App() {
             <button class={["caption-link", { active: is("workflows") }]} aria-current={is("workflows") ? "page" : undefined} onClick={() => openSpells(null)}>
               Spells
             </button>
-            <button class="icon-button" aria-label="New spell" title="New spell" disabled={!agents().length} onClick={() => openSpells({ create: true })}>
+            <button class="icon-button" aria-label="New spell" title="New spell" disabled={!localAgents().length} onClick={() => openSpells({ create: true })}>
               <PlusIcon />
             </button>
           </div>
@@ -364,10 +375,10 @@ export default function App() {
               <HandoffsPage agents={agents()} onOpenAgent={openAgent} />
             </Match>
             <Match when={is("routines")}>
-              <RoutinesPage agents={agents()} onOpenAgent={openAgent} />
+              <RoutinesPage agents={localAgents()} onOpenAgent={openAgent} />
             </Match>
             <Match when={is("workflows")}>
-              <WorkflowsPage agents={agents()} onOpenAgent={openAgent} intent={spellIntent()} onIntentDone={() => setSpellIntent(null)} />
+              <WorkflowsPage agents={localAgents()} onOpenAgent={openAgent} intent={spellIntent()} onIntentDone={() => setSpellIntent(null)} />
             </Match>
             <Match when={true}>
               <HomePage
@@ -386,7 +397,7 @@ export default function App() {
         </Show>
       </main>
       <Show when={settings()}>
-        {(section) => <SettingsDialog agents={agents()} section={section()} onClose={() => setSettings(null)} />}
+        {(section) => <SettingsDialog agents={localAgents()} section={section()} onClose={() => setSettings(null)} />}
       </Show>
       <Show when={palette()}>
         <CommandPalette

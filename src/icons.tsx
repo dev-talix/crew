@@ -246,3 +246,12 @@ export const TrashIcon = () => (
     <path d="M2.8 4.2h10.4M6.2 4.2V2.8h3.6v1.4M4.2 4.2l.6 9h6.4l.6-9M6.8 6.6v4.4M9.2 6.6v4.4" />
   </Icon>
 );
+
+/** Two laptops joined by a line: Macs linked to each other. */
+export const LinkIcon = () => (
+  <Icon>
+    <rect x="1.5" y="3" width="5" height="4" rx="0.8" />
+    <rect x="9.5" y="9" width="5" height="4" rx="0.8" />
+    <path d="M4 7v2.5a1 1 0 0 0 1 1h4.5M12 9V6.5a1 1 0 0 0-1-1H6.5" />
+  </Icon>
+);

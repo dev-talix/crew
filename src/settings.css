@@ -250,3 +250,18 @@
 .dock-pick > * {
   flex-shrink: 0;
 }
+
+.pairing-code {
+  margin: 6px 0 2px;
+  font: 600 28px/1.2 var(--mono);
+  letter-spacing: 0.12em;
+  user-select: text;
+}
+
+.link-form {
+  align-items: flex-end;
+}
+
+.link-form .field {
+  flex: 1;
+}

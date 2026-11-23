@@ -10,6 +10,7 @@ import Ledger from "./Ledger";
 import Helpers from "./Helpers";
 import ModelPicker from "./ModelPicker";
 import { HostBadge } from "./ui";
+import { homeOffline, isRemote, offlineNotice } from "./linked";
 import SideConversation from "./SideConversation";
 import { effortName, runningModelName } from "./models";
 import {
@@ -150,7 +151,7 @@ function AssistantRow(props: { message: Message; turn: () => TurnInfo | undefine
   );
 }
 
-function UserRow(props: { message: Message; onOpen: (attachment: Attachment) => void }) {
+function UserRow(props: { message: Message; onOpen: (attachment: Attachment) => void; rules: boolean }) {
   const m = () => props.message;
   return (
     <div class="row user" data-slot="message" data-role="user" data-message-id={m().id}>
@@ -170,7 +171,7 @@ function UserRow(props: { message: Message; onOpen: (attachment: Attachment) => 
         <span class="hover-only">{clock(m().createdAt)}</span>
         <span class="hover-only">
           <CopyButton text={() => m().text} label="Copy message" />
-          <Show when={m().text.trim() && !m().source}>
+          <Show when={props.rules && m().text.trim() && !m().source}>
             <RuleButton message={m()} />
           </Show>
         </span>
@@ -234,7 +235,10 @@ export default function Chat(props: {
   const [draft, setDraft] = createSignal("");
   const [actionError, setActionError] = createSignal("");
   const [listening, setListening] = createSignal(false);
-  const files = createComposerFiles(setActionError);
+  // A familiar on a linked Mac: chat and stop work here; its settings, chats, memory, and files stay on that Mac.
+  const remote = () => isRemote(props.agent);
+  const offline = () => homeOffline(props.agent);
+  const files = createComposerFiles(setActionError, () => !remote());
   let recognition: SpeechRecognitionLike | undefined;
   let list!: HTMLDivElement;
   let input!: HTMLTextAreaElement;
@@ -270,6 +274,10 @@ export default function Chat(props: {
   let shown: string | null = null;
   let chatsToken = 0;
   const refreshChats = async () => {
+    if (remote()) {
+      setChats([]);
+      return;
+    }
     const agentId = props.agent.id;
     const token = ++chatsToken;
     const list = await api.listChats(agentId).catch(() => null);
@@ -419,13 +427,13 @@ export default function Chat(props: {
     setListening(true);
   };
 
-  const canSend = () => !!draft().trim() || files.items().length > 0;
+  const canSend = () => !offline() && (!!draft().trim() || (!remote() && files.items().length > 0));
 
   const send = () => {
     stopDictation();
     const text = draft().trim();
     if (!canSend()) return;
-    const attached = files.take();
+    const attached = remote() ? [] : files.take();
     setDraft("");
     resize();
     stickToBottom = true;
@@ -466,7 +474,10 @@ export default function Chat(props: {
         <div class="crumbs" data-tauri-drag-region>
           <BotAvatar avatar={props.agent.avatar} size={20} fluid working={props.busy} mood={props.mood} />
           <span class="crumb-name">{props.agent.name}</span>
-          <Show when={!props.compact}>
+          <Show when={props.agent.home}>
+            {(home) => <HostBadge agent={props.agent} host={`on ${home().name}`} />}
+          </Show>
+          <Show when={!props.compact && !remote()}>
             <span class="crumb-sep" aria-hidden="true">
               /
             </span>
@@ -481,39 +492,43 @@ export default function Chat(props: {
               {(host) => <HostBadge agent={props.agent} host={host()} title={`Runs in ${props.agent.workspace} on ${host()} over SSH, without Grimoire's tools`} />}
             </Show>
           </Show>
-          <span class="crumb-sep" aria-hidden="true">
-            /
-          </span>
-          <span class="chat-title-anchor">
-            <button
-              class="chat-title-button"
-              data-chats-trigger
-              aria-haspopup="dialog"
-              aria-expanded={chatsOpen() ? "true" : "false"}
-              title="Chats"
-              onClick={() => {
-                if (!chatsOpen()) void refreshChats();
-                setChatsOpen(!chatsOpen());
-              }}
-            >
-              <span>{chatTitle(currentChat())}</span>
-              <ChevronIcon />
-            </button>
-            <Show when={chatsOpen()}>
-              <ChatsMenu
-                chats={chats()}
-                busy={props.busy}
-                onOpen={openChat}
-                onNew={newChat}
-                onRename={renameChat}
-                onDelete={deleteChat}
-                onClose={() => setChatsOpen(false)}
-              />
-            </Show>
-          </span>
+          <Show when={!remote()}>
+            <span class="crumb-sep" aria-hidden="true">
+              /
+            </span>
+            <span class="chat-title-anchor">
+              <button
+                class="chat-title-button"
+                data-chats-trigger
+                aria-haspopup="dialog"
+                aria-expanded={chatsOpen() ? "true" : "false"}
+                title="Chats"
+                onClick={() => {
+                  if (!chatsOpen()) void refreshChats();
+                  setChatsOpen(!chatsOpen());
+                }}
+              >
+                <span>{chatTitle(currentChat())}</span>
+                <ChevronIcon />
+              </button>
+              <Show when={chatsOpen()}>
+                <ChatsMenu
+                  chats={chats()}
+                  busy={props.busy}
+                  onOpen={openChat}
+                  onNew={newChat}
+                  onRename={renameChat}
+                  onDelete={deleteChat}
+                  onClose={() => setChatsOpen(false)}
+                />
+              </Show>
+            </span>
+          </Show>
         </div>
         <div class="bar-actions">
-          <Helpers agent={props.agent} />
+          <Show when={!remote()}>
+            <Helpers agent={props.agent} />
+          </Show>
           <Show when={props.compact}>
             {(compact) => (
               <button class="icon-button" aria-label="Open in Grimoire" title="Open in Grimoire" onClick={compact().onOpenMain}>
@@ -521,16 +536,18 @@ export default function Chat(props: {
               </button>
             )}
           </Show>
-          <button
-            class="icon-button"
-            aria-label="New chat"
-            title="New chat"
-            disabled={props.busy}
-            onClick={newChat}
-          >
-            <ComposeIcon />
-          </button>
-          <Show when={!props.compact && props.onMemory}>
+          <Show when={!remote()}>
+            <button
+              class="icon-button"
+              aria-label="New chat"
+              title="New chat"
+              disabled={props.busy}
+              onClick={newChat}
+            >
+              <ComposeIcon />
+            </button>
+          </Show>
+          <Show when={!props.compact && !remote() && props.onMemory}>
             {(open) => (
               <button class="icon-button" aria-label="Memory" title="Memory" onClick={open()}>
                 <MemoryIcon />
@@ -540,9 +557,11 @@ export default function Chat(props: {
           <Show
             when={props.compact}
             fallback={
-              <button class="icon-button" aria-label="Familiar settings" title="Familiar settings" onClick={props.onEdit}>
-                <GearIcon />
-              </button>
+              <Show when={!remote()}>
+                <button class="icon-button" aria-label="Familiar settings" title="Familiar settings" onClick={props.onEdit}>
+                  <GearIcon />
+                </button>
+              </Show>
             }
           >
             {(compact) => (
@@ -553,7 +572,9 @@ export default function Chat(props: {
           </Show>
         </div>
       </header>
-      <Ledger agentId={props.agent.id} name={props.agent.name} />
+      <Show when={!remote()}>
+        <Ledger agentId={props.agent.id} name={props.agent.name} />
+      </Show>
 
       <div
         class="timeline"
@@ -568,7 +589,7 @@ export default function Chat(props: {
               Load earlier messages
             </button>
           </Show>
-          <Show when={!messages().length && !props.busy}>
+          <Show when={!messages().length && !props.busy && !offline()}>
             <div class="chat-empty">
               <BotAvatar avatar={props.agent.avatar} size={64} fluid />
               <p>Send {props.agent.name} a message to start.</p>
@@ -578,7 +599,7 @@ export default function Chat(props: {
             {(row) => (
               <Switch>
                 <Match when={row.kind === "user" && row}>
-                  {(r) => <UserRow message={(r() as Extract<Row, { kind: "user" }>).message} onOpen={(a) => run(() => api.openAttachment(a.id))} />}
+                  {(r) => <UserRow message={(r() as Extract<Row, { kind: "user" }>).message} onOpen={(a) => run(() => api.openAttachment(a.id))} rules={!remote()} />}
                 </Match>
                 <Match when={row.kind === "assistant" && row}>
                   {(r) => {
@@ -608,13 +629,23 @@ export default function Chat(props: {
             {actionError()}
           </p>
         </Show>
+        <Show when={offline()}>
+          <p class="composer-notice" role="status">
+            {offlineNotice(props.agent)}
+          </p>
+        </Show>
         <div class="composer-card">
-          <PendingFiles items={files.items()} onRemove={files.remove} />
+          <Show when={!remote()}>
+            <PendingFiles items={files.items()} onRemove={files.remove} />
+          </Show>
           <textarea
             ref={input}
             rows={1}
             aria-label={`Message ${props.agent.name}`}
-            placeholder={props.busy ? "Queue a follow-up. It runs after this task." : `Ask ${props.agent.name} anything`}
+            disabled={offline()}
+            placeholder={
+              offline() ? `${props.agent.name} can't be reached right now` : props.busy ? "Queue a follow-up. It runs after this task." : `Ask ${props.agent.name} anything`
+            }
             value={draft()}
             onInput={(e) => {
               setDraft(e.currentTarget.value);
@@ -633,7 +664,14 @@ export default function Chat(props: {
               class="chip"
               aria-haspopup="menu"
               aria-expanded={picking() ? "true" : "false"}
-              title={props.agent.activeModel ? `Running ${props.agent.activeModel}` : "Choose a model"}
+              title={
+                props.agent.home
+                  ? `Change the model on ${props.agent.home.name}`
+                  : props.agent.activeModel
+                    ? `Running ${props.agent.activeModel}`
+                    : "Choose a model"
+              }
+              disabled={remote()}
               onClick={() => setPicking(!picking())}
             >
               <span class="chip-provider">{PROVIDER_NAMES[props.agent.provider]}</span>
@@ -646,21 +684,30 @@ export default function Chat(props: {
             <span class="chip-sep" aria-hidden="true" />
             <button
               class={["chip access-chip", { warn: props.agent.access === "full" }]}
-              title={props.agent.access === "full" ? "Full access. Click for workspace only." : "Workspace only. Click for full access."}
-              disabled={props.busy}
+              title={
+                props.agent.home
+                  ? `Change access on ${props.agent.home.name}`
+                  : props.agent.access === "full"
+                    ? "Full access. Click for workspace only."
+                    : "Workspace only. Click for full access."
+              }
+              disabled={props.busy || remote()}
               onClick={toggleAccess}
             >
               {props.agent.access === "full" ? <LockOpenIcon /> : <LockIcon />}
               <span>{props.agent.access === "full" ? "Full access" : "Workspace only"}</span>
             </button>
             <span class="spacer" />
-            <AttachButton onFiles={files.add} />
+            <Show when={!remote()}>
+              <AttachButton onFiles={files.add} />
+            </Show>
             <Show when={SpeechRecognition}>
               <button
                 class={["icon-button mic", { listening: listening() }]}
                 aria-label={listening() ? "Stop dictation" : "Dictate a message"}
                 aria-pressed={listening() ? "true" : "false"}
                 title={listening() ? "Stop dictation" : "Dictate a message"}
+                disabled={offline()}
                 onClick={toggleDictation}
               >
                 <MicIcon />
