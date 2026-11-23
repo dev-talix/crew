@@ -136,6 +136,9 @@ pub struct Message {
     pub source: Option<String>,
     pub created_at: i64,
     pub updated_at: Option<i64>,
+    /// Filled in by `attachments::attach` where the window needs them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::attachments::Attachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -195,7 +198,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 11;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -364,6 +367,22 @@ impl Db {
                  COMMIT;",
             )?;
         }
+        if version < 11 {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE attachments (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                   name TEXT NOT NULL,
+                   kind TEXT NOT NULL,
+                   size INTEGER NOT NULL,
+                   path TEXT NOT NULL
+                 );
+                 CREATE INDEX attachments_by_message ON attachments(message_id);
+                 PRAGMA user_version = 11;
+                 COMMIT;",
+            )?;
+        }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
             [],
@@ -480,6 +499,7 @@ impl Db {
                 source: source.map(str::to_string),
                 created_at,
                 updated_at: None,
+                attachments: Vec::new(),
             })
         })
     }
@@ -688,6 +708,7 @@ fn row_to_message(r: &rusqlite::Row) -> rusqlite::Result<Message> {
         created_at: r.get(5)?,
         source: r.get(6)?,
         updated_at: r.get(7)?,
+        attachments: Vec::new(),
     })
 }
 

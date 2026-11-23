@@ -2,6 +2,7 @@ use super::{command, spawn_error, EventTx, IdleTimer, ProviderEvent, StderrTail}
 use crate::db::{Access, Agent};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -105,15 +106,51 @@ fn args(agent: &Agent) -> Vec<String> {
     args
 }
 
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, &b)| n | (b as u32) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() { BASE64[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
+/// The user message's content: plain text, or each image as a base64 block followed by the text.
+fn user_content(text: &str, images: &[(&'static str, Vec<u8>)]) -> Value {
+    if images.is_empty() {
+        return json!(text);
+    }
+    let mut blocks: Vec<Value> = images
+        .iter()
+        .map(|(media_type, bytes)| json!({ "type": "image", "source": { "type": "base64", "media_type": media_type, "data": base64(bytes) } }))
+        .collect();
+    if !text.is_empty() {
+        blocks.push(json!({ "type": "text", "text": text }));
+    }
+    Value::Array(blocks)
+}
+
+fn read_image(path: &Path) -> Result<(&'static str, Vec<u8>), String> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let bytes = std::fs::read(path).map_err(|e| format!("Could not read {name}: {e}"))?;
+    let media_type = crate::attachments::image_type(&bytes).ok_or(format!("{name} is not a PNG, JPEG, GIF, or WebP image."))?;
+    Ok((media_type, bytes))
+}
+
 impl Claude {
-    pub async fn start_turn(&self, agent: &Agent, text: &str, tx: EventTx) -> Result<(), String> {
+    pub async fn start_turn(&self, agent: &Agent, text: &str, images: &[PathBuf], tx: EventTx) -> Result<(), String> {
+        let images = images.iter().map(|p| read_image(p)).collect::<Result<Vec<_>, _>>()?;
         let process = self.process_for(agent)?;
         process.idle.cancel();
         process.interrupting.store(false, Ordering::SeqCst);
         if let Ok(mut route) = process.route.lock() {
             *route = Some(tx);
         }
-        let message = json!({ "type": "user", "message": { "role": "user", "content": text } });
+        let message = json!({ "type": "user", "message": { "role": "user", "content": user_content(text, &images) } });
         let hook = json!({
             "type": "control_request",
             "request_id": uuid::Uuid::new_v4().to_string(),
@@ -381,6 +418,36 @@ impl ClaudeParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encodes_base64() {
+        for (raw, encoded) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foobar", "Zm9vYmFy")] {
+            assert_eq!(base64(raw.as_bytes()), encoded);
+        }
+        assert_eq!(base64(&[0xFB, 0xFF]), "+/8=");
+    }
+
+    #[test]
+    fn sends_images_as_base64_blocks_before_the_text() {
+        assert_eq!(user_content("hi", &[]), json!("hi"));
+        let content = user_content("What's this?", &[("image/png", b"png".to_vec())]);
+        assert_eq!(
+            content,
+            json!([
+                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "cG5n" } },
+                { "type": "text", "text": "What's this?" }
+            ])
+        );
+        assert_eq!(user_content("", &[("image/gif", vec![])]).as_array().unwrap().len(), 1);
+
+        let dir = std::env::temp_dir().join(format!("grimoire-claude-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.gif"), b"GIF89a").unwrap();
+        std::fs::write(dir.join("b.png"), b"not an image").unwrap();
+        assert_eq!(read_image(&dir.join("a.gif")).unwrap().0, "image/gif");
+        assert!(read_image(&dir.join("b.png")).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn parse_all(lines: &[Value]) -> Vec<ProviderEvent> {
         let mut parser = ClaudeParser::default();
