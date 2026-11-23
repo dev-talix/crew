@@ -205,6 +205,12 @@ export interface PlanLimits {
   claude: { info: Record<string, unknown>; at: number } | null;
 }
 
+export interface UpdateCheck {
+  current: string;
+  latest: { version: string; url: string; publishedAt: string | null } | null;
+  newer: boolean;
+}
+
 export type PermissionMode = "off" | "rules" | "always";
 export type RuleKind = "ask" | "allow";
 
@@ -260,6 +266,7 @@ export const api = {
   getPermissions: () => invoke<Permissions>("get_permissions"),
   usageSince: (since: number) => invoke<import("./usage").UsageRow[]>("usage_since", { since }),
   planLimits: () => invoke<PlanLimits>("plan_limits"),
+  checkForUpdates: () => invoke<UpdateCheck>("check_for_updates"),
   savePermissions: (permissions: Permissions) => invoke<Permissions>("save_permissions", { permissions }),
 };
 

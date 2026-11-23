@@ -16,6 +16,8 @@ import { createMoods } from "./moods";
 import { ClockIcon, GearIcon, HomeIcon, PlusIcon } from "./icons";
 import { Sheet } from "./ui";
 import { shownIcon } from "./themeStore";
+import { startUpdateChecks, updateCheck } from "./updateStore";
+import type { SettingsSection } from "./SettingsPage";
 
 type View = "home" | "routines" | "workflows" | "settings" | "new" | { agent: string };
 
@@ -43,6 +45,11 @@ export default function App() {
   const [loadError, setLoadError] = createSignal("");
   const [spells, setSpells] = createSignal<Workflow[]>([]);
   const [spellIntent, setSpellIntent] = createSignal<SpellIntent | null>(null);
+  const [settingsSection, setSettingsSection] = createSignal<SettingsSection | undefined>();
+  const openSettings = (section?: SettingsSection) => {
+    setSettingsSection(section);
+    setView("settings");
+  };
   const agentById = (id: string) => agents().find((a) => a.id === id);
   const loadSpells = () => api.listWorkflows().then(setSpells, () => {});
   const openSpells = (intent: SpellIntent | null) => {
@@ -90,6 +97,7 @@ export default function App() {
     );
     keep(stopModels);
     keep(await onEvent("workflows_changed", () => void loadSpells()));
+    startUpdateChecks();
     void loadSpells();
     const stopOpen = await onEvent<string>("open_agent", (id) => {
       if (agents().some((a) => a.id === id)) openAgent(id);
@@ -229,7 +237,14 @@ export default function App() {
           </For>
         </nav>
         <div class="sidebar-footer">
-          <NavItem label="Settings" icon={<GearIcon />} active={is("settings")} onClick={() => setView("settings")} shortcut="⌘," />
+          <Show when={updateCheck()?.newer && updateCheck()?.latest}>
+            {(latest) => (
+              <button class="update-notice" onClick={() => openSettings("updates")}>
+                Version {latest().version} is available
+              </button>
+            )}
+          </Show>
+          <NavItem label="Settings" icon={<GearIcon />} active={is("settings")} onClick={() => openSettings()} shortcut="⌘," />
         </div>
       </aside>
 
@@ -272,7 +287,7 @@ export default function App() {
               <WorkflowsPage agents={agents()} onOpenAgent={openAgent} intent={spellIntent()} onIntentDone={() => setSpellIntent(null)} />
             </Match>
             <Match when={is("settings")}>
-              <SettingsPage agents={agents()} />
+              <SettingsPage agents={agents()} section={settingsSection()} />
             </Match>
             <Match when={true}>
               <HomePage

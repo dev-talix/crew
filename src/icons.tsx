@@ -116,6 +116,12 @@ export const RefreshIcon = () => (
   </Icon>
 );
 
+export const DownloadIcon = () => (
+  <Icon>
+    <path d="M8 2.5v7.5M4.8 7 8 10.2 11.2 7M3 13.5h10" />
+  </Icon>
+);
+
 export const BarsIcon = () => (
   <Icon>
     <path d="M3 13.5V9M8 13.5V3M13 13.5V6.5" />

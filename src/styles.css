@@ -1360,3 +1360,18 @@ button:disabled {
   gap: 2px;
   flex-shrink: 0;
 }
+
+.update-notice {
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--sidebar));
+  font-size: 12.5px;
+  justify-content: flex-start;
+}
+
+.update-notice:hover {
+  background: color-mix(in srgb, var(--accent) 16%, var(--sidebar));
+}

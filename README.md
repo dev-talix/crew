@@ -132,6 +132,13 @@ Settings, Usage shows your plan limits and what Grimoire itself used:
 - **Grimoire, last 7 days**: tokens per turn, input and output together, by source (you, rituals,
   spells) or by familiar, with a daily chart and a table of the numbers.
 
+## Updates
+
+Settings, Updates checks this repository's GitHub releases (the latest release's tag against the
+app's version), once a day at launch unless you turn that off, or whenever you click "Check for
+updates". A newer version shows in the sidebar and as a Download button that opens the release.
+Installing it is a download for now; automatic installs need signed release builds.
+
 ## Themes
 
 Pick a theme in Settings. The seven built-ins are named for old inks and pigments: Tyrian (the

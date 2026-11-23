@@ -9,6 +9,7 @@ mod runtime;
 mod status;
 mod themes;
 mod tools;
+mod updates;
 mod vault;
 mod workflows;
 
@@ -514,6 +515,11 @@ async fn plan_limits(state: State<'_, AppState>) -> Result<PlanLimits, String> {
 }
 
 #[tauri::command]
+async fn check_for_updates() -> Result<updates::UpdateCheck, String> {
+    updates::check().await
+}
+
+#[tauri::command]
 fn get_permissions(state: State<AppState>) -> permissions::Permissions {
     permissions::load(&state.db)
 }
@@ -621,7 +627,8 @@ pub fn run() {
             get_permissions,
             save_permissions,
             usage_since,
-            plan_limits
+            plan_limits,
+            check_for_updates
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

@@ -1,5 +1,5 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { createSignal, For, Match, onSettled, Show, Switch } from "solid-js";
+import { createEffect, createSignal, For, Match, onSettled, Show, Switch } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { api, createFetch, errorText, PROVIDER_NAMES, type Agent, type DockEdge, type Provider, type ProviderStatus, type Settings } from "./api";
 import { Page, Segmented } from "./ui";
@@ -7,7 +7,8 @@ import { ThemePicker } from "./ThemeEditor";
 import { appIcon, readMode, setAppIcon, setMode, type AppIconSetting, type ModeSetting } from "./themeStore";
 import nightIcon from "./assets/icon-night.svg";
 import paperIcon from "./assets/icon-paper.svg";
-import { BarsIcon, GearIcon, PaletteIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
+import { BarsIcon, DownloadIcon, GearIcon, PaletteIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
+import UpdatesPage from "./UpdatesPage";
 import UsagePage from "./UsagePage";
 import PermissionsPage from "./PermissionsPage";
 import VaultPage from "./VaultPage";
@@ -258,7 +259,7 @@ function AppearanceSettings() {
   );
 }
 
-export type SettingsSection = "general" | "appearance" | "vault" | "permissions" | "usage";
+export type SettingsSection = "general" | "appearance" | "vault" | "permissions" | "usage" | "updates";
 
 const SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element }[] = [
   { id: "general", label: "General", icon: GearIcon },
@@ -266,10 +267,19 @@ const SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element }[
   { id: "vault", label: "Vault", icon: VaultIcon },
   { id: "permissions", label: "Permissions", icon: ShieldIcon },
   { id: "usage", label: "Usage", icon: BarsIcon },
+  { id: "updates", label: "Updates", icon: DownloadIcon },
 ];
 
 export default function SettingsPage(props: { section?: SettingsSection; agents: Agent[] }) {
   const [section, setSection] = createSignal<SettingsSection>(props.section ?? "general");
+  // Follow requests to jump to a section, like the sidebar's update notice.
+  createEffect(
+    () => props.section,
+    (next) => {
+      if (next) setSection(next);
+    },
+  );
+  const appVersion = createFetch(() => null, getVersion);
   return (
     <div class="settings-shell">
       <nav class="settings-nav" aria-label="Settings sections" data-tauri-drag-region>
@@ -302,6 +312,9 @@ export default function SettingsPage(props: { section?: SettingsSection; agents:
         </Match>
         <Match when={section() === "usage"}>
           <UsagePage agents={props.agents} />
+        </Match>
+        <Match when={section() === "updates"}>
+          <UpdatesPage version={appVersion() ?? "0.1.0"} />
         </Match>
       </Switch>
     </div>
