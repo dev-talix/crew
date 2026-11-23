@@ -634,6 +634,9 @@ pub fn run() {
             let db = Arc::new(Db::open(&dir.join("grimoire.db")).inspect_err(|e| startup_alert(&e.to_string()))?);
             let billing = db.setting(CLAUDE_BILLING).ok().flatten();
             providers::USE_CLAUDE_SUBSCRIPTION.store(billing.as_deref() != Some("api"), Ordering::Relaxed);
+            if let Err(e) = delegation::recover(&db) {
+                eprintln!("Couldn't close side conversations left unfinished: {e}");
+            }
             let runtime = Runtime::new(db.clone(), app.handle().clone());
             let workflows = WorkflowRunner::new(db.clone(), runtime.clone(), app.handle().clone());
             let edge = db.setting(DOCK_EDGE).ok().flatten().and_then(|e| dock::Edge::parse(&e));

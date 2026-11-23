@@ -138,7 +138,7 @@ pub fn definitions() -> Value {
         },
         {
             "name": "ask_familiar",
-            "description": "Ask another familiar something and wait for its reply, which comes back as this tool's result. Use it when another familiar knows something or can do part of the work better. The two of you talk in a side conversation, out of both your main chats; the person can read it later. The other familiar answers from a copy of its own main conversation, so it knows what it knows, but it doesn't see yours, so include what it needs. It replies within 10 minutes or the wait ends. The result ends with the conversation's id: pass it as thread to follow up. You can't ask yourself or a familiar that is waiting on you, chains stop at 3 familiars in a row, and the person may limit who you can ask or approve each question.",
+            "description": "Ask another familiar something and wait for its reply, which comes back as this tool's result. Use it when another familiar knows something or can do part of the work better. The two of you talk in a side conversation, out of both your main chats; the person can read it later. The other familiar answers from a copy of its own main conversation, so it knows what it knows, but it doesn't see yours, so include what it needs. It replies within 10 minutes or the wait ends, and a later reply comes to you as a new message. The result ends with the conversation's id: pass it as thread to follow up. You can't ask yourself or a familiar that is waiting on you, chains stop at 3 familiars in a row, and the person may limit who you can ask or approve each question.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
