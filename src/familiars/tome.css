@@ -1,0 +1,232 @@
+/* Tome: the ribbon sways at rest, the cover peeks on a fidget, the ribbon swings on a glance, leaves
+   riffle while working, it hops and pops open when happy, and snaps shut with a limp ribbon when concerned. */
+.shape-tome .g-tome-tail,
+.shape-tome .g-tome-ribbon {
+  transform-box: fill-box;
+  transform-origin: 50% 0;
+}
+
+.shape-tome .g-tome-tail {
+  transition: transform 360ms cubic-bezier(0.3, 0.7, 0.3, 1.3);
+}
+
+.shape-tome .g-tome-ribbon {
+  transition:
+    transform 420ms ease,
+    opacity 420ms ease;
+}
+
+.shape-tome .g-tome-cover {
+  transform-box: fill-box;
+  transform-origin: 0 50%;
+}
+
+.shape-tome .g-tome-leaf {
+  transform-box: fill-box;
+  transform-origin: 0 100%;
+  opacity: 0;
+}
+
+.shape-tome .g-tome-sparkle {
+  transform-box: fill-box;
+  transform-origin: center;
+  opacity: 0;
+}
+
+/* Idle: the ribbon sways slowly. */
+.shape-tome.mood-idle .g-tome-ribbon {
+  animation: fam-tome-sway 3.8s ease-in-out infinite;
+}
+
+@keyframes fam-tome-sway {
+  25% {
+    transform: rotate(7deg);
+  }
+  75% {
+    transform: rotate(-7deg);
+  }
+}
+
+/* Fidget: the cover lifts a crack and drops back with a small bounce. */
+.shape-tome.mood-idle.fidget .g-tome-cover {
+  animation: fam-tome-peek 700ms cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+
+@keyframes fam-tome-peek {
+  35% {
+    transform: scaleX(0.88) skewY(-5deg);
+  }
+  60% {
+    transform: none;
+  }
+  75% {
+    transform: scaleX(0.97) skewY(-1deg);
+  }
+}
+
+/* Glance: the ribbon swings out behind the head tilt. */
+.shape-tome.glance-l .g-tome-tail {
+  transform: rotate(16deg);
+}
+
+.shape-tome.glance-r .g-tome-tail {
+  transform: rotate(-16deg);
+}
+
+/* Working: leaves flick out of the fore-edge in turn while the cover lifts with them. */
+.shape-tome.mood-working .g-tome-leaf {
+  animation: fam-tome-riffle 900ms ease-out infinite;
+}
+
+.shape-tome.mood-working .g-tome-leaf + .g-tome-leaf {
+  animation-delay: 300ms;
+}
+
+.shape-tome.mood-working .g-tome-leaf + .g-tome-leaf + .g-tome-leaf {
+  animation-delay: 600ms;
+}
+
+@keyframes fam-tome-riffle {
+  from {
+    opacity: 0;
+    transform: rotate(-24deg) scaleX(0.4);
+  }
+  35% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    transform: rotate(14deg) translateY(2px);
+  }
+}
+
+.shape-tome.mood-working .g-tome-cover {
+  animation: fam-tome-flutter 900ms ease-in-out infinite;
+}
+
+@keyframes fam-tome-flutter {
+  30% {
+    transform: scaleX(0.95) skewY(-2deg);
+  }
+  60% {
+    transform: none;
+  }
+}
+
+.shape-tome.mood-working .g-tome-ribbon {
+  animation: fam-tome-sway 1.8s ease-in-out infinite;
+}
+
+/* Happy: a springy hop with a lean, the cover pops up, pages fan out past the fore-edge, and a sparkle
+   flashes. The cover never narrows past the eyes, so they stay on its face. */
+.shape-tome.mood-happy .bot-body {
+  transform-origin: 50% 100%;
+  animation: fam-tome-hop 760ms cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+
+@keyframes fam-tome-hop {
+  18% {
+    transform: scale(1.06, 0.9);
+  }
+  45% {
+    transform: translateY(-5px) rotate(-5deg) scale(0.97, 1.04);
+  }
+  72% {
+    transform: scale(1.03, 0.97) rotate(1deg);
+  }
+}
+
+.shape-tome.mood-happy .g-tome-cover {
+  animation: fam-tome-pop 900ms cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+
+@keyframes fam-tome-pop {
+  20% {
+    transform: none;
+  }
+  45%,
+  65% {
+    transform: scaleX(0.9) skewY(-11deg);
+  }
+  85% {
+    transform: none;
+  }
+}
+
+.shape-tome.mood-happy .g-tome-sparkle {
+  animation: fam-tome-sparkle 900ms ease-out 200ms;
+}
+
+@keyframes fam-tome-sparkle {
+  from {
+    opacity: 0;
+    transform: scale(0.2);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1.15) rotate(15deg);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.7) rotate(25deg);
+  }
+}
+
+.shape-tome.mood-happy .g-tome-leaf {
+  animation: fam-tome-riffle 640ms ease-out 180ms;
+}
+
+.shape-tome.mood-happy .g-tome-leaf + .g-tome-leaf {
+  animation-delay: 260ms;
+}
+
+.shape-tome.mood-happy .g-tome-leaf + .g-tome-leaf + .g-tome-leaf {
+  animation-delay: 340ms;
+}
+
+.shape-tome.mood-happy .g-tome-ribbon {
+  animation: fam-tome-sway 900ms ease-in-out;
+}
+
+/* Concerned: the cover snaps shut, the book thuds and shudders, the ribbon goes limp. */
+.shape-tome.mood-concerned .bot-body {
+  transform-origin: 50% 100%;
+  transform: scale(1.01, 0.97);
+  animation: fam-tome-thud 560ms ease-out;
+}
+
+@keyframes fam-tome-thud {
+  from {
+    transform: none;
+  }
+  18% {
+    transform: translateY(-2px);
+  }
+  32% {
+    transform: scale(1.04, 0.92);
+  }
+  50% {
+    transform: scale(1.01, 0.97) translateX(-1px);
+  }
+  66% {
+    transform: scale(1.01, 0.97) translateX(1px);
+  }
+}
+
+.shape-tome.mood-concerned .g-tome-cover {
+  animation: fam-tome-snap 360ms cubic-bezier(0.5, 0, 0.7, 1);
+}
+
+@keyframes fam-tome-snap {
+  from {
+    transform: scaleX(0.9) skewY(-8deg);
+  }
+  60% {
+    transform: none;
+  }
+}
+
+.shape-tome.mood-concerned .g-tome-ribbon {
+  transform: scaleY(1.16) scaleX(0.85);
+  opacity: 0.6;
+}

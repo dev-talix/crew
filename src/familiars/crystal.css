@@ -1,0 +1,183 @@
+/* Crystal ball: mist turns inside the glass, a glint sweeps on a fidget, motes orbit while working,
+   a flash ring when happy, fog and a crack while concerned. Parts rotate around the ball center (32,30). */
+.shape-crystal .g-crystal-flash,
+.shape-crystal .g-crystal-mist,
+.shape-crystal .g-crystal-motes,
+.shape-crystal .g-crystal-glint {
+  transform-box: view-box;
+  transform-origin: 32px 30px;
+}
+
+.shape-crystal .g-crystal-glass,
+.shape-crystal .g-crystal-fog,
+.shape-crystal .g-crystal-crack {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.shape-crystal .g-crystal-flash,
+.shape-crystal .g-crystal-motes,
+.shape-crystal .g-crystal-fog,
+.shape-crystal .g-crystal-crack {
+  opacity: 0;
+}
+
+.shape-crystal .g-crystal-glint {
+  transition: transform 420ms cubic-bezier(0.3, 0.7, 0.3, 1), opacity 400ms ease;
+}
+
+.shape-crystal .g-crystal-flash {
+  transform: scale(1.2);
+}
+
+.shape-crystal .g-crystal-glass,
+.shape-crystal .g-crystal-mist,
+.shape-crystal .g-crystal-fog {
+  transition: opacity 400ms ease;
+}
+
+/* Idle: the mist turns slowly. */
+.shape-crystal .g-crystal-mist {
+  animation: fam-crystal-swirl 14s linear infinite;
+}
+
+@keyframes fam-crystal-swirl {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Fidget: the glint sweeps over the top of the glass and back. */
+.shape-crystal.mood-idle.fidget .g-crystal-glint {
+  animation: fam-crystal-sweep 700ms cubic-bezier(0.4, 0, 0.3, 1);
+}
+
+@keyframes fam-crystal-sweep {
+  45% {
+    transform: rotate(95deg);
+    opacity: 1;
+  }
+  55% {
+    transform: rotate(95deg);
+    opacity: 0.2;
+  }
+  56% {
+    transform: rotate(0);
+    opacity: 0;
+  }
+}
+
+/* Glance: the reflection slides the other way, so the ball reads as glass turning. */
+.shape-crystal.glance-l .g-crystal-glint {
+  transform: rotate(22deg);
+}
+
+.shape-crystal.glance-r .g-crystal-glint {
+  transform: rotate(-22deg);
+}
+
+/* Working: the mist spins faster and two motes orbit inside it. */
+.shape-crystal.mood-working .g-crystal-mist {
+  animation-duration: 2.4s;
+}
+
+.shape-crystal.mood-working .g-crystal-motes {
+  opacity: 0.8;
+  animation: fam-crystal-orbit 1.6s linear infinite reverse;
+}
+
+@keyframes fam-crystal-orbit {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Happy: the ball bobs twice on its stand while a flash ring, open at the bottom, pulses out from just outside the glass. */
+.shape-crystal.mood-happy .bot-body {
+  transform-origin: 50% 100%;
+  animation: fam-crystal-bob 760ms cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+
+@keyframes fam-crystal-bob {
+  25% {
+    transform: translateY(-3.5px);
+  }
+  50% {
+    transform: translateY(0);
+  }
+  70% {
+    transform: translateY(-1.5px);
+  }
+}
+
+.shape-crystal.mood-happy .g-crystal-flash {
+  animation: fam-crystal-flash 700ms ease-out;
+}
+
+@keyframes fam-crystal-flash {
+  from {
+    opacity: 0.9;
+    transform: scale(1.2);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.45);
+  }
+}
+
+/* Concerned: the ball rocks on its foot, the crack flickers in, then the mist gives way to a fog line on a dim glass. */
+.shape-crystal.mood-concerned .bot-body {
+  transform-origin: 50% 100%;
+  animation: fam-crystal-rock 620ms ease-in-out;
+}
+
+@keyframes fam-crystal-rock {
+  20% {
+    transform: rotate(-5deg);
+  }
+  45% {
+    transform: rotate(4deg);
+  }
+  70% {
+    transform: rotate(-2deg);
+  }
+}
+
+.shape-crystal.mood-concerned .g-crystal-crack {
+  opacity: 1;
+  animation: fam-crystal-crack 520ms steps(1, end);
+}
+
+@keyframes fam-crystal-crack {
+  0% {
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  35% {
+    opacity: 0.1;
+  }
+  55% {
+    opacity: 1;
+  }
+  70% {
+    opacity: 0.3;
+  }
+}
+
+.shape-crystal.mood-concerned .g-crystal-fog {
+  opacity: 1;
+}
+
+.shape-crystal.mood-concerned .g-crystal-glass {
+  opacity: 0.6;
+}
+
+.shape-crystal.mood-concerned .g-crystal-glint {
+  opacity: 0;
+}
+
+.shape-crystal.mood-concerned .g-crystal-mist {
+  opacity: 0;
+}

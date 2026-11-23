@@ -75,7 +75,11 @@ pub struct Agent {
     pub created_at: i64,
 }
 
-pub const SHAPES: &[&str] = &["orbit", "spark", "cloud", "drop", "ears", "classic"];
+pub const SHAPES: &[&str] = &[
+    "orbit", "spark", "cloud", "drop", "ears", "classic", "owl", "candle", "tome", "cauldron", "crystal", "bat",
+];
+/// Seeded avatars keep to the first six shapes so a familiar saved without an avatar keeps its look.
+const SEED_SHAPES: &[&str] = &["orbit", "spark", "cloud", "drop", "ears", "classic"];
 pub const EYES: &[&str] = &["pill", "dot", "slit"];
 const DEFAULT_COLORS: &[&str] = &["#4c7ef3", "#e46f4c", "#8e5bd6", "#2f9e76", "#dc9a32", "#d9577a"];
 
@@ -108,7 +112,7 @@ impl Avatar {
         let hash = seed.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
         let pick = |list: &[&str], shift: u32| list[((hash >> shift) as usize) % list.len()].to_string();
         Avatar {
-            shape: pick(SHAPES, 0),
+            shape: pick(SEED_SHAPES, 0),
             eyes: pick(EYES, 5),
             color: pick(DEFAULT_COLORS, 20),
         }
@@ -854,6 +858,11 @@ mod tests {
         a.avatar.shape = "hex".into();
         assert!(a.avatar.validate().is_err());
         assert!(Avatar::for_seed("anything").validate().is_ok());
+        a.avatar.shape = "cauldron".into();
+        assert!(a.avatar.validate().is_ok());
+        for seed in ["a", "b", "ada", "old", "zed", "familiar"] {
+            assert!(SEED_SHAPES.contains(&Avatar::for_seed(seed).shape.as_str()));
+        }
     }
 
     #[test]

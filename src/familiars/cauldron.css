@@ -1,0 +1,255 @@
+/* Cauldron: a slow bubble at idle, a pop on fidget, the rim tips on glance, bubbles and steam while
+   working, a bounce and puff ring when happy, a rattle and spill with low steam when concerned.
+   Bubbles are circles 1-3 and steam is paths 1-2, so :nth-of-type picks them out. */
+.shape-cauldron .g-cauldron-bubble,
+.shape-cauldron .g-cauldron-ring,
+.shape-cauldron .g-cauldron-steam,
+.shape-cauldron .g-cauldron-drip {
+  transform-box: fill-box;
+  opacity: 0;
+}
+
+.shape-cauldron .g-cauldron-bubble,
+.shape-cauldron .g-cauldron-ring {
+  transform-origin: center;
+}
+
+.shape-cauldron .g-cauldron-steam {
+  transform-origin: 50% 100%;
+  transition:
+    opacity 400ms ease,
+    transform 400ms ease;
+}
+
+.shape-cauldron .g-cauldron-drip {
+  transform-origin: 50% 0;
+}
+
+.shape-cauldron .g-cauldron-rim {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 320ms cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+
+/* Idle: one bubble rises now and then. */
+.shape-cauldron.mood-idle .g-cauldron-bubble:nth-of-type(1) {
+  animation: fam-cauldron-simmer 5.2s ease-out infinite;
+}
+
+@keyframes fam-cauldron-simmer {
+  0%,
+  58% {
+    opacity: 0;
+    transform: translateY(1px) scale(0.5);
+  }
+  70% {
+    opacity: 0.85;
+    transform: translateY(0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-7px) scale(1.05);
+  }
+}
+
+/* Fidget: one bubble swells and pops, the rim gives a small jump. */
+.shape-cauldron.mood-idle.fidget .g-cauldron-bubble:nth-of-type(2) {
+  animation: fam-cauldron-pop 700ms ease-out;
+}
+
+@keyframes fam-cauldron-pop {
+  0% {
+    opacity: 0;
+    transform: translateY(1px) scale(0.4);
+  }
+  45% {
+    opacity: 1;
+    transform: translateY(-1px) scale(1.15);
+  }
+  62% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1.5);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: translateY(-2px) scale(1.9);
+  }
+}
+
+.shape-cauldron.mood-idle.fidget .g-cauldron-rim {
+  animation: fam-cauldron-jolt 700ms ease-out;
+}
+
+@keyframes fam-cauldron-jolt {
+  55% {
+    transform: none;
+  }
+  65% {
+    transform: translateY(-1.4px);
+  }
+  80% {
+    transform: none;
+  }
+}
+
+/* Glance: the rim tips toward the look, like a lid lifting on the far side. */
+.shape-cauldron.glance-l .g-cauldron-rim {
+  transform-origin: 0 50%;
+  transform: translateY(-0.6px) rotate(-6deg);
+}
+
+.shape-cauldron.glance-r .g-cauldron-rim {
+  transform-origin: 100% 50%;
+  transform: translateY(-0.6px) rotate(6deg);
+}
+
+/* Working: steady bubbles and curling steam. */
+.shape-cauldron.mood-working .g-cauldron-bubble {
+  animation: fam-cauldron-boil 1.5s ease-out infinite;
+}
+
+.shape-cauldron.mood-working .g-cauldron-bubble:nth-of-type(2) {
+  animation-delay: 500ms;
+}
+
+.shape-cauldron.mood-working .g-cauldron-bubble:nth-of-type(3) {
+  animation-delay: 1s;
+}
+
+@keyframes fam-cauldron-boil {
+  0% {
+    opacity: 0;
+    transform: translateY(1px) scale(0.4);
+  }
+  25% {
+    opacity: 1;
+    transform: translateY(-1px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-7px) scale(1.1);
+  }
+}
+
+.shape-cauldron.mood-working .g-cauldron-steam {
+  animation: fam-cauldron-steam 2.4s ease-in-out infinite;
+}
+
+.shape-cauldron.mood-working .g-cauldron-steam:nth-of-type(2) {
+  animation-delay: 1.2s;
+}
+
+@keyframes fam-cauldron-steam {
+  0% {
+    opacity: 0;
+    transform: translateY(2px) scale(0.8, 0.5);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(0) skewX(-8deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-5px) skewX(8deg) scale(1.1);
+  }
+}
+
+/* Happy: the pot bounces on its legs and a puff ring rises out. */
+.shape-cauldron.mood-happy .bot-body {
+  transform-origin: 50% 100%;
+  animation: fam-cauldron-bounce 720ms cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+
+@keyframes fam-cauldron-bounce {
+  18% {
+    transform: scale(1.1, 0.86);
+  }
+  45% {
+    transform: translateY(-6px) scale(0.95, 1.06);
+  }
+  70% {
+    transform: scale(1.06, 0.94);
+  }
+  85% {
+    transform: scale(0.98, 1.02);
+  }
+}
+
+.shape-cauldron.mood-happy .g-cauldron-ring {
+  animation: fam-cauldron-ring 1s ease-out 200ms both;
+}
+
+@keyframes fam-cauldron-ring {
+  0% {
+    opacity: 0;
+    transform: translateY(3px) scale(0.4);
+  }
+  30% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-9px) scale(1.5);
+  }
+}
+
+.shape-cauldron.mood-happy .g-cauldron-bubble:nth-of-type(1),
+.shape-cauldron.mood-happy .g-cauldron-bubble:nth-of-type(2) {
+  animation: fam-cauldron-boil 700ms ease-out 120ms both;
+}
+
+/* Concerned: the pot rattles, the rim chatters, then a spill hangs over the side and the steam
+   sits low and faint while the mood lasts. */
+.shape-cauldron.mood-concerned .bot-body {
+  transform-origin: 50% 100%;
+  animation: fam-cauldron-rattle 560ms linear;
+}
+
+@keyframes fam-cauldron-rattle {
+  10%,
+  50% {
+    transform: translateX(-1.2px) rotate(-3.5deg);
+  }
+  30%,
+  70% {
+    transform: translateX(1.2px) rotate(3.5deg);
+  }
+  85% {
+    transform: rotate(-1deg);
+  }
+}
+
+.shape-cauldron.mood-concerned .g-cauldron-rim {
+  animation: fam-cauldron-chatter 560ms linear;
+}
+
+@keyframes fam-cauldron-chatter {
+  15%,
+  45%,
+  75% {
+    transform: translateY(-1.6px) rotate(-3deg);
+  }
+  30%,
+  60%,
+  90% {
+    transform: translateY(-1px) rotate(2deg);
+  }
+}
+
+.shape-cauldron.mood-concerned .g-cauldron-drip {
+  opacity: 1;
+  animation: fam-cauldron-spill 500ms cubic-bezier(0.3, 0.7, 0.3, 1) 560ms both;
+}
+
+@keyframes fam-cauldron-spill {
+  from {
+    opacity: 0;
+    transform: scaleY(0.1);
+  }
+}
+
+.shape-cauldron.mood-concerned .g-cauldron-steam {
+  opacity: 0.35;
+  transform: translateY(2.5px) scale(1.15, 0.55);
+}

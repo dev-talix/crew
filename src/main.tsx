@@ -5,6 +5,7 @@ import App from "./App";
 import Dock from "./Dock";
 import { startThemes } from "./themeStore";
 import "./styles.css";
+import "./familiars/index.css";
 
 startThemes();
 
