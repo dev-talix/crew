@@ -42,6 +42,14 @@ export function hostState(agent: Pick<Agent, "setupPending" | "offline">): "Setu
   return null;
 }
 
+/**
+ * The list with a newly saved familiar in it. A familiar already listed stays as listed: a refresh
+ * may have brought it in with a newer status than the saved copy, like a pending setup that finished.
+ */
+export function withAgent<T extends { id: string }>(list: T[], agent: T): T[] {
+  return list.some((a) => a.id === agent.id) ? list : [...list, agent];
+}
+
 /** What "Check connection" found on another Mac. */
 export interface HostCheck {
   reachable: boolean;

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createRoot, createSignal } from "solid-js";
-import { createFetch, describeSchedule, hostState, onMountAsync } from "./api";
+import { createFetch, describeSchedule, hostState, onMountAsync, withAgent } from "./api";
 
 test("describeSchedule names clocks and event triggers", () => {
   expect(describeSchedule({ kind: "interval", minutes: 120 })).toBe("Every 2 hours");
@@ -78,4 +78,11 @@ test("hostState says a remote familiar's Mac is offline or owes it its setup", (
   expect(hostState({ offline: true })).toBe("Offline");
   expect(hostState({ setupPending: true, offline: true })).toBe("Setup pending");
   expect(hostState({ setupPending: false, offline: false })).toBe(null);
+});
+
+test("withAgent adds a saved familiar once, keeping the listed copy", () => {
+  const listed = [{ id: "a" }, { id: "b", setupPending: false }];
+  // The form saved "b" while its Mac was offline; the list refreshed after setup finished.
+  expect(withAgent(listed, { id: "b", setupPending: true })).toBe(listed);
+  expect(withAgent(listed, { id: "c" })).toEqual([{ id: "a" }, { id: "b", setupPending: false }, { id: "c" }]);
 });

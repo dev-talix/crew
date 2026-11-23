@@ -14,7 +14,7 @@ import { MemorySheet } from "./MemoryEditor";
 import RoutinesPage from "./RoutinesPage";
 import { SettingsDialog } from "./SettingsPage";
 import WorkflowsPage, { type SpellIntent } from "./WorkflowsPage";
-import { api, errorText, onEvent, onMountAsync, PROVIDER_NAMES, subscribe, type Agent, type Coven, type Workflow } from "./api";
+import { api, errorText, onEvent, onMountAsync, PROVIDER_NAMES, subscribe, withAgent, type Agent, type Coven, type Workflow } from "./api";
 import { inkFor } from "./avatar";
 import { runningModelName } from "./models";
 import { createMoods } from "./moods";
@@ -173,9 +173,11 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  // A familiar saved while its Mac was offline opens later, so the list may already have it, newer.
   const created = (agent: Agent) => {
-    setAgents((list) => [...list, agent]);
+    setAgents((list) => withAgent(list, agent));
     openAgent(agent.id);
+    if (agent.setupPending) void api.listAgents().then(setAgents, () => {});
   };
 
   const replaceAgent = (agent: Agent) => setAgents((list) => list.map((a) => (a.id === agent.id ? agent : a)));

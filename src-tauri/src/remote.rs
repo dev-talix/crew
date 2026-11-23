@@ -7,11 +7,12 @@
 
 use crate::db::{Agent, Db};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::process::Command;
 
@@ -22,6 +23,10 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 const QUICK: Duration = Duration::from_secs(8);
 /// How often Grimoire retries familiars waiting on their Mac.
 const RETRY_EVERY: Duration = Duration::from_secs(180);
+/// How long the check before a turn waits for the other Mac to accept a connection.
+const PROBE_CONNECT_SECS: u32 = 5;
+/// How long a Mac that answered counts as online, so the next turn skips the check.
+const FRESH: Duration = Duration::from_secs(60);
 
 /// The SSH destination, like `me@studio.local` or an alias from ~/.ssh/config. Empty means this Mac.
 pub fn clean_host(host: Option<&str>) -> Result<Option<String>, String> {
@@ -104,11 +109,21 @@ pub fn ssh_args(host: &str, remote_command: String) -> Vec<String> {
     args
 }
 
-fn ssh(host: &str, remote_command: String) -> Command {
+/// A quick check that `host` accepts a connection and runs a command, with a short connect timeout.
+pub fn probe_args(host: &str) -> Vec<String> {
+    let connect = format!("ConnectTimeout={PROBE_CONNECT_SECS}");
+    ["-T", "-o", "BatchMode=yes", "-o", &connect, host, "--", "true"].map(String::from).to_vec()
+}
+
+fn ssh_with(args: Vec<String>) -> Command {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
     let mut cmd = crate::providers::command("ssh", &home);
-    cmd.args(ssh_args(host, remote_command));
+    cmd.args(args);
     cmd
+}
+
+fn ssh(host: &str, remote_command: String) -> Command {
+    ssh_with(ssh_args(host, remote_command))
 }
 
 /// The provider CLI on `host`, ready to spawn with piped stdio like a local one.
@@ -124,7 +139,10 @@ pub enum SshError {
 }
 
 async fn run(host: &str, remote_command: String, timeout: Duration) -> Result<std::process::Output, SshError> {
-    let mut cmd = ssh(host, remote_command);
+    output(ssh(host, remote_command), timeout).await
+}
+
+async fn output(mut cmd: Command, timeout: Duration) -> Result<std::process::Output, SshError> {
     cmd.stdin(Stdio::null());
     tokio::time::timeout(timeout, cmd.output())
         .await
@@ -142,11 +160,28 @@ const OFFLINE_SIGNS: &[&str] = &[
     "Connection closed by UNKNOWN",
     "client_loop: send disconnect:",
     "Timeout, server ",
+    "packet_write_wait: Connection to ",
+    "Read from remote host ",
 ];
 
-/// Whether a failed process's stderr says ssh couldn't reach the other Mac.
+/// ssh reached a Mac, maybe a jump host, and was turned away. These need the person, so they win over
+/// any connection line that follows, like the "Connection closed by UNKNOWN" a refusing jump host adds.
+const REFUSED_SIGNS: &[&str] = &[
+    "Permission denied",
+    "Host key verification failed",
+    "REMOTE HOST IDENTIFICATION HAS CHANGED",
+    "no matching host key type",
+    "Too many authentication failures",
+];
+
+/// Whether a failed process's stderr says ssh couldn't reach the other Mac or lost it.
 pub fn offline_text(stderr: &str) -> bool {
-    stderr.lines().map(str::trim).any(|line| OFFLINE_SIGNS.iter().any(|sign| line.starts_with(sign)))
+    if REFUSED_SIGNS.iter().any(|sign| stderr.contains(sign)) {
+        return false;
+    }
+    stderr.lines().map(str::trim).any(|line| {
+        OFFLINE_SIGNS.iter().any(|sign| line.starts_with(sign)) || (line.starts_with("Connection to ") && line.ends_with(" closed by remote host."))
+    })
 }
 
 /// ssh exits with 255 for its own errors. With no message, or one about the connection, the Mac didn't
@@ -166,16 +201,34 @@ fn failure(host: &str, output: &std::process::Output) -> String {
     }
 }
 
-/// Creates the familiar's workspace on `host`, which also proves Grimoire can reach it.
-async fn make_workspace(host: &str, workspace: &str, timeout: Duration) -> Result<(), SshError> {
-    let output = run(host, format!("mkdir -p -- {}", quote_path(workspace)), timeout).await?;
+/// What a finished ssh command says about the other Mac. `context` starts a failure's message.
+fn outcome(host: &str, output: &std::process::Output, context: &str) -> Result<(), SshError> {
     if output.status.success() {
         Ok(())
     } else if unreachable(output.status.code(), &String::from_utf8_lossy(&output.stderr)) {
         Err(SshError::Offline)
     } else {
-        Err(SshError::Failed(format!("Could not create the workspace on the other Mac. {}", failure(host, &output))))
+        Err(SshError::Failed(format!("{context}{}", failure(host, output))))
     }
+}
+
+/// Creates the familiar's workspace on `host`, which also proves Grimoire can reach it.
+async fn make_workspace(host: &str, workspace: &str, timeout: Duration) -> Result<(), SshError> {
+    let output = run(host, format!("mkdir -p -- {}", quote_path(workspace)), timeout).await?;
+    outcome(host, &output, "Could not create the workspace on the other Mac. ")
+}
+
+/// A check that a host answers. It's a plain function returning a boxed future so a turn writer can
+/// hold a stand-in in tests.
+pub type ProbeFuture = Pin<Box<dyn Future<Output = Result<(), SshError>> + Send>>;
+pub type Probe = fn(String) -> ProbeFuture;
+
+/// Runs `true` on `host` over ssh, which takes a few seconds at most to say whether that Mac answers.
+pub fn probe(host: String) -> ProbeFuture {
+    Box::pin(async move {
+        let output = output(ssh_with(probe_args(&host)), QUICK).await?;
+        outcome(&host, &output, "")
+    })
 }
 
 /// The setup when someone summons a remote familiar. Returns whether it's saved with setup pending:
@@ -211,6 +264,8 @@ pub async fn quick_setup(host: String, workspace: String) -> Result<(), SshError
 /// Hosts that didn't answer the last time Grimoire tried them. Only this run of the app knows: a host
 /// counts as online until a try fails.
 static OFFLINE: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+/// When each host last answered, so a turn right after another skips the check.
+static ANSWERED: Mutex<BTreeMap<String, Instant>> = Mutex::new(BTreeMap::new());
 
 static APP: OnceLock<(AppHandle, Arc<Db>)> = OnceLock::new();
 
@@ -218,8 +273,19 @@ pub fn is_offline(host: &str) -> bool {
     OFFLINE.lock().is_ok_and(|hosts| hosts.contains(host))
 }
 
+fn answered_recently(host: &str) -> bool {
+    ANSWERED.lock().is_ok_and(|hosts| hosts.get(host).is_some_and(|at| at.elapsed() < FRESH))
+}
+
 /// Records what the last try found, and tells the UI when that changed.
 pub fn set_offline(host: &str, offline: bool) {
+    if let Ok(mut hosts) = ANSWERED.lock() {
+        if offline {
+            hosts.remove(host);
+        } else {
+            hosts.insert(host.to_string(), Instant::now());
+        }
+    }
     let changed = OFFLINE.lock().is_ok_and(|mut hosts| if offline { hosts.insert(host.to_string()) } else { hosts.remove(host) });
     if changed {
         agents_changed();
@@ -262,10 +328,12 @@ pub fn with_status(db: &Db, agents: Vec<Agent>) -> Result<Vec<AgentStatus>, Stri
         .collect())
 }
 
-/// Gets a remote familiar ready for a turn. One saved while its Mac was offline, or whose Mac didn't
-/// answer last time, gets a setup try first: success clears the pending flag and the turn goes on, and
-/// failure returns what to tell the person instead. `setup` is `quick_setup` in the app.
-pub async fn ready<F, Fut>(db: &Db, agent: &Agent, setup: F) -> Result<(), String>
+/// Gets a remote familiar ready for a turn, so nothing spawns for a Mac that won't answer. One saved
+/// while its Mac was offline, or whose Mac didn't answer last time, gets a setup try first: success
+/// clears the pending flag and the turn goes on. Any other familiar whose Mac hasn't answered in the
+/// last minute gets a quick `probe`. A failure returns what to tell the person instead. `setup` is
+/// `quick_setup` and `probe` is `probe` in the app.
+pub async fn ready<F, Fut>(db: &Db, agent: &Agent, setup: F, probe: Probe) -> Result<(), String>
 where
     F: FnOnce(String, String) -> Fut,
     Fut: Future<Output = Result<(), SshError>>,
@@ -273,7 +341,20 @@ where
     let Some(host) = &agent.host else { return Ok(()) };
     let pending = db.pending_setups()?.contains(&agent.id);
     if !pending && !is_offline(host) {
-        return Ok(());
+        if answered_recently(host) {
+            return Ok(());
+        }
+        return match probe(host.clone()).await {
+            Ok(()) => {
+                set_offline(host, false);
+                Ok(())
+            }
+            Err(SshError::Offline) => {
+                set_offline(host, true);
+                Err(offline_message(&agent.name, host, false))
+            }
+            Err(SshError::Failed(reason)) => Err(reason),
+        };
     }
     match setup(host.clone(), agent.workspace.clone()).await {
         Ok(()) => {
@@ -294,17 +375,16 @@ where
 
 /// `ready` with a real ssh try.
 async fn ready_now(db: &Db, agent: &Agent) -> Result<(), String> {
-    ready(db, agent, quick_setup).await
+    ready(db, agent, quick_setup, probe).await
 }
 
-/// Why a turn on another Mac couldn't start. ssh can end before it prints anything Grimoire reads, say
-/// when the CLI's stdin closes first, so an unclear failure gets one quick try to see whether the Mac
-/// answers at all.
-pub async fn explain(agent: &Agent, reason: String) -> String {
-    let Some(host) = &agent.host else { return reason };
-    if offline_text(&reason) || quick_setup(host.clone(), agent.workspace.clone()).await == Err(SshError::Offline) {
+/// Why a turn on another Mac failed, at the start or partway through. A lost connection reads as the
+/// plain offline message. ssh can end before it prints anything Grimoire reads, say when the CLI's
+/// stdin closes first, so an unclear failure gets one `probe` to see whether the Mac answers at all.
+pub async fn explain(name: &str, host: &str, reason: String, probe: Probe) -> String {
+    if offline_text(&reason) || probe(host.to_string()).await == Err(SshError::Offline) {
         set_offline(host, true);
-        return offline_message(&agent.name, host, false);
+        return offline_message(name, host, false);
     }
     reason
 }
@@ -411,6 +491,95 @@ mod tests {
         assert!(!unreachable(None, ""), "killed by a signal");
         assert!(offline_text("Could not start\nssh: connect to host studio.local port 22: Connection refused"));
         assert!(!offline_text("zsh: command not found: claude"));
+        // A connection lost partway through a turn.
+        assert!(offline_text("Timeout, server studio.local not responding."));
+        assert!(offline_text("Connection to studio.local closed by remote host."));
+        assert!(offline_text("packet_write_wait: Connection to 10.0.0.4 port 22: Broken pipe"));
+        assert!(offline_text("Read from remote host studio.local: Operation timed out"));
+    }
+
+    #[test]
+    fn a_refused_login_is_not_an_offline_mac() {
+        // A jump host that turns the key away, then drops the connection.
+        let jump = "me@bastion: Permission denied (publickey).\nConnection closed by UNKNOWN port 65535";
+        assert!(!unreachable(Some(255), jump));
+        assert!(!unreachable(Some(255), "Host key verification failed.\nConnection closed by UNKNOWN port 65535"));
+        let changed = "@@@@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n@@@@@@@@@@@\nssh: connect to host studio.local port 22: Connection refused";
+        assert!(!unreachable(Some(255), changed));
+        assert!(!unreachable(Some(255), "Unable to negotiate with 10.0.0.4 port 22: no matching host key type found. Their offer: ssh-dss"));
+        assert!(!unreachable(Some(255), "Received disconnect from 10.0.0.4 port 22:2: Too many authentication failures\nkex_exchange_identification: read: Connection reset by peer"));
+        assert!(unreachable(Some(255), "Connection closed by UNKNOWN port 65535"), "with nothing else, the connection just dropped");
+    }
+
+    #[test]
+    fn the_probe_only_runs_true_with_a_short_connect_timeout() {
+        assert_eq!(probe_args("me@studio.local"), ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "me@studio.local", "--", "true"]);
+    }
+
+    fn probe_offline(_: String) -> ProbeFuture {
+        Box::pin(async { Err(SshError::Offline) })
+    }
+    fn probe_online(_: String) -> ProbeFuture {
+        Box::pin(async { Ok(()) })
+    }
+    fn probe_refused(_: String) -> ProbeFuture {
+        Box::pin(async { Err(SshError::Failed("studio: Permission denied (publickey).".into())) })
+    }
+    fn no_setup(_: String, _: String) -> std::future::Ready<Result<(), SshError>> {
+        panic!("a set-up familiar needs no setup")
+    }
+    /// Makes Grimoire forget when `host` last answered, as if a minute went by.
+    fn age(host: &str) {
+        ANSWERED.lock().unwrap().insert(host.into(), Instant::now() - FRESH);
+    }
+
+    #[tokio::test]
+    async fn a_set_up_familiar_checks_its_mac_before_a_turn() {
+        let host = "probe-test.local";
+        let db = Db::open_in_memory().unwrap();
+        let agent = remote_agent("s", host);
+        db.insert_agent(&agent).unwrap();
+        static CHECKS: AtomicUsize = AtomicUsize::new(0);
+        fn down(_: String) -> ProbeFuture {
+            CHECKS.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(SshError::Offline) })
+        }
+        fn up(_: String) -> ProbeFuture {
+            CHECKS.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }
+
+        // Its Mac went offline since Grimoire last heard from it: the first turn is refused plainly.
+        assert!(!is_offline(host) && !answered_recently(host), "nothing known yet");
+        assert_eq!(ready(&db, &agent, no_setup, down).await, Err(offline_message("Ada", host, false)));
+        assert!(is_offline(host));
+
+        // Back online. A turn right after another skips the check.
+        set_offline(host, false);
+        assert_eq!(ready(&db, &agent, no_setup, down).await, Ok(()), "answered moments ago");
+        age(host);
+        assert_eq!(ready(&db, &agent, no_setup, up).await, Ok(()));
+        assert!(answered_recently(host), "the check counts as an answer");
+        assert_eq!(ready(&db, &agent, no_setup, down).await, Ok(()));
+        assert_eq!(CHECKS.load(Ordering::SeqCst), 2, "one check per stale minute");
+
+        // A refused key is the person's to fix, so it's shown as is.
+        age(host);
+        assert_eq!(ready(&db, &agent, no_setup, probe_refused).await, Err("studio: Permission denied (publickey).".into()));
+        assert!(!is_offline(host));
+    }
+
+    #[tokio::test]
+    async fn a_failed_turn_that_lost_its_mac_says_so_plainly() {
+        let host = "explain-test.local";
+        let offline = offline_message("Ada", host, false);
+        let lost = explain("Ada", host, "Timeout, server explain-test.local not responding.".into(), probe_online).await;
+        assert_eq!(lost, offline, "ssh's own line, no check needed");
+        let silent = explain("Ada", host, "claude stopped unexpectedly.".into(), probe_offline).await;
+        assert_eq!(silent, offline, "an unclear failure checks the Mac");
+        assert!(is_offline(host));
+        let real = explain("Ada", host, "quota".into(), probe_online).await;
+        assert_eq!(real, "quota", "the Mac answered, so the failure was something else");
     }
 
     fn remote_agent(id: &str, host: &str) -> Agent {
@@ -458,7 +627,7 @@ mod tests {
             tries.fetch_add(1, Ordering::SeqCst);
             async { Err(SshError::Offline) }
         };
-        let refused = ready(&db, &agent, offline).await.unwrap_err();
+        let refused = ready(&db, &agent, offline, probe_offline).await.unwrap_err();
         assert_eq!(refused, "Ada runs on ready-test.local, and that Mac is offline. Grimoire will finish setting it up when it connects.");
         assert!(db.pending_setups().unwrap().contains("r"), "still pending");
 
@@ -467,17 +636,17 @@ mod tests {
             *made.lock().unwrap() = Some((host, workspace));
             async { Ok(()) }
         };
-        assert_eq!(ready(&db, &agent, online).await, Ok(()));
+        assert_eq!(ready(&db, &agent, online, probe_offline).await, Ok(()));
         assert_eq!(made.lock().unwrap().clone(), Some((host.to_string(), "~/Grimoire/ada".to_string())), "makes its workspace there");
         assert!(db.pending_setups().unwrap().is_empty(), "setup is done");
         assert!(!is_offline(host));
 
-        // A familiar that's set up on a Mac that answered last time goes straight to its turn.
-        assert_eq!(ready(&db, &agent, offline).await, Ok(()));
+        // A familiar that's set up on a Mac that just answered goes straight to its turn.
+        assert_eq!(ready(&db, &agent, offline, probe_offline).await, Ok(()));
         assert_eq!(tries.load(Ordering::SeqCst), 1, "no ssh try");
         // Once its Mac stops answering, the person gets told to try again later.
         set_offline(host, true);
-        assert_eq!(ready(&db, &agent, offline).await.unwrap_err(), offline_message("Ada", host, false));
+        assert_eq!(ready(&db, &agent, offline, probe_offline).await.unwrap_err(), offline_message("Ada", host, false));
         assert!(offline_message("Ada", host, false).ends_with("that Mac is offline. Try again when it's back."));
     }
 
