@@ -174,9 +174,10 @@ pub struct Cast {
 
 /// Runs a cast to the end, recording every step, and returns its final state and error.
 pub async fn execute<T: Turns>(db: Arc<Db>, turns: T, cast: Cast, emit: Emit) -> (&'static str, Option<String>) {
-    let (state, error) = run_groups(&db, &turns, &cast, &emit).await;
+    let mut last = Vec::new();
+    let (state, error) = run_groups(&db, &turns, &cast, &emit, &mut last).await;
     let _ = workflow_runs::finish(&db, &cast.run_id, state, error.as_deref());
-    emit(progress(&cast, &[], state, error.clone()));
+    emit(progress(&cast, &last, state, error.clone()));
     (state, error)
 }
 
@@ -195,7 +196,8 @@ fn progress(cast: &Cast, range: &[usize], state: &'static str, error: Option<Str
     }
 }
 
-async fn run_groups<T: Turns>(db: &Arc<Db>, turns: &T, cast: &Cast, emit: &Emit) -> (&'static str, Option<String>) {
+/// Runs each group of steps in turn. `last` ends up holding the steps that ran last, for the final event.
+async fn run_groups<T: Turns>(db: &Arc<Db>, turns: &T, cast: &Cast, emit: &Emit, last: &mut Vec<usize>) -> (&'static str, Option<String>) {
     let steps = &cast.workflow.steps;
     let groups = groups(steps);
     let group_of = |step: usize| groups.iter().position(|g| g.contains(&step)).unwrap_or(groups.len());
@@ -208,6 +210,7 @@ async fn run_groups<T: Turns>(db: &Arc<Db>, turns: &T, cast: &Cast, emit: &Emit)
             return ("stopped", None);
         }
         let indices: Vec<usize> = range.collect();
+        last.clone_from(&indices);
         emit(progress(cast, &indices, "running", None));
         let mut handles = Vec::new();
         for &index in &indices {
@@ -623,6 +626,9 @@ mod tests {
         let run = workflow_runs::detail(&s.db, &run_id).unwrap().unwrap();
         assert_eq!(run.steps[1].state, "failed");
         assert_eq!(run.steps[1].error.as_deref(), Some("Out of credits."));
+        // The last event names the steps the cast ended on.
+        let last = s.events.lock().unwrap().last().cloned().unwrap();
+        assert_eq!((last.state, last.steps), ("failed", vec![1, 2]));
 
         let (s, cast, emit) = setup(vec![step("r", "Research"), step("w", "Write")]);
         cast.stop.store(true, Ordering::SeqCst);

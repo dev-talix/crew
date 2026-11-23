@@ -6,6 +6,7 @@ import CovenEditor from "./CovenEditor";
 import HomeCircle from "./HomeCircle";
 import { PlusIcon } from "./icons";
 import { EmptyState, Page, Sheet } from "./ui";
+import { ritualAgents, ritualWho } from "./spells";
 
 const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
 
@@ -98,7 +99,7 @@ export default function HomePage(props: {
   const shownIds = () => new Set(shown().map((a) => a.id));
   const upcoming = createMemo(() =>
     routines()
-      .filter((r) => r.enabled && r.nextRunAt && shownIds().has(r.agentId))
+      .filter((r) => r.enabled && r.nextRunAt && ritualAgents(r, props.spells).some((id) => shownIds().has(id)))
       .sort((a, b) => (a.nextRunAt ?? 0) - (b.nextRunAt ?? 0))
       .slice(0, 5),
   );
@@ -217,14 +218,15 @@ export default function HomePage(props: {
                 >
                   <For each={upcoming()}>
                     {(routine) => {
-                      const agent = () => agentById(routine.agentId)!;
+                      // A spell ritual shows the familiar its spell starts with.
+                      const agent = () => agentById(ritualAgents(routine, props.spells)[0] ?? "");
                       return (
                         <button class="list-row home-agent" onClick={props.onOpenRoutines}>
-                          <BotAvatar avatar={agent().avatar} size={24} />
+                          <Show when={agent()}>{(a) => <BotAvatar avatar={a().avatar} size={24} />}</Show>
                           <span class="list-main">
                             <span class="list-title">{routine.name}</span>
                             <span class="list-sub">
-                              {agent().name}, {lowerFirst(describeSchedule(routine.schedule))}
+                              {ritualWho(routine, props.agents, props.spells)}, {lowerFirst(describeSchedule(routine.schedule))}
                             </span>
                           </span>
                           <span class="home-meta">

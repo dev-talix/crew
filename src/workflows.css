@@ -46,8 +46,37 @@
   align-items: center;
 }
 
-.wf-chain li.pending {
+.wf-chain-agent.pending {
   opacity: 0.5;
+}
+
+.wf-group {
+  display: flex;
+  align-items: center;
+}
+
+/* Steps that run together share one outline. */
+.wf-group.together {
+  gap: 1px;
+  padding: 1px 3px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 999px;
+}
+
+.wf-check-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  margin-left: 2px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-check-mark svg {
+  width: 13px;
+  height: 13px;
 }
 
 .wf-connector {
@@ -164,4 +193,257 @@
 .wf-add {
   align-self: flex-start;
   margin: 4px 0 0 32px;
+}
+
+.wf-step.alongside {
+  margin-top: -8px;
+}
+
+/* Joins a step that runs alongside to the one before it. */
+.wf-step.alongside .wf-step-num {
+  position: relative;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+
+.wf-step.alongside .wf-step-num::before {
+  content: "";
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  height: 38px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  transform: translateX(-1px);
+}
+
+.wf-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.wf-flag input {
+  height: auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.wf-step-head .icon-button.on {
+  color: var(--accent);
+}
+
+.wf-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.wf-check select,
+.wf-check input {
+  height: 30px;
+  font-size: 13px;
+}
+
+.wf-check input {
+  flex: 1;
+  min-width: 110px;
+}
+
+.wf-casts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin-top: 8px;
+}
+
+.wf-casts-label {
+  margin-right: 2px;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.wf-cast {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.wf-cast:hover {
+  border-color: var(--faint);
+  color: var(--text);
+}
+
+.wf-cast-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.wf-cast.done .wf-cast-dot {
+  background: var(--success);
+}
+
+.wf-cast.failed .wf-cast-dot {
+  background: var(--danger);
+}
+
+.wf-cast.running .wf-cast-dot {
+  background: var(--accent);
+  animation: wf-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes wf-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wf-cast.running .wf-cast-dot {
+    animation: none;
+  }
+}
+
+.run-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.run-head h1 {
+  margin: 0;
+}
+
+.run-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.run-state {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.run-state.running {
+  color: var(--accent);
+}
+
+.run-state.done {
+  color: var(--success);
+}
+
+.run-state.failed {
+  color: var(--danger);
+}
+
+.run-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.run-step {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--agent);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.run-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.run-step-title {
+  font-weight: 600;
+}
+
+.run-time {
+  min-width: 44px;
+  font-size: 12px;
+  color: var(--faint);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.run-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.run-text-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--faint);
+}
+
+.run-text-head button {
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+}
+
+.run-text-head button:hover {
+  text-decoration: underline;
+}
+
+.run-text-body {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.run-text-body.clamped {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+}
+
+.run-went {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
 }

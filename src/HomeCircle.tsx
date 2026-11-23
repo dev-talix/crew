@@ -4,6 +4,7 @@ import { PROVIDER_NAMES, relativeTime, type Agent, type Coven, type Routine, typ
 import "./home.css";
 
 import { arc, arcBetween, covenSectors, curve, NODE_RING, OUTER_RING, RUNES, seat, spellLinks, type Link } from "./circle";
+import { ritualAgents } from "./spells";
 import type { JSX } from "@solidjs/web";
 
 export default function HomeCircle(props: {
@@ -30,9 +31,13 @@ export default function HomeCircle(props: {
   const links = createMemo(() => spellLinks(props.spells, props.agents.map((a) => a.id)));
   const lit = (link: Link) => hoverSpell() === link.spell.id || (hoverAgent() !== null && (link.from === hoverAgent() || link.to === hoverAgent()));
   const working = () => props.agents.filter((a) => props.busy[a.id]);
-  const rituals = (id: string) => props.routines.filter((r) => r.agentId === id && r.enabled && r.nextRunAt);
+  // A ritual that casts a spell marks the familiars its spell starts with.
+  const reaches = (r: Routine) => ritualAgents(r, props.spells);
+  const rituals = (id: string) => props.routines.filter((r) => r.enabled && r.nextRunAt && reaches(r).includes(id));
   const nextRitual = () =>
-    props.routines.filter((r) => r.enabled && r.nextRunAt && index(r.agentId) >= 0).sort((a, b) => a.nextRunAt! - b.nextRunAt!)[0];
+    props.routines
+      .filter((r) => r.enabled && r.nextRunAt && reaches(r).some((id) => index(id) >= 0))
+      .sort((a, b) => a.nextRunAt! - b.nextRunAt!)[0];
   const small = () => count() > 8;
   const sectors = createMemo(() => (props.covens?.length ? covenSectors(props.agents.map((a) => a.covenId ?? null)) : []));
   const covenName = (id: string) => props.covens?.find((c) => c.id === id)?.name ?? "";
@@ -85,7 +90,7 @@ export default function HomeCircle(props: {
           {(link) => {
             const shape = () => curve(seatOf(link.from), seatOf(link.to), link.lane);
             return (
-              <g class={["spell-link", { lit: lit(link) }]}>
+              <g class={["spell-link", { lit: lit(link), check: link.kind === "check" }]}>
                 <path class="spell-line" d={shape().d} />
                 <path
                   class="spell-hit"

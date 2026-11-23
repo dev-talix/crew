@@ -55,7 +55,10 @@ export type Schedule = { kind: "interval"; minutes: number } | { kind: "daily"; 
 
 export interface Routine {
   id: string;
-  agentId: string;
+  /** The familiar this ritual messages, or null when it casts a spell. */
+  agentId: string | null;
+  /** The spell it casts, with `prompt` as the optional starting text. */
+  workflowId: string | null;
   name: string;
   prompt: string;
   schedule: Schedule;
@@ -67,7 +70,8 @@ export interface Routine {
 
 export interface RoutineInput {
   id?: string;
-  agentId: string;
+  agentId: string | null;
+  workflowId: string | null;
   name: string;
   prompt: string;
   schedule: Schedule;
@@ -77,6 +81,16 @@ export interface RoutineInput {
 export interface WorkflowStep {
   agentId: string;
   prompt: string;
+  /** Runs alongside the previous step instead of after it. */
+  parallel?: boolean;
+  check?: StepCheck | null;
+}
+
+/** After a step, goes to step `goTo` (an index) when the reply contains, or lacks, `phrase`. */
+export interface StepCheck {
+  when: "contains" | "lacks";
+  phrase: string;
+  goTo: number;
 }
 
 export interface Workflow {
@@ -96,11 +110,51 @@ export interface WorkflowInput {
 
 export interface WorkflowProgress {
   workflowId: string;
+  runId: string;
+  /** The first step running now, counting from 1. */
   step: number;
   total: number;
   agentId: string | null;
+  /** Every step running now, counting from 1. */
+  steps: number[];
+  agents: string[];
   state: "running" | "done" | "failed" | "stopped";
   error: string | null;
+}
+
+export type RunState = "running" | "done" | "failed" | "stopped";
+
+/** One cast of a spell. */
+export interface WorkflowRun {
+  id: string;
+  workflowId: string;
+  input: string;
+  /** The ritual that cast it, by name. */
+  ritual: string | null;
+  state: RunState;
+  error: string | null;
+  startedAt: number;
+  endedAt: number | null;
+}
+
+export interface WorkflowRunStep {
+  id: number;
+  /** Index of the step in the spell. */
+  step: number;
+  agentId: string;
+  /** As sent, with {{input}} and {{previous}} filled in. */
+  prompt: string;
+  reply: string | null;
+  state: RunState;
+  error: string | null;
+  /** Index of the step this one's check sent the spell to. */
+  wentTo: number | null;
+  startedAt: number;
+  endedAt: number | null;
+}
+
+export interface WorkflowRunDetail extends WorkflowRun {
+  steps: WorkflowRunStep[];
 }
 
 export interface ProviderStatus {
@@ -258,8 +312,11 @@ export const api = {
   runningWorkflows: () => invoke<string[]>("running_workflows"),
   saveWorkflow: (input: WorkflowInput) => invoke<Workflow>("save_workflow", { input }),
   deleteWorkflow: (id: string) => invoke<void>("delete_workflow", { id }),
-  runWorkflow: (id: string, input: string) => invoke<void>("run_workflow", { id, input }),
+  /** Starts a cast and returns its run id. */
+  runWorkflow: (id: string, input: string) => invoke<string>("run_workflow", { id, input }),
   stopWorkflow: (id: string) => invoke<void>("stop_workflow", { id }),
+  recentWorkflowRuns: () => invoke<WorkflowRun[]>("recent_workflow_runs"),
+  getWorkflowRun: (id: string) => invoke<WorkflowRunDetail>("get_workflow_run", { id }),
   listThemes: () => invoke<ThemeList>("list_themes"),
   saveTheme: (id: string | null, theme: ThemeFile) => invoke<ThemeEntry>("save_theme", { id, theme }),
   deleteTheme: (id: string) => invoke<void>("delete_theme", { id }),
