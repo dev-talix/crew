@@ -133,6 +133,15 @@ impl Runtime {
         if self.db.get_agent(agent_id)?.is_none() {
             return Err("That familiar no longer exists.".into());
         }
+        if let Err(reason) = crate::budgets::check_turn(&self.db, agent_id) {
+            // Spells and rituals have no composer to show the refusal, so it goes in the chat.
+            if source.is_some() {
+                if let Ok(message) = self.db.insert_message(agent_id, "error", &reason, "done") {
+                    self.app.message(&message);
+                }
+            }
+            return Err(reason);
+        }
         let mut agents = self.agents.lock().map_err(|_| "runtime state poisoned")?;
         let state = agents.entry(agent_id.to_string()).or_default();
         let status = if state.busy { "queued" } else { "done" };

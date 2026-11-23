@@ -118,7 +118,7 @@ impl Scheduler {
             };
             if due <= now {
                 if let Some(runtime) = self.runtime.upgrade() {
-                    let _ = runtime.send(&routine.agent_id, routine.prompt.clone(), Some(&format!("{}{}", crate::runtime::RITUAL_SOURCE, routine.name)));
+                    crate::budgets::run_ritual(self.db.clone(), runtime, routine.clone(), self.app.clone());
                 }
                 routine.last_run_at = Some(now);
                 routine.next_run_at = next_run_ms(&routine.schedule, now);

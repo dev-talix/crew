@@ -1,7 +1,9 @@
 mod approvals;
+mod budgets;
 mod covens;
 mod db;
 mod dock;
+mod exports;
 mod mcp;
 mod permissions;
 mod providers;
@@ -554,7 +556,10 @@ struct PlanLimits {
 #[tauri::command]
 async fn plan_limits(state: State<'_, AppState>) -> Result<PlanLimits, String> {
     let (codex, codex_error) = match state.runtime.codex_rate_limits().await {
-        Ok(limits) => (Some(limits), None),
+        Ok(limits) => {
+            budgets::remember_codex(&state.db, &limits);
+            (Some(limits), None)
+        }
         Err(e) => (None, Some(e)),
     };
     let claude = state.db.setting(runtime::CLAUDE_LIMITS)?.and_then(|text| serde_json::from_str(&text).ok());
@@ -595,6 +600,7 @@ pub fn mcp_main(args: &[String]) -> i32 {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -681,7 +687,17 @@ pub fn run() {
             check_for_updates,
             list_covens,
             save_coven,
-            delete_coven
+            delete_coven,
+            budgets::list_budgets,
+            budgets::set_budget,
+            budgets::get_plan_guard,
+            budgets::save_plan_guard_setting,
+            budgets::ritual_pause,
+            budgets::ritual_skips,
+            exports::export_item,
+            exports::export_backup_file,
+            exports::pick_import,
+            exports::apply_import
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

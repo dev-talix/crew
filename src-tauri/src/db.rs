@@ -195,7 +195,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 13;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -361,6 +361,25 @@ impl Db {
                  CREATE TABLE covens (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);
                  ALTER TABLE agents ADD COLUMN coven_id TEXT;
                  PRAGMA user_version = 9;
+                 COMMIT;",
+            )?;
+        }
+        if version < 13 {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE budgets (
+                   agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+                   tokens INTEGER NOT NULL,
+                   period TEXT NOT NULL
+                 );
+                 CREATE TABLE ritual_skips (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   routine_id TEXT NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+                   reason TEXT NOT NULL,
+                   at INTEGER NOT NULL
+                 );
+                 CREATE INDEX usage_by_agent ON usage(agent_id, at);
+                 PRAGMA user_version = 13;
                  COMMIT;",
             )?;
         }
