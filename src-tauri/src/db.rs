@@ -1062,7 +1062,7 @@ mod tests {
         // Roll the file back to version 21, as the previous release left it.
         {
             let conn = Connection::open(&path).unwrap();
-            conn.execute_batch("ALTER TABLE agents DROP COLUMN setup_pending; PRAGMA user_version = 21;").unwrap();
+            conn.execute_batch("ALTER TABLE agents DROP COLUMN setup_pending; ALTER TABLE chats DROP COLUMN handoff; PRAGMA user_version = 21;").unwrap();
         }
         let db = Db::open(&path).unwrap();
         let version: i64 = db.with(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
