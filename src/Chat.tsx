@@ -3,9 +3,13 @@ import type { JSX } from "@solidjs/web";
 import BotAvatar, { type Mood } from "./BotAvatar";
 import { api, changesFor, errorText, onEvent, onMountAsync, PROVIDER_NAMES, type Agent, type Attachment, type ChatInfo, type Message } from "./api";
 import ChatsMenu, { chatTitle } from "./ChatsMenu";
+import { RuleButton } from "./MemoryEditor";
 import { AttachButton, createComposerFiles, DropOverlay, MessageAttachments, PendingFiles } from "./ChatAttachments";
 import type { ChatStore } from "./chatStore";
+import Ledger from "./Ledger";
+import Helpers from "./Helpers";
 import ModelPicker from "./ModelPicker";
+import { HostBadge } from "./ui";
 import SideConversation from "./SideConversation";
 import { effortName, runningModelName } from "./models";
 import {
@@ -166,6 +170,9 @@ function UserRow(props: { message: Message; onOpen: (attachment: Attachment) => 
         <span class="hover-only">{clock(m().createdAt)}</span>
         <span class="hover-only">
           <CopyButton text={() => m().text} label="Copy message" />
+          <Show when={m().text.trim() && !m().source}>
+            <RuleButton message={m()} />
+          </Show>
         </span>
       </div>
     </div>
@@ -463,9 +470,16 @@ export default function Chat(props: {
             <span class="crumb-sep" aria-hidden="true">
               /
             </span>
-            <button class="crumb-link" title={`Open ${props.agent.workspace} in Finder`} onClick={() => run(() => api.openWorkspace(props.agent.id))}>
-              {folder()}
-            </button>
+            <Show
+              when={props.agent.host}
+              fallback={
+                <button class="crumb-link" title={`Open ${props.agent.workspace} in Finder`} onClick={() => run(() => api.openWorkspace(props.agent.id))}>
+                  {folder()}
+                </button>
+              }
+            >
+              {(host) => <HostBadge agent={props.agent} host={host()} title={`Runs in ${props.agent.workspace} on ${host()} over SSH, without Grimoire's tools`} />}
+            </Show>
           </Show>
           <span class="crumb-sep" aria-hidden="true">
             /
@@ -499,6 +513,7 @@ export default function Chat(props: {
           </span>
         </div>
         <div class="bar-actions">
+          <Helpers agent={props.agent} />
           <Show when={props.compact}>
             {(compact) => (
               <button class="icon-button" aria-label="Open in Grimoire" title="Open in Grimoire" onClick={compact().onOpenMain}>
@@ -538,6 +553,7 @@ export default function Chat(props: {
           </Show>
         </div>
       </header>
+      <Ledger agentId={props.agent.id} name={props.agent.name} />
 
       <div
         class="timeline"

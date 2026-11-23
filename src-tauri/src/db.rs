@@ -72,6 +72,10 @@ pub struct Agent {
     /// The coven this familiar sits in, if any.
     #[serde(default)]
     pub coven_id: Option<String>,
+    /// The SSH destination of the Mac it runs on. None runs it on this Mac, and then `workspace` is a
+    /// local folder; otherwise `workspace` is a path on that Mac, maybe starting with ~/.
+    #[serde(default)]
+    pub host: Option<String>,
     pub created_at: i64,
 }
 
@@ -150,6 +154,24 @@ pub struct Message {
 pub enum Schedule {
     Interval { minutes: u32 },
     Daily { time: String, days: Vec<u8> },
+    /// Runs when a pull request opens in a GitHub repo, "owner/name". See `triggers`.
+    GithubPr { repo: String },
+    /// Runs when a file, or what's directly in a folder, changes.
+    File { path: String },
+    /// Runs when something POSTs to the ritual's local webhook. Grimoire makes the secret.
+    Webhook {
+        #[serde(default)]
+        secret: String,
+    },
+    /// Runs when new mail reaches the Mail app's inbox.
+    Email,
+}
+
+impl Schedule {
+    /// True for the kinds that run when something happens instead of by the clock.
+    pub fn is_event(&self) -> bool {
+        !matches!(self, Schedule::Interval { .. } | Schedule::Daily { .. })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -228,7 +250,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 24;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -442,6 +464,74 @@ impl Db {
         if version < 14 {
             crate::side::migrate(&conn)?;
         }
+        if version < 15 {
+            // What each event ritual's watcher has seen, so a restart doesn't run it again.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE trigger_state (
+                   routine_id TEXT PRIMARY KEY REFERENCES routines(id) ON DELETE CASCADE,
+                   source TEXT NOT NULL,
+                   cursor TEXT,
+                   checked_at INTEGER,
+                   fired_at INTEGER,
+                   error TEXT
+                 );
+                 PRAGMA user_version = 15;
+                 COMMIT;",
+            )?;
+        }
+        if version < 16 {
+            crate::inbox::migrate(&conn)?;
+        }
+        if version < 17 {
+            crate::ledger::migrate(&conn)?;
+        }
+        if version < 18 {
+            crate::helpers::migrate(&conn)?;
+        }
+        if version < 19 {
+            crate::drafts::migrate(&conn)?;
+        }
+        if version < 20 {
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE agents ADD COLUMN host TEXT;
+                 PRAGMA user_version = 20;
+                 COMMIT;",
+            )?;
+        }
+        if version < 21 {
+            // Messages that came back while a familiar couldn't take a turn, for its next one (see runtime::hold).
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE pending_notes (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                   chat_id TEXT REFERENCES chats(id) ON DELETE CASCADE,
+                   source TEXT NOT NULL,
+                   text TEXT NOT NULL,
+                   created_at INTEGER NOT NULL
+                 );
+                 CREATE INDEX pending_notes_by_agent ON pending_notes(agent_id, id);
+                 PRAGMA user_version = 21;
+                 COMMIT;",
+            )?;
+        }
+        if version < 22 {
+            // A remote familiar saved while its Mac was offline, whose workspace there isn't made yet.
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE agents ADD COLUMN setup_pending INTEGER NOT NULL DEFAULT 0;
+                 PRAGMA user_version = 22;
+                 COMMIT;",
+            )?;
+        }
+        if version < 23 {
+            crate::handoffs::migrate(&conn)?;
+        }
+        if version < 24 {
+            crate::handoffs::migrate_requests(&conn)?;
+        }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
             [],
@@ -459,7 +549,7 @@ impl Db {
     pub fn list_agents(&self) -> Result<Vec<Agent>, String> {
         self.with(|c| {
             let mut stmt = c.prepare_cached(
-                "SELECT id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, active_model, coven_id
+                "SELECT id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, active_model, coven_id, host
                  FROM agents ORDER BY created_at",
             )?;
             let rows = stmt.query_map([], row_to_agent)?;
@@ -470,7 +560,7 @@ impl Db {
     pub fn get_agent(&self, id: &str) -> Result<Option<Agent>, String> {
         self.with(|c| {
             c.prepare_cached(
-                "SELECT id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, active_model, coven_id
+                "SELECT id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, active_model, coven_id, host
                  FROM agents WHERE id = ?1",
             )?
             .query_row(params![id], row_to_agent)
@@ -481,8 +571,8 @@ impl Db {
     pub fn insert_agent(&self, agent: &Agent) -> Result<(), String> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO agents (id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, coven_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO agents (id, name, provider, model, workspace, access, session_id, created_at, avatar, effort, coven_id, host)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     agent.id,
                     agent.name,
@@ -494,7 +584,8 @@ impl Db {
                     agent.created_at,
                     agent.avatar.to_column(),
                     agent.effort,
-                    agent.coven_id
+                    agent.coven_id,
+                    agent.host
                 ],
             )
             .map(|_| ())
@@ -509,6 +600,19 @@ impl Db {
             )
             .map(|_| ())
         })
+    }
+
+    /// The remote familiars whose setup waits for their Mac to connect.
+    pub fn pending_setups(&self) -> Result<std::collections::HashSet<String>, String> {
+        self.with(|c| {
+            let mut stmt = c.prepare_cached("SELECT id FROM agents WHERE setup_pending = 1")?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
+    pub fn set_setup_pending(&self, agent_id: &str, pending: bool) -> Result<(), String> {
+        self.with(|c| c.execute("UPDATE agents SET setup_pending = ?2 WHERE id = ?1", params![agent_id, pending]).map(|_| ()))
     }
 
     pub fn set_active_model(&self, agent_id: &str, model: &str) -> Result<(), String> {
@@ -819,6 +923,7 @@ fn row_to_agent(r: &rusqlite::Row) -> rusqlite::Result<Agent> {
         effort: r.get(9)?,
         active_model: r.get(10)?,
         coven_id: r.get(11)?,
+        host: r.get(12)?,
     })
 }
 
@@ -839,6 +944,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: now_ms(),
         }
     }
@@ -932,6 +1038,45 @@ mod tests {
         assert_eq!(db.last_messages().unwrap()[0].source.as_deref(), Some("Morning check"));
         db.delete_agent("a").unwrap();
         assert!(db.list_routines().unwrap().is_empty());
+    }
+
+    #[test]
+    fn saves_the_host_of_a_remote_familiar() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_agent(&agent("local")).unwrap();
+        let remote = Agent { host: Some("me@studio.local".into()), workspace: "~/Grimoire/r".into(), ..agent("remote") };
+        db.insert_agent(&remote).unwrap();
+        assert_eq!(db.get_agent("local").unwrap().unwrap().host, None);
+        let saved = db.get_agent("remote").unwrap().unwrap();
+        assert_eq!((saved.host.as_deref(), saved.workspace.as_str()), (Some("me@studio.local"), "~/Grimoire/r"));
+        db.update_agent(&Agent { name: "Renamed".into(), ..saved }).unwrap();
+        assert_eq!(db.list_agents().unwrap()[1].host.as_deref(), Some("me@studio.local"), "edits keep the host");
+    }
+
+    #[test]
+    fn an_existing_database_gains_pending_setups() {
+        let dir = std::env::temp_dir().join(format!("grimoire-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grimoire.db");
+        {
+            let db = Db::open(&path).unwrap();
+            db.insert_agent(&agent("a")).unwrap();
+        }
+        // Roll the file back to version 21, as the previous release left it.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("ALTER TABLE agents DROP COLUMN setup_pending; ALTER TABLE chats DROP COLUMN handoff; DROP TABLE handoffs; PRAGMA user_version = 21;").unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let version: i64 = db.with(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(db.pending_setups().unwrap().is_empty(), "existing familiars aren't pending");
+        db.set_setup_pending("a", true).unwrap();
+        assert!(db.pending_setups().unwrap().contains("a"));
+        db.set_setup_pending("a", false).unwrap();
+        assert!(db.pending_setups().unwrap().is_empty());
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

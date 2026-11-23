@@ -203,6 +203,7 @@ mod tests {
                 effort: None,
                 active_model: None,
                 coven_id: None,
+                host: None,
                 created_at: 0,
             };
             db.insert_agent(&agent).unwrap();

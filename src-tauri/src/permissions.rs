@@ -46,7 +46,16 @@ pub struct Permissions {
 impl Default for Permissions {
     fn default() -> Self {
         let ask = |pattern: &str| Rule { kind: RuleKind::Ask, pattern: pattern.into() };
-        Permissions { mode: Mode::Off, rules: vec![ask("git push*"), ask("rm -rf *"), ask("sudo *")] }
+        Permissions { mode: Mode::Off, rules: vec![
+            ask("git push*"),
+            ask("rm -rf *"),
+            ask("sudo *"),
+            // Messages to people go through draft_message, so these should never be needed.
+            ask("*sendmail *"),
+            ask("*osascript*Mail*"),
+            ask("*hooks.slack.com*"),
+            ask("*gh * comment*"),
+        ] }
     }
 }
 
@@ -192,6 +201,10 @@ mod tests {
         p.mode = Mode::Rules;
         assert_eq!(verdict(&p, "  git push --force "), Verdict::Ask);
         assert_eq!(verdict(&p, "cargo test"), Verdict::Allow);
+        for send in ["sendmail -t < note.txt", "osascript -e 'tell application \"Mail\" to send'", "curl -d @m.json https://hooks.slack.com/services/T/B/x", "gh pr comment 4 -b hi"] {
+            assert_eq!(verdict(&p, send), Verdict::Ask, "{send}");
+        }
+        assert_eq!(verdict(&p, "gh pr view 4"), Verdict::Allow);
 
         p.mode = Mode::Always;
         assert_eq!(verdict(&p, "cargo test"), Verdict::Ask);
@@ -208,7 +221,7 @@ mod tests {
         let mut p = Permissions { mode: Mode::Rules, ..Default::default() };
         p.rules.push(Rule { kind: RuleKind::Ask, pattern: " git push* ".into() });
         let saved = save(&db, p).unwrap();
-        assert_eq!(saved.rules.len(), 3, "duplicates collapse after trimming");
+        assert_eq!(saved.rules.len(), Permissions::default().rules.len(), "duplicates collapse after trimming");
         assert_eq!(load(&db), saved);
         let blank = Permissions { mode: Mode::Rules, rules: vec![Rule { kind: RuleKind::Ask, pattern: "  ".into() }] };
         assert!(save(&db, blank).is_err());

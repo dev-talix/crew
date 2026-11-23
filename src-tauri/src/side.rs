@@ -104,6 +104,23 @@ pub fn follow_up(db: &Db, thread: &str, asker: &Agent, target: &Agent) -> Result
     Ok(chat)
 }
 
+/// Side conversations whose last exchange never finished: no messages yet, or a last message that
+/// isn't a finished reply or an error. Helpers' chats don't count: nobody waits on them for a reply.
+/// Only meaningful at startup, before any side turn runs.
+pub fn unfinished(db: &Db) -> Result<Vec<SideChat>, String> {
+    db.with(|c| {
+        let mut stmt = c.prepare(
+            "SELECT id, agent_id, side_of, title, session_id, created_at, updated_at FROM chats c
+             WHERE side_of IS NOT NULL AND id NOT IN (SELECT chat_id FROM helpers) AND NOT EXISTS (
+                 SELECT 1 FROM messages m WHERE m.id = (SELECT MAX(id) FROM messages WHERE chat_id = c.id)
+                 AND (m.role = 'error' OR (m.role = 'assistant' AND m.status IN ('done', 'stopped')))
+             )",
+        )?;
+        let rows = stmt.query_map([], row_to_side)?;
+        rows.collect()
+    })
+}
+
 /// The lane keys of every side conversation `agent_id` asks in or answers in.
 pub fn lanes_of(db: &Db, agent_id: &str) -> Result<Vec<String>, String> {
     db.with(|c| {
@@ -228,6 +245,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: now_ms(),
         };
         db.insert_agent(&agent).unwrap();
@@ -274,6 +292,34 @@ mod tests {
         let left = crate::chats::list(&db, "b").unwrap();
         assert_eq!(left.len(), 1);
         assert!(left[0].current && left[0].id != side.id);
+    }
+
+    #[test]
+    fn finds_side_conversations_left_unfinished() {
+        let db = Db::open_in_memory().unwrap();
+        let (a, b) = (familiar(&db, "a", "Researcher"), familiar(&db, "b", "Scribe"));
+        let chat = |rows: &[(&str, &str)]| {
+            let side = create(&db, &a.id, &b.id, "hi").unwrap();
+            for (role, status) in rows {
+                db.insert_message_in(&side.id, &b.id, role, "x", status, None).unwrap();
+            }
+            side.id
+        };
+        let empty = chat(&[]);
+        let asked = chat(&[("user", "done")]);
+        let mid_tool = chat(&[("user", "done"), ("tool", "done")]);
+        let cut_off = chat(&[("user", "done"), ("assistant", "interrupted")]);
+        chat(&[("user", "done"), ("assistant", "done")]);
+        chat(&[("user", "done"), ("assistant", "stopped")]);
+        chat(&[("user", "done"), ("error", "done")]);
+        // A helper cut off mid-turn is the helpers list's to show, not a reply to deliver.
+        let (_, helper) = crate::helpers::create(&db, &a.id, None, &serde_json::json!({ "task": "x" })).unwrap();
+        db.insert_message_in(&helper.chat_id, &a.id, "assistant", "x", "interrupted", None).unwrap();
+        let mut found: Vec<String> = unfinished(&db).unwrap().into_iter().map(|s| s.id).collect();
+        let mut want = vec![empty, asked, mid_tool, cut_off];
+        found.sort();
+        want.sort();
+        assert_eq!(found, want);
     }
 
     #[test]

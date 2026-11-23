@@ -3,7 +3,7 @@ use crate::runtime::{Runtime, RITUAL_SOURCE};
 use crate::workflows::WorkflowRunner;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveTime, TimeZone};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Notify;
@@ -21,7 +21,28 @@ pub fn validate(schedule: &Schedule) -> Result<(), String> {
             Ok(())
         }
         Schedule::Interval { .. } => Ok(()),
+        Schedule::GithubPr { repo } if !crate::triggers::valid_repo(repo) => Err("Name the GitHub repo as owner/name.".into()),
+        Schedule::File { path } => crate::triggers::home_path(path).map(|_| ()),
+        Schedule::GithubPr { .. } | Schedule::Webhook { .. } | Schedule::Email => Ok(()),
     }
+}
+
+/// Tidies an event trigger before saving: expands `~` in a path, and keeps a webhook's secret, or makes
+/// one. The secret always comes from Grimoire, never from the window.
+pub fn prepare(schedule: Schedule, existing: Option<&Routine>) -> Result<Schedule, String> {
+    let schedule = match schedule {
+        Schedule::GithubPr { repo } => Schedule::GithubPr { repo: repo.trim().to_string() },
+        Schedule::File { path } => Schedule::File { path: crate::triggers::home_path(&path)? },
+        Schedule::Webhook { .. } => Schedule::Webhook {
+            secret: match existing.map(|r| &r.schedule) {
+                Some(Schedule::Webhook { secret }) if !secret.is_empty() => secret.clone(),
+                _ => crate::triggers::new_secret(),
+            },
+        },
+        other => other,
+    };
+    validate(&schedule)?;
+    Ok(schedule)
 }
 
 fn parse_time(time: &str) -> Result<NaiveTime, String> {
@@ -31,6 +52,8 @@ fn parse_time(time: &str) -> Result<NaiveTime, String> {
 pub fn next_run<Tz: TimeZone>(schedule: &Schedule, after: DateTime<Tz>) -> Option<DateTime<Tz>> {
     match schedule {
         Schedule::Interval { minutes } => Some(after + ChronoDuration::minutes(i64::from(*minutes))),
+        // Event rituals run when their trigger fires, not by the clock.
+        Schedule::GithubPr { .. } | Schedule::File { .. } | Schedule::Webhook { .. } | Schedule::Email => None,
         Schedule::Daily { time, days } => {
             let time = parse_time(time).ok()?;
             let tz = after.timezone();
@@ -94,11 +117,11 @@ pub fn save(db: &Db, input: RoutineInput) -> Result<Routine, String> {
         }
         (None, None) => return Err("Pick a familiar or a spell for this ritual.".into()),
     };
-    validate(&input.schedule)?;
     let existing = match input.id.as_deref() {
         Some(id) => db.list_routines()?.into_iter().find(|r| r.id == id),
         None => None,
     };
+    let schedule = prepare(input.schedule, existing.as_ref())?;
     let now = now_ms();
     let routine = Routine {
         id: existing.as_ref().map(|r| r.id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
@@ -106,13 +129,17 @@ pub fn save(db: &Db, input: RoutineInput) -> Result<Routine, String> {
         workflow_id,
         name,
         prompt,
-        next_run_at: if input.enabled { next_run_ms(&input.schedule, now) } else { None },
-        schedule: input.schedule,
+        next_run_at: if input.enabled { next_run_ms(&schedule, now) } else { None },
+        schedule,
         enabled: input.enabled,
         last_run_at: existing.as_ref().and_then(|r| r.last_run_at),
         created_at: existing.map(|r| r.created_at).unwrap_or(now),
     };
-    db.save_routine(&routine)?;
+    // Saving never runs an event ritual: its watcher looks again and only runs it for what's new after that.
+    crate::triggers::while_editing(|| {
+        db.save_routine(&routine)?;
+        crate::triggers::reset(db, &routine.id)
+    })?;
     Ok(routine)
 }
 
@@ -127,6 +154,16 @@ pub fn fire(routine: &Routine, caster: &impl Caster) -> Result<(), String> {
         (Some(workflow_id), _) => caster.cast(workflow_id, routine.prompt.clone(), &routine.name),
         (None, Some(agent_id)) => caster.message(agent_id, routine.prompt.clone(), &format!("{RITUAL_SOURCE}{}", routine.name)),
         (None, None) => Err("This ritual has no familiar or spell.".into()),
+    }
+}
+
+/// Adds what set off an event ritual to its message.
+pub fn with_trigger(prompt: &str, what: &str) -> String {
+    let what = format!("Triggered by: {what}");
+    if prompt.is_empty() {
+        what
+    } else {
+        format!("{prompt}\n\n{what}")
     }
 }
 
@@ -150,24 +187,63 @@ impl Caster for AppCaster {
 struct RoutinesChanged;
 
 pub struct Scheduler {
-    db: Arc<Db>,
+    pub(crate) db: Arc<Db>,
     runtime: Weak<Runtime>,
     spells: Weak<WorkflowRunner>,
-    app: AppHandle,
+    pub(crate) app: AppHandle,
     wake: Notify,
+    /// Wakes the event watcher in `triggers` after a ritual changes.
+    pub(crate) trigger_wake: Notify,
+    /// Why the webhook listener isn't running, if it isn't.
+    pub(crate) webhook_error: Mutex<Option<String>>,
 }
 
 impl Scheduler {
     pub fn start(db: Arc<Db>, runtime: &Arc<Runtime>, spells: &Arc<WorkflowRunner>, app: AppHandle) -> Arc<Self> {
         let (runtime, spells) = (Arc::downgrade(runtime), Arc::downgrade(spells));
-        let scheduler = Arc::new(Scheduler { db, runtime, spells, app, wake: Notify::new() });
+        let scheduler = Arc::new(Scheduler {
+            db,
+            runtime,
+            spells,
+            app,
+            wake: Notify::new(),
+            trigger_wake: Notify::new(),
+            webhook_error: Mutex::new(None),
+        });
         let worker = scheduler.clone();
         tauri::async_runtime::spawn(async move { worker.run().await });
+        tauri::async_runtime::spawn(crate::triggers::watch(scheduler.clone()));
+        tauri::async_runtime::spawn(crate::triggers::serve(scheduler.clone()));
         scheduler
     }
 
     pub fn changed(&self) {
         self.wake.notify_one();
+        self.trigger_wake.notify_one();
+    }
+
+    /// Runs a ritual through the budget and plan limit checks, as a scheduled run would.
+    fn dispatch(&self, routine: &Routine) {
+        if let (Some(runtime), Ok(caster)) = (self.runtime.upgrade(), self.caster()) {
+            let (app, ritual) = (self.app.clone(), routine.clone());
+            crate::budgets::run_ritual(self.db.clone(), runtime, routine.clone(), self.app.clone(), move || {
+                fire(&ritual, &caster)?;
+                // A spell ritual is announced when the spell ends instead.
+                if let Some(agent_id) = &ritual.agent_id {
+                    crate::notify::ritual_fired(&app, &ritual.name, agent_id);
+                }
+                Ok(())
+            });
+        }
+    }
+
+    /// Runs an event ritual, telling the familiar, or the spell's input, what set it off.
+    pub(crate) fn fire_with(&self, routine: &Routine, what: &str) {
+        let mut run = routine.clone();
+        run.prompt = with_trigger(&routine.prompt, what);
+        self.dispatch(&run);
+        let now = now_ms();
+        let _ = self.db.with(|c| c.execute("UPDATE routines SET last_run_at = ?2 WHERE id = ?1", rusqlite::params![routine.id, now]));
     }
 
     fn caster(&self) -> Result<AppCaster, String> {
@@ -203,7 +279,7 @@ impl Scheduler {
         let mut soonest: Option<i64> = None;
         let mut fired = false;
         for mut routine in self.db.list_routines()? {
-            if !routine.enabled {
+            if !routine.enabled || routine.schedule.is_event() {
                 continue;
             }
             let due = match routine.next_run_at {
@@ -220,17 +296,7 @@ impl Scheduler {
             };
             if due <= now {
                 // Budgets and the plan limit guard can skip the run, and so can a spell still being cast.
-                if let (Some(runtime), Ok(caster)) = (self.runtime.upgrade(), self.caster()) {
-                    let (app, ritual) = (self.app.clone(), routine.clone());
-                    crate::budgets::run_ritual(self.db.clone(), runtime, routine.clone(), self.app.clone(), move || {
-                        fire(&ritual, &caster)?;
-                        // A spell ritual is announced when the spell ends instead.
-                        if let Some(agent_id) = &ritual.agent_id {
-                            crate::notify::ritual_fired(&app, &ritual.name, agent_id);
-                        }
-                        Ok(())
-                    });
-                }
+                self.dispatch(&routine);
                 routine.last_run_at = Some(now);
                 routine.next_run_at = next_run_ms(&routine.schedule, now);
                 self.db.save_routine(&routine)?;
@@ -320,6 +386,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: now_ms(),
         })
         .unwrap();
@@ -365,6 +432,40 @@ mod tests {
         .unwrap();
         assert_eq!(save(&db, old).unwrap().agent_id.as_deref(), Some("a"));
         assert!(save(&db, input(Some("a"), Some(""), "Go")).is_ok());
+    }
+
+    #[test]
+    fn event_rituals_save_with_a_server_secret_and_no_clock() {
+        let db = db_with_spell();
+        let hook = |id: Option<String>, secret: &str| RoutineInput {
+            id,
+            schedule: Schedule::Webhook { secret: secret.into() },
+            ..input(Some("a"), None, "Look at it")
+        };
+        let saved = save(&db, hook(None, "chosen-by-the-window")).unwrap();
+        let Schedule::Webhook { secret } = &saved.schedule else { panic!("not a webhook") };
+        assert_eq!(secret.len(), 32);
+        assert_eq!(saved.next_run_at, None);
+        // Editing keeps the secret, whatever the window sends.
+        let again = save(&db, hook(Some(saved.id.clone()), "other")).unwrap();
+        assert_eq!(again.schedule, saved.schedule);
+
+        let home = std::env::var("HOME").unwrap();
+        let file = save(&db, RoutineInput { schedule: Schedule::File { path: "~/Notes".into() }, ..input(Some("a"), None, "Go") }).unwrap();
+        assert_eq!(file.schedule, Schedule::File { path: format!("{home}/Notes") });
+        let bad = RoutineInput { schedule: Schedule::GithubPr { repo: "nope".into() }, ..input(Some("a"), None, "Go") };
+        assert_eq!(save(&db, bad).unwrap_err(), "Name the GitHub repo as owner/name.");
+
+        let email: RoutineInput = serde_json::from_str(r#"{"agentId":"a","name":"Mail","prompt":"Sort it","schedule":{"kind":"email"},"enabled":true}"#).unwrap();
+        assert_eq!(save(&db, email).unwrap().schedule, Schedule::Email);
+        let pr: Schedule = serde_json::from_str(r#"{"kind":"githubPr","repo":"o/r"}"#).unwrap();
+        assert!(pr.is_event() && !Schedule::Interval { minutes: 60 }.is_event());
+    }
+
+    #[test]
+    fn trigger_text_follows_the_message() {
+        assert_eq!(with_trigger("Review it", "PR #1 'x' opened in o/r"), "Review it\n\nTriggered by: PR #1 'x' opened in o/r");
+        assert_eq!(with_trigger("", "New email"), "Triggered by: New email");
     }
 
     #[test]

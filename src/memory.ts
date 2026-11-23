@@ -1,26 +1,105 @@
 import { relativeTime, type Agent } from "./api";
 
-/** The backend's limit, used until a memory has loaded. */
+/** The backend's limits, used until a memory has loaded. */
 export const MEMORY_LIMIT = 16 * 1024;
+export const ENTRY_LIMIT = 1000;
 
 export type MemoryScope = "familiar" | "coven";
 
-export interface Memory {
+/** fact: lasting, about the person or their world. rule: a standing instruction. project: a note about one project. */
+export type MemoryKind = "fact" | "rule" | "project";
+
+/** The editor's sections, rules first, as the familiar reads them. */
+export const MEMORY_KINDS: { kind: MemoryKind; title: string; empty: string }[] = [
+  { kind: "rule", title: "Rules", empty: "No rules yet. Make one from a message in the chat, or add one here." },
+  { kind: "fact", title: "Facts", empty: "No facts yet." },
+  { kind: "project", title: "Projects", empty: "No project notes yet." },
+];
+
+export interface MemoryEntry {
+  id: string;
+  kind: MemoryKind;
+  /** Set for project entries only. */
+  project?: string;
   text: string;
-  /** Bytes of UTF-8 a memory may hold. */
+  /** YYYY-MM-DD, the day Grimoire saved it. */
+  learnedOn: string;
+  /** The familiar that saved it; null when the user did. */
+  source: string | null;
+}
+
+export interface Memory {
+  entries: MemoryEntry[];
+  /** Bytes of UTF-8 a memory may hold across its entries. */
   limit: number;
+  /** Characters one entry may hold. */
+  entryLimit: number;
   /** The familiar that last changed it; null when the user did, or nobody has yet. */
   updatedBy: string | null;
   updatedAt: number | null;
 }
 
+/** An entry as the editor sends it: an id for one that exists, none for a new one. */
+export interface MemoryDraft {
+  id?: string;
+  kind: MemoryKind;
+  project?: string;
+  text: string;
+}
+
+/** An entry in the editor: `saved` is the entry it started from, if any. */
+export type EditedEntry = Pick<MemoryDraft, "kind" | "text"> & { project: string; saved?: MemoryEntry };
+
+/** Whether an edited entry is new or differs from the entry it started from. */
+export function entryChanged(row: EditedEntry): boolean {
+  const saved = row.saved;
+  return !saved || row.kind !== saved.kind || row.text !== saved.text || (row.kind === "project" && row.project !== (saved.project ?? ""));
+}
+
+/**
+ * What a save sends: only new or changed entries, and only the ids the person deleted. Entries left
+ * out stay as they are, so one a familiar added while the editor was open survives the save.
+ */
+export function memoryChanges(rows: EditedEntry[], deleted: string[]): { entries: MemoryDraft[]; removed: string[] } {
+  const entries = rows.filter(entryChanged).map((r) => ({ id: r.saved?.id, kind: r.kind, project: r.kind === "project" ? r.project : undefined, text: r.text }));
+  return { entries, removed: deleted };
+}
+
 const kb = (bytes: number) => `${(bytes / 1024).toFixed(1).replace(/\.0$/, "")} KB`;
 
-/** How much of the limit `text` uses, counted in UTF-8 bytes like the backend. */
-export function memoryUsage(text: string, limit: number): { label: string; over: boolean } {
-  const bytes = new TextEncoder().encode(text).length;
+/** Bytes the backend counts for these entries: their trimmed text and project names in UTF-8. */
+export function entriesSize(entries: Pick<MemoryDraft, "kind" | "project" | "text">[]): number {
+  const encoder = new TextEncoder();
+  return entries.reduce((sum, e) => sum + encoder.encode(e.text.trim()).length + (e.kind === "project" ? encoder.encode((e.project ?? "").trim()).length : 0), 0);
+}
+
+/** How much of the limit `bytes` uses. */
+export function memoryUsage(bytes: number, limit: number): { label: string; over: boolean } {
   const over = bytes > limit;
   return { label: `${kb(bytes)} of ${kb(limit)}${over ? ", over the limit" : ""}`, over };
+}
+
+/** Why the backend would refuse this entry, or null when it's fine. */
+export function entryProblem(entry: Pick<MemoryDraft, "kind" | "project" | "text">, limit = ENTRY_LIMIT): string | null {
+  const length = [...entry.text.trim()].length;
+  if (!length) return "Write something or delete it.";
+  if (length > limit) return `Up to ${limit} characters; this is ${length}.`;
+  if (entry.kind === "project" && !(entry.project ?? "").trim()) return "Name the project.";
+  return null;
+}
+
+/** A chat message as a rule: trimmed and cut to the entry limit. */
+export function ruleText(message: string, limit = ENTRY_LIMIT): string {
+  const chars = [...message.trim()];
+  return chars.length > limit ? chars.slice(0, limit).join("").trimEnd() : chars.join("");
+}
+
+/** "Learned Nov 3, 2026 by Scribe", or "Added ... by you" for the user's own. */
+export function entryLabel(entry: Pick<MemoryEntry, "learnedOn" | "source">, agents: Agent[]): string {
+  const [year, month, day] = entry.learnedOn.split("-").map(Number);
+  const date = new Date(year, month - 1, day).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  if (entry.source === null) return `Added ${date} by you`;
+  return `Learned ${date} by ${agents.find((a) => a.id === entry.source)?.name ?? "a deleted familiar"}`;
 }
 
 /** "Last updated by Scribe 2 hours ago", or "you" when the user saved it. */

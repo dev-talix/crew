@@ -5,23 +5,26 @@ import Approvals from "./Approvals";
 import BotAvatar from "./BotAvatar";
 import Chat, { type ChatIntent } from "./Chat";
 import CommandPalette, { type PaletteActions } from "./CommandPalette";
+import Drafts from "./Drafts";
 import { createChatStore } from "./chatStore";
 import HomePage from "./HomePage";
+import HandoffsPage from "./Handoffs";
+import InboxPage, { InboxLink } from "./Inbox";
 import { MemorySheet } from "./MemoryEditor";
 import RoutinesPage from "./RoutinesPage";
 import { SettingsDialog } from "./SettingsPage";
 import WorkflowsPage, { type SpellIntent } from "./WorkflowsPage";
-import { api, errorText, onEvent, onMountAsync, PROVIDER_NAMES, subscribe, type Agent, type Coven, type Workflow } from "./api";
+import { api, errorText, onEvent, onMountAsync, PROVIDER_NAMES, subscribe, withAgent, type Agent, type Coven, type Workflow } from "./api";
 import { inkFor } from "./avatar";
 import { runningModelName } from "./models";
 import { createMoods } from "./moods";
-import { ClockIcon, GearIcon, HomeIcon, PlusIcon } from "./icons";
+import { ClockIcon, GearIcon, HomeIcon, PlusIcon, TalkIcon } from "./icons";
 import { Sheet } from "./ui";
 import { shownIcon } from "./themeStore";
 import { startUpdateChecks, updateCheck } from "./updateStore";
 import type { SettingsSection } from "./SettingsPage";
 
-type View = "home" | "routines" | "workflows" | "new" | { agent: string };
+type View = "home" | "inbox" | "handoffs" | "routines" | "workflows" | "new" | { agent: string };
 
 function NavItem(props: { label: string; icon: JSX.Element; active: boolean; onClick: () => void; shortcut?: string }) {
   return (
@@ -42,6 +45,12 @@ export default function App() {
   const [busy, setBusy] = createStore<Record<string, boolean>>({});
   const [unread, setUnread] = createStore<Record<string, boolean>>({});
   const [view, setView] = createSignal<View>("home");
+  // Bumped on every summon, so the form starts empty even when it's already open.
+  const [summonCount, setSummonCount] = createSignal(1);
+  const summon = () => {
+    setSummonCount((n) => n + 1);
+    setView("new");
+  };
   const [editing, setEditing] = createSignal(false);
   const [memoryOpen, setMemoryOpen] = createSignal(false);
   const [loaded, setLoaded] = createSignal(false);
@@ -104,7 +113,7 @@ export default function App() {
       setBusy((b) => {
         for (const id of running) b[id] = true;
       });
-      if (!list.length) setView("new");
+      if (!list.length) summon();
     } catch (e) {
       setLoadError(errorText(e));
     } finally {
@@ -153,7 +162,7 @@ export default function App() {
       setPalette((open) => !open);
     } else if (e.key === "n") {
       e.preventDefault();
-      setView("new");
+      summon();
     } else if (e.key === ",") {
       e.preventDefault();
       setSettings((open) => (open ? null : "general"));
@@ -170,9 +179,11 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  // A familiar saved while its Mac was offline opens later, so the list may already have it, newer.
   const created = (agent: Agent) => {
-    setAgents((list) => [...list, agent]);
+    setAgents((list) => withAgent(list, agent));
     openAgent(agent.id);
+    if (agent.setupPending) void api.listAgents().then(setAgents, () => {});
   };
 
   const replaceAgent = (agent: Agent) => setAgents((list) => list.map((a) => (a.id === agent.id ? agent : a)));
@@ -205,7 +216,7 @@ export default function App() {
     openRituals: () => away(() => setView("routines")),
     openHome: () => away(() => setView("home")),
     openSettings: (section) => setSettings(section),
-    summon: () => away(() => setView("new")),
+    summon: () => away(summon),
     newChat: (agentId) => away(() => openChatWith({ agentId, fresh: true })),
     openMessage: (hit) => away(() => openChatWith({ agentId: hit.agentId, chatId: hit.chatId, messageId: hit.messageId })),
   };
@@ -227,11 +238,13 @@ export default function App() {
         </div>
         <nav class="nav" aria-label="Sections">
           <NavItem label="Home" icon={<HomeIcon />} active={is("home")} onClick={() => setView("home")} />
+          <InboxLink active={is("inbox")} onClick={() => setView("inbox")} />
+          <NavItem label="Handoffs" icon={<TalkIcon />} active={is("handoffs")} onClick={() => setView("handoffs")} />
           <NavItem label="Rituals" icon={<ClockIcon />} active={is("routines")} onClick={() => setView("routines")} />
         </nav>
         <div class="sidebar-caption">
           <span>Familiars</span>
-          <button class="icon-button" aria-label="Summon a familiar" title="Summon a familiar (⌘N)" onClick={() => setView("new")}>
+          <button class="icon-button" aria-label="Summon a familiar" title="Summon a familiar (⌘N)" onClick={summon}>
             <PlusIcon />
           </button>
         </div>
@@ -339,8 +352,16 @@ export default function App() {
             </Match>
             <Match when={is("new")}>
               <div class="form-page" data-tauri-drag-region>
-                <AgentForm covens={covens()} onSaved={created} onCancel={agents().length ? () => setView("home") : undefined} />
+                <Show when={summonCount()} keyed>
+                  {(_count) => <AgentForm covens={covens()} onSaved={created} onCancel={agents().length ? () => setView("home") : undefined} />}
+                </Show>
               </div>
+            </Match>
+            <Match when={is("inbox")}>
+              <InboxPage agents={agents()} onOpenAgent={openAgent} />
+            </Match>
+            <Match when={is("handoffs")}>
+              <HandoffsPage agents={agents()} onOpenAgent={openAgent} />
             </Match>
             <Match when={is("routines")}>
               <RoutinesPage agents={agents()} onOpenAgent={openAgent} />
@@ -357,7 +378,7 @@ export default function App() {
                 busy={busy}
                 mood={moodOf}
                 onOpenAgent={openAgent}
-                onNewAgent={() => setView("new")}
+                onNewAgent={summon}
                 onOpenRoutines={() => setView("routines")}
               />
             </Match>
@@ -377,6 +398,7 @@ export default function App() {
         />
       </Show>
       <Approvals agents={agents()} />
+      <Drafts agents={agents()} />
     </div>
   );
 }

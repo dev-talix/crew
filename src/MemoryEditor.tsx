@@ -1,25 +1,60 @@
-import { createSignal, Show } from "solid-js";
-import { api, errorText, onEvent, onMountAsync, type Agent, type Coven } from "./api";
-import { lastUpdated, MEMORY_LIMIT, memoryUsage, type Memory, type MemoryScope } from "./memory";
+import { createSignal, For, onCleanup, Show } from "solid-js";
+import { api, errorText, onEvent, onMountAsync, type Agent, type Coven, type Message } from "./api";
+import { CheckIcon, MemoryIcon, PlusIcon, TrashIcon } from "./icons";
+import {
+  ENTRY_LIMIT,
+  entriesSize,
+  entryChanged,
+  entryLabel,
+  entryProblem,
+  lastUpdated,
+  MEMORY_KINDS,
+  MEMORY_LIMIT,
+  memoryChanges,
+  memoryUsage,
+  ruleText,
+  type EditedEntry,
+  type Memory,
+  type MemoryEntry,
+  type MemoryKind,
+  type MemoryScope,
+} from "./memory";
 import { Sheet } from "./ui";
 import "./memory.css";
 
+/** An entry being edited. `key` tells rows apart. */
+interface Row extends EditedEntry {
+  key: number;
+  kind: MemoryKind;
+}
+
+let nextKey = 0;
+const toRow = (entry: MemoryEntry): Row => ({ key: nextKey++, saved: entry, kind: entry.kind, project: entry.project ?? "", text: entry.text });
+
 /**
- * Loads a memory and keeps an edited copy. A change a familiar makes while it's open shows up,
- * unless the user has started editing. With no id yet (a coven being created) it starts empty.
+ * Loads a memory and keeps an edited copy of its entries. A change a familiar makes while it's open
+ * shows up, unless the user has started editing; saving then keeps the familiar's change, since it
+ * sends only the entries the user changed and the ones they deleted. With no id yet (a coven being
+ * created) it starts empty.
  */
 export function createMemory(scope: MemoryScope, id: () => string | null) {
   const [saved, setSaved] = createSignal<Memory | null>(null);
-  const [text, setText] = createSignal("");
+  const [rows, setRows] = createSignal<Row[]>([]);
+  const [deleted, setDeleted] = createSignal<string[]>([]);
   const [error, setError] = createSignal("");
+  const dirty = () => deleted().length > 0 || rows().some(entryChanged);
+  const reset = (memory: Memory) => {
+    setSaved(memory);
+    setRows(memory.entries.map(toRow));
+    setDeleted([]);
+  };
   const load = async () => {
     const current = id();
     if (!current) return;
     try {
       const memory = await api.getMemory(scope, current);
-      const untouched = text() === (saved()?.text ?? "");
-      setSaved(memory);
-      if (untouched) setText(memory.text);
+      if (dirty()) setSaved(memory);
+      else reset(memory);
     } catch (err) {
       setError(errorText(err));
     }
@@ -28,46 +63,109 @@ export function createMemory(scope: MemoryScope, id: () => string | null) {
     keep(await onEvent("memory_changed", () => void load()));
     await load();
   });
+  const update = (key: number, change: Partial<Row>) => setRows((list) => list.map((r) => (r.key === key ? { ...r, ...change } : r)));
   return {
     saved,
-    text,
-    setText,
+    rows,
     error,
-    dirty: () => text() !== (saved()?.text ?? ""),
-    usage: () => memoryUsage(text(), saved()?.limit ?? MEMORY_LIMIT),
-    /** Saves the edited text, to `target` when the owner was only just created. */
+    dirty,
+    add: (kind: MemoryKind) => setRows((list) => [...list, { key: nextKey++, kind, project: "", text: "" }]),
+    update,
+    remove: (key: number) => {
+      const id = rows().find((r) => r.key === key)?.saved?.id;
+      if (id) setDeleted((ids) => [...ids, id]);
+      setRows((list) => list.filter((r) => r.key !== key));
+    },
+    usage: () => memoryUsage(entriesSize(rows()), saved()?.limit ?? MEMORY_LIMIT),
+    /** Whether every entry would pass the backend's checks. */
+    valid: () => rows().every((r) => !entryProblem(r, saved()?.entryLimit ?? ENTRY_LIMIT)),
+    /** Saves the edits, to `target` when the owner was only just created. */
     save: async (target = id()) => {
       if (!target) return;
-      const memory = await api.saveMemory(scope, target, text());
-      setSaved(memory);
-      setText(memory.text);
+      const { entries, removed } = memoryChanges(rows(), deleted());
+      reset(await api.saveMemory(scope, target, entries, removed));
     },
   };
 }
 
 export type MemoryState = ReturnType<typeof createMemory>;
 
-/** The memory textarea with its size against the limit and who last changed it. */
-export function MemoryField(props: { memory: MemoryState; agents: Agent[]; label: string; hint: string; rows?: number }) {
+function EntryRow(props: { row: Row; memory: MemoryState; agents: Agent[] }) {
+  const problem = () => (props.row.text || props.row.saved ? entryProblem(props.row, props.memory.saved()?.entryLimit ?? ENTRY_LIMIT) : null);
+  return (
+    <li class="memory-entry">
+      <textarea
+        class="memory-entry-text"
+        rows={2}
+        spellcheck={false}
+        value={props.row.text}
+        aria-label="Entry"
+        aria-invalid={problem() ? "true" : "false"}
+        placeholder={props.row.kind === "rule" ? "Always answer in British English" : props.row.kind === "fact" ? "Lives in Lisbon" : "The staging deploy runs on Fridays"}
+        onInput={(e) => props.memory.update(props.row.key, { text: e.currentTarget.value })}
+      />
+      <div class="memory-entry-meta">
+        <select aria-label="Kind" value={props.row.kind} onChange={(e) => props.memory.update(props.row.key, { kind: e.currentTarget.value as MemoryKind })}>
+          <option value="rule">Rule</option>
+          <option value="fact">Fact</option>
+          <option value="project">Project</option>
+        </select>
+        <Show when={props.row.kind === "project"}>
+          <input
+            class="memory-entry-project"
+            aria-label="Project"
+            maxlength={60}
+            placeholder="Project name"
+            value={props.row.project}
+            onInput={(e) => props.memory.update(props.row.key, { project: e.currentTarget.value })}
+          />
+        </Show>
+        <span class="memory-entry-date">{props.row.saved ? entryLabel(props.row.saved, props.agents) : "New"}</span>
+        <span class="spacer" />
+        <Show when={problem()}>{(why) => <span class="memory-entry-problem">{why()}</span>}</Show>
+        <button type="button" class="mini-button" aria-label="Delete entry" title="Delete entry" onClick={() => props.memory.remove(props.row.key)}>
+          <TrashIcon />
+        </button>
+      </div>
+    </li>
+  );
+}
+
+/** The memory's entries in Rules, Facts, and Projects, with its size against the limit and who last changed it. */
+export function MemoryField(props: { memory: MemoryState; agents: Agent[]; label: string; hint: string }) {
   const usage = () => props.memory.usage();
   return (
-    <label class="field memory-field">
+    <div class="field memory-field">
       <span>{props.label}</span>
-      <textarea
-        class="memory-text"
-        rows={props.rows ?? 14}
-        spellcheck={false}
-        value={props.memory.text()}
-        placeholder={"- Prefers short answers\n- The staging deploy runs on Fridays"}
-        aria-invalid={usage().over ? "true" : "false"}
-        onInput={(e) => props.memory.setText(e.currentTarget.value)}
-      />
+      <For each={MEMORY_KINDS}>
+        {(section) => {
+          const rows = () => props.memory.rows().filter((r) => r.kind === section.kind);
+          return (
+            <section class="memory-section" aria-label={section.title}>
+              <header class="memory-section-head">
+                <h2>{section.title}</h2>
+                <button type="button" class="ghost memory-add" onClick={() => props.memory.add(section.kind)}>
+                  <PlusIcon />
+                  Add
+                </button>
+              </header>
+              <Show when={rows().length} fallback={<p class="hint">{section.empty}</p>}>
+                <ul class="memory-entries">
+                  <For each={rows()} keyed={(r: Row) => r.key}>
+                    {(row) => <EntryRow row={row()} memory={props.memory} agents={props.agents} />}
+                  </For>
+                </ul>
+              </Show>
+            </section>
+          );
+        }}
+      </For>
       <span class="memory-meta">
         <span>{props.memory.saved() ? lastUpdated(props.memory.saved()!, props.agents) : "Nothing saved yet"}</span>
         <span class={["memory-usage", { danger: usage().over }]}>{usage().label}</span>
       </span>
       <p class="hint">{props.hint}</p>
-    </label>
+    </div>
   );
 }
 
@@ -99,8 +197,8 @@ export function MemorySheet(props: { agent: Agent; agents: Agent[]; covens: Cove
         <MemoryField
           memory={memory}
           agents={props.agents}
-          label="Notes"
-          hint={`${props.agent.name} reads this at the start of every new chat and adds to it as it learns. Edits reach it in its next new chat.`}
+          label="What it remembers"
+          hint={`${props.agent.name} reads this at the start of every new chat, rules first, and adds to it as it learns. Edits reach it in its next new chat.`}
         />
         <Show when={coven()}>
           {(c) => <p class="hint">It also reads the memory of the {c().name} coven. Edit that from Home, with the coven's Edit button.</p>}
@@ -115,11 +213,34 @@ export function MemorySheet(props: { agent: Agent; agents: Agent[]; covens: Cove
           <button type="button" class="ghost" onClick={props.onClose}>
             Cancel
           </button>
-          <button class="primary" type="submit" disabled={saving() || !memory.dirty() || memory.usage().over}>
+          <button class="primary" type="submit" disabled={saving() || !memory.dirty() || memory.usage().over || !memory.valid()}>
             Save memory
           </button>
         </div>
       </form>
     </Sheet>
+  );
+}
+
+/** "Make this a rule" on a chat message: saves its text as a rule in the familiar's memory. */
+export function RuleButton(props: { message: Message }) {
+  const [state, setState] = createSignal<"idle" | "saved" | string>("idle");
+  let timer: number | undefined;
+  onCleanup(() => clearTimeout(timer));
+  const save = async () => {
+    try {
+      await api.addMemory("familiar", props.message.agentId, "rule", null, ruleText(props.message.text));
+      setState("saved");
+    } catch (err) {
+      setState(errorText(err));
+    }
+    clearTimeout(timer);
+    timer = window.setTimeout(() => setState("idle"), 2500);
+  };
+  const label = () => (state() === "idle" ? "Make this a rule" : state() === "saved" ? "Saved as a rule" : state());
+  return (
+    <button type="button" class="mini-button" aria-label={label()} title={label()} onClick={() => void save()}>
+      {state() === "saved" ? <CheckIcon /> : <MemoryIcon />}
+    </button>
   );
 }

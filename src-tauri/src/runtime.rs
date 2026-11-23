@@ -45,6 +45,54 @@ struct Job {
     reply: Option<Reply>,
 }
 
+/// Saves `text` as a message from `source` in `chat`, or in the familiar's current chat when `chat` is
+/// none or was deleted, for the person to see. It also queues the text for the familiar's next turn in
+/// that chat, since a stored message never reaches the CLI on its own. For results that come back while
+/// the familiar can't take a turn there.
+pub fn hold(db: &Db, agent_id: &str, chat: Option<&str>, text: &str, source: &str) -> Result<Message, String> {
+    let home = chat.and_then(|chat| db.insert_message_in(chat, agent_id, "user", text, "done", Some(source)).ok().map(|row| (row, chat.to_string())));
+    let (row, chat) = match home {
+        Some((row, chat)) => (row, Some(chat)),
+        None => (db.insert_message_from(agent_id, "user", text, "done", Some(source))?, crate::chats::current(db, agent_id)?),
+    };
+    db.with(|c| {
+        c.execute(
+            "INSERT INTO pending_notes (agent_id, chat_id, source, text, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![agent_id, chat, source, text, crate::db::now_ms()],
+        )
+    })?;
+    Ok(row)
+}
+
+/// What goes before the familiar's next turn in its current chat: the person's ledger edits, then the
+/// held messages for that chat it hasn't seen. Also returns their ids, to clear once the turn starts.
+fn turn_notes(db: &Db, agent: &Agent) -> (Vec<String>, Vec<i64>) {
+    // A resumed chat keeps its old system prompt, so pass on the person's ledger edits here.
+    let mut notes: Vec<String> = crate::ledger::turn_note(db, agent).into_iter().collect();
+    let chat = crate::chats::current(db, &agent.id).ok().flatten();
+    let held: Vec<(i64, String, String)> = db
+        .with(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT id, source, text FROM pending_notes WHERE agent_id = ?1 AND (chat_id IS ?2 OR chat_id IS NULL) ORDER BY id",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![agent.id, chat], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect()
+        })
+        .unwrap_or_default();
+    let ids = held.iter().map(|(id, ..)| *id).collect();
+    notes.extend(held.into_iter().map(|(_, source, text)| {
+        format!("(Grimoire: this message, {source}, came in while you couldn't take a turn.)\n{text}")
+    }));
+    (notes, ids)
+}
+
+fn clear_notes(db: &Db, ids: &[i64]) {
+    let _ = db.with(|c| {
+        let mut stmt = c.prepare_cached("DELETE FROM pending_notes WHERE id = ?1")?;
+        ids.iter().try_for_each(|id| stmt.execute(rusqlite::params![id]).map(|_| ()))
+    });
+}
+
 pub const RITUAL_SOURCE: &str = "Ritual: ";
 pub const SPELL_SOURCE: &str = "Spell: ";
 
@@ -61,12 +109,16 @@ pub fn origin_of(source: Option<&str>) -> &'static str {
 struct AgentState {
     busy: bool,
     queue: VecDeque<Job>,
+    /// Set by a stop. A turn still checking its Mac sees it before it starts the CLI.
+    stop_requested: bool,
 }
 
 pub struct Runtime {
     db: Arc<Db>,
     app: AppHandle,
     codex: Arc<Codex>,
+    /// Codex app servers on other Macs, one per host and workspace, since each runs in its workspace.
+    remote_codex: Mutex<HashMap<(String, String), Arc<Codex>>>,
     claude: Claude,
     agents: Mutex<HashMap<String, AgentState>>,
     /// One turn at a time in each side conversation, by lane key.
@@ -106,10 +158,26 @@ impl Runtime {
             db,
             app,
             codex: Arc::new(Codex::default()),
+            remote_codex: Mutex::new(HashMap::new()),
             claude: Claude::default(),
             agents: Mutex::new(HashMap::new()),
             sides: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The Codex app server a familiar's turns go to: the local one, or one on its host.
+    fn codex_for(&self, agent: &Agent) -> Arc<Codex> {
+        let Some(host) = &agent.host else { return self.codex.clone() };
+        let Ok(mut remote) = self.remote_codex.lock() else { return Arc::new(Codex::on(host)) };
+        remote.entry((host.clone(), agent.workspace.clone())).or_insert_with(|| Arc::new(Codex::on(host))).clone()
+    }
+
+    fn all_codex(&self) -> Vec<Arc<Codex>> {
+        let mut all = vec![self.codex.clone()];
+        if let Ok(remote) = self.remote_codex.lock() {
+            all.extend(remote.values().cloned());
+        }
+        all
     }
 
     pub fn busy_agents(&self) -> Vec<String> {
@@ -149,8 +217,9 @@ impl Runtime {
         staged: Staged,
         reply: Option<Reply>,
     ) -> Result<Message, String> {
-        if self.db.get_agent(agent_id)?.is_none() {
-            return Err("That familiar no longer exists.".into());
+        let agent = self.db.get_agent(agent_id)?.ok_or("That familiar no longer exists.")?;
+        if agent.host.is_some() && !staged.is_empty() {
+            return Err("Attachments can't reach a familiar on another Mac yet. Send the message without them.".into());
         }
         if let Err(reason) = crate::budgets::check_turn(&self.db, agent_id) {
             // Spells and rituals have no composer to show the refusal, so it goes in the chat.
@@ -183,7 +252,13 @@ impl Runtime {
     pub async fn stop(self: &Arc<Self>, agent_id: &str) -> Result<(), String> {
         let cancelled: Vec<Job> = {
             let mut agents = self.agents.lock().map_err(|_| "runtime state poisoned")?;
-            agents.get_mut(agent_id).map(|s| s.queue.drain(..).collect()).unwrap_or_default()
+            agents
+                .get_mut(agent_id)
+                .map(|s| {
+                    s.stop_requested = s.busy;
+                    s.queue.drain(..).collect()
+                })
+                .unwrap_or_default()
         };
         for job in cancelled {
             self.update_status(job.message_id, agent_id, "cancelled");
@@ -191,14 +266,19 @@ impl Runtime {
                 let _ = reply.send(TurnOutcome::Stopped);
             }
         }
-        match self.db.get_agent(agent_id)?.map(|a| a.provider) {
-            Some(Provider::Codex) => self.codex.stop(agent_id).await,
-            Some(Provider::Claude) => {
+        match self.db.get_agent(agent_id)? {
+            Some(agent) if agent.provider == Provider::Codex => self.codex_for(&agent).stop(agent_id).await,
+            Some(_) => {
                 self.claude.stop(agent_id).await;
                 Ok(())
             }
             None => Ok(()),
         }
+    }
+
+    /// Clears a pending stop for `agent_id`, returning whether there was one.
+    fn take_stop(&self, agent_id: &str) -> bool {
+        self.agents.lock().is_ok_and(|mut a| a.get_mut(agent_id).is_some_and(|s| std::mem::take(&mut s.stop_requested)))
     }
 
     pub fn is_busy(&self, agent_id: &str) -> bool {
@@ -222,7 +302,9 @@ impl Runtime {
     }
 
     pub async fn settings_changed(&self, agent_id: &str) {
-        self.codex.reload_thread(agent_id).await;
+        for codex in self.all_codex() {
+            codex.reload_thread(agent_id).await;
+        }
     }
 
     pub fn claude_billing_changed(&self) {
@@ -230,7 +312,7 @@ impl Runtime {
     }
 
     pub fn reset_session(&self, agent_id: &str) {
-        self.codex.forget(agent_id);
+        self.all_codex().iter().for_each(|codex| codex.forget(agent_id));
         self.claude.forget(agent_id);
     }
 
@@ -239,8 +321,10 @@ impl Runtime {
         self.reset_session(agent_id);
         // Its side conversations go with it, so stop any turn still running in one.
         for key in crate::side::lanes_of(&self.db, agent_id)? {
-            let _ = self.codex.stop(&key).await;
-            self.codex.forget(&key);
+            for codex in self.all_codex() {
+                let _ = codex.stop(&key).await;
+                codex.forget(&key);
+            }
             self.claude.forget(&key);
         }
         if let Ok(mut agents) = self.agents.lock() {
@@ -291,9 +375,36 @@ impl Runtime {
         }
     }
 
+    /// Brings a result back to a familiar as a message that starts its next turn, when the person is
+    /// still in the chat it came from (`home`). Otherwise, or when the turn can't start, it waits in
+    /// `home` and reaches the familiar with its next turn.
+    pub fn deliver(self: &Arc<Self>, agent_id: &str, home: Option<String>, text: String, source: &str) {
+        let still_home = crate::chats::current(&self.db, agent_id).is_ok_and(|now| now == home);
+        if still_home && self.send(agent_id, text.clone(), Some(source)).is_ok() {
+            return;
+        }
+        if let Ok(row) = hold(&self.db, agent_id, home.as_deref(), &text, source) {
+            if still_home {
+                self.app.message(&row);
+            }
+        }
+    }
+
     /// Runs one exchange in a side conversation: `asker`'s message goes to the familiar whose hidden
     /// chat it is, on that chat's own session, alongside whatever it's doing in its main chat.
-    pub async fn side_turn(self: &Arc<Self>, chat_id: &str, asker: &str, message: &str) -> TurnOutcome {
+    /// `handoff` is the request's row in the handoffs list, moved on as the exchange goes.
+    pub async fn side_turn(self: &Arc<Self>, chat_id: &str, handoff: i64, asker: &str, message: &str) -> TurnOutcome {
+        let outcome = self.side_exchange(chat_id, handoff, asker, message).await;
+        self.move_handoff(handoff, crate::handoffs::Status::of(&outcome));
+        outcome
+    }
+
+    fn move_handoff(&self, id: i64, status: crate::handoffs::Status) {
+        let _ = crate::handoffs::set(&self.db, id, status);
+        let _ = self.app.emit(crate::handoffs::CHANGED, ());
+    }
+
+    async fn side_exchange(self: &Arc<Self>, chat_id: &str, handoff: i64, asker: &str, message: &str) -> TurnOutcome {
         let Ok(Some(chat)) = crate::side::get(&self.db, chat_id) else {
             return TurnOutcome::Failed("That conversation was deleted.".into());
         };
@@ -319,17 +430,73 @@ impl Runtime {
         if let Err(reason) = crate::budgets::check_turn(&self.db, &agent.id) {
             return writer.fail(&reason);
         }
+        if let Err(outcome) = gate(&mut writer, &self.db, &agent, crate::remote::quick_setup).await {
+            return outcome;
+        }
         let lane = Lane { key, session: lane_session(session, agent.session_id.clone()) };
         let prompt = crate::side::framed(asker, message);
         let (tx, rx) = mpsc::unbounded_channel();
         let started = match agent.provider {
-            Provider::Codex => self.codex.start_turn_in(&agent, Some(&lane), &prompt, &[], tx).await,
+            Provider::Codex => self.codex_for(&agent).start_turn_in(&agent, Some(&lane), &prompt, &[], tx).await,
             Provider::Claude => self.claude.start_turn_in(&agent, Some(&lane), &prompt, &[], tx).await,
         };
         match started {
-            Ok(()) => stream_turn(&mut writer, rx).await,
-            Err(e) => writer.fail(&e),
+            Ok(()) => {
+                self.move_handoff(handoff, crate::handoffs::Status::Accepted);
+                stream_turn(&mut writer, rx).await
+            }
+            Err(e) => writer.fail_explained(e).await,
         }
+    }
+
+    /// Runs a background helper's one turn in its hidden chat (see `helpers`): `task` is shown in the
+    /// transcript and `prompt` goes to the CLI, on a fresh session in the familiar's own settings.
+    pub async fn helper_turn(self: &Arc<Self>, chat_id: &str, task: &str, prompt: &str, startup: &crate::helpers::Startup) -> TurnOutcome {
+        let Ok(Some(chat)) = crate::side::get(&self.db, chat_id) else {
+            return TurnOutcome::Failed("The helper's chat was deleted.".into());
+        };
+        let agent = match self.db.get_agent(&chat.target_id) {
+            Ok(Some(agent)) => agent,
+            _ => return TurnOutcome::Failed("That familiar no longer exists.".into()),
+        };
+        let sink = SideSink { app: self.app.clone(), chat_id: chat.id.clone() };
+        match self.db.insert_message_in(&chat.id, &agent.id, "user", task, "done", Some(&format!("From {}", agent.name))) {
+            Ok(row) => sink.message(&row),
+            Err(e) => return TurnOutcome::Failed(e),
+        }
+        let mut writer = TurnWriter::for_side(&self.db, &sink, &agent, &chat.id, None);
+        if let Err(reason) = crate::budgets::check_turn(&self.db, &agent.id) {
+            return writer.fail(&reason);
+        }
+        if let Err(outcome) = gate(&mut writer, &self.db, &agent, crate::remote::quick_setup).await {
+            return outcome;
+        }
+        let lane = Lane { key: crate::side::lane_key(&agent.id, &chat.id), session: LaneSession::Fresh };
+        if !startup.begin() {
+            return TurnOutcome::Stopped;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        let started = match agent.provider {
+            Provider::Codex => self.codex.start_turn_in(&agent, Some(&lane), prompt, &[], tx).await,
+            Provider::Claude => self.claude.start_turn_in(&agent, Some(&lane), prompt, &[], tx).await,
+        };
+        startup.started();
+        match started {
+            Ok(()) => stream_turn(&mut writer, rx).await,
+            Err(e) => writer.fail_explained(e).await,
+        }
+    }
+
+    /// Interrupts whatever turn runs under a lane key, on either provider.
+    pub async fn stop_lane(&self, key: &str) {
+        let _ = self.codex.stop(key).await;
+        self.claude.stop(key).await;
+    }
+
+    /// Lets go of a lane's CLI process or thread once nothing will run in it again.
+    pub fn forget_lane(&self, key: &str) {
+        self.codex.forget(key);
+        self.claude.forget(key);
     }
 
     async fn run_turn(self: &Arc<Self>, agent_id: &str, text: &str, source: Option<&str>, attachments: &[Attachment]) -> TurnOutcome {
@@ -339,20 +506,45 @@ impl Runtime {
         };
         let mut writer = TurnWriter::new(&self.db, &self.app, &agent);
         writer.origin = origin_of(source);
-        let input = match crate::attachments::turn_input(std::path::Path::new(&agent.workspace), text, attachments) {
+        self.take_stop(agent_id);
+        if let Err(outcome) = gate(&mut writer, &self.db, &agent, crate::remote::quick_setup).await {
+            return outcome;
+        }
+        // A stop that came while the gate checked the other Mac found no CLI turn to interrupt.
+        if self.take_stop(agent_id) {
+            return TurnOutcome::Stopped;
+        }
+        let mut input = match crate::attachments::turn_input(std::path::Path::new(&agent.workspace), text, attachments) {
             Ok(input) => input,
             Err(e) => return writer.fail(&e),
         };
+        let (notes, held) = turn_notes(&self.db, &agent);
+        if !notes.is_empty() {
+            input.text = format!("{}\n\n{}", notes.join("\n\n"), input.text);
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         let started = match agent.provider {
-            Provider::Codex => self.codex.start_turn(&agent, &input.text, &input.images, tx).await,
+            Provider::Codex => self.codex_for(&agent).start_turn(&agent, &input.text, &input.images, tx).await,
             Provider::Claude => self.claude.start_turn(&agent, &input.text, &input.images, tx).await,
         };
         match started {
-            Ok(()) => stream_turn(&mut writer, rx).await,
-            Err(e) => writer.fail(&e),
+            Ok(()) => {
+                clear_notes(&self.db, &held);
+                stream_turn(&mut writer, rx).await
+            }
+            Err(e) => writer.fail_explained(e).await,
         }
     }
+}
+
+/// Stops a turn before anything spawns when the familiar's Mac can't be reached, with a plain error
+/// row in the chat. A familiar saved while its Mac was offline finishes its setup here first.
+async fn gate<F, Fut>(writer: &mut TurnWriter<'_>, db: &Db, agent: &Agent, setup: F) -> Result<(), TurnOutcome>
+where
+    F: FnOnce(String, String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), crate::remote::SshError>>,
+{
+    crate::remote::ready(db, agent, setup, writer.probe).await.map_err(|reason| writer.fail(&reason))
 }
 
 /// A side conversation carries on its own session, or starts from a copy of the familiar's main one.
@@ -390,8 +582,8 @@ pub async fn stream_turn(writer: &mut TurnWriter<'_>, mut rx: mpsc::UnboundedRec
             }
             Some(ProviderEvent::Done) => return writer.close("done"),
             Some(ProviderEvent::Stopped) => return writer.close("stopped"),
-            Some(ProviderEvent::Failed(reason)) => return writer.fail(&reason),
-            None => return writer.fail("The familiar stopped without finishing its reply."),
+            Some(ProviderEvent::Failed(reason)) => return writer.fail_explained(reason).await,
+            None => return writer.fail_explained("The familiar stopped without finishing its reply.".into()).await,
         }
     }
 }
@@ -416,13 +608,22 @@ pub struct TurnWriter<'a> {
     active_model: Option<String>,
     segment: Option<Segment>,
     last_text: String,
+    /// Whether the latest row this turn wrote is a reply, not a tool.
+    replied: bool,
     provider: Provider,
     /// "you", "ritual", or "spell".
     pub origin: &'static str,
     usage: Option<(u64, u64)>,
     /// The side conversation this turn writes to, instead of the familiar's current chat.
     chat_id: Option<String>,
+    /// The familiar's name and host when it runs on another Mac, to explain an ssh failure plainly.
+    remote: Option<(String, String)>,
+    /// How a remote familiar's turn checks whether its Mac answers. `remote::probe` outside tests.
+    probe: crate::remote::Probe,
 }
+
+/// The row a side conversation gets when a turn finishes without a reply after its last tool.
+const NO_REPLY: &str = "(no reply)";
 
 /// The settings key for Claude's latest plan limit snapshot.
 pub const CLAUDE_LIMITS: &str = "claude_limits";
@@ -437,10 +638,13 @@ impl<'a> TurnWriter<'a> {
             active_model: agent.active_model.clone(),
             segment: None,
             last_text: String::new(),
+            replied: false,
             provider: agent.provider.clone(),
             origin: "you",
             usage: None,
             chat_id: None,
+            remote: agent.host.clone().map(|host| (agent.name.clone(), host)),
+            probe: crate::remote::probe,
         }
     }
 
@@ -501,11 +705,13 @@ impl<'a> TurnWriter<'a> {
             let _ = self.db.update_message(segment.message.id, &segment.message.text, status);
             self.sink.message(&segment.message);
             self.last_text = segment.message.text;
+            self.replied = true;
         }
     }
 
     fn tool(&mut self, label: &str) {
         self.end_segment("done");
+        self.replied = false;
         // An empty label is a tool that adds its own row, like asking another familiar.
         if label.is_empty() {
             return;
@@ -535,7 +741,16 @@ impl<'a> TurnWriter<'a> {
 
     fn close(&mut self, status: &str) -> TurnOutcome {
         self.end_segment(status);
+        // A side conversation shows a turn that ended after a tool, or with no text at all, as finished.
+        if status == "done" && self.chat_id.is_some() && !self.replied {
+            if let Ok(message) = self.insert("assistant", NO_REPLY, "done") {
+                self.sink.message(&message);
+            }
+        }
         self.record_usage();
+        if let Some((_, host)) = &self.remote {
+            crate::remote::set_offline(host, false);
+        }
         if status == "stopped" {
             TurnOutcome::Stopped
         } else {
@@ -543,13 +758,24 @@ impl<'a> TurnWriter<'a> {
         }
     }
 
+    /// `fail` for a provider's own failure. On another Mac, a lost connection reads as the plain
+    /// offline message, not what ssh printed.
+    async fn fail_explained(&mut self, reason: String) -> TurnOutcome {
+        let reason = match &self.remote {
+            Some((name, host)) => crate::remote::explain(name, host, reason, self.probe).await,
+            None => reason,
+        };
+        self.fail(&reason)
+    }
+
     fn fail(&mut self, reason: &str) -> TurnOutcome {
         self.end_segment("done");
         self.record_usage();
-        if let Ok(message) = self.insert("error", reason.trim(), "done") {
+        let reason = reason.trim().to_string();
+        if let Ok(message) = self.insert("error", &reason, "done") {
             self.sink.message(&message);
         }
-        TurnOutcome::Failed(reason.trim().to_string())
+        TurnOutcome::Failed(reason)
     }
 }
 
@@ -612,6 +838,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: now_ms(),
         };
         db.insert_agent(&agent).unwrap();
@@ -680,6 +907,65 @@ mod tests {
         assert_eq!(crate::side::get(&db, &side.id).unwrap().unwrap().session_id.as_deref(), Some("side-session"));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_side_turn_that_ends_without_a_reply_says_so() {
+        let (db, agent) = setup();
+        let side = crate::side::create(&db, "a", "a", "hello").unwrap();
+        let sink = Recorder::default();
+        let rows = |events: Vec<ProviderEvent>, chat: Option<&str>| {
+            let (tx, rx) = mpsc::unbounded_channel();
+            for event in events {
+                tx.send(event).unwrap();
+            }
+            let mut writer = match chat {
+                Some(chat) => TurnWriter::for_side(&db, &sink, &agent, chat, None),
+                None => TurnWriter::new(&db, &sink, &agent),
+            };
+            async move { stream_turn(&mut writer, rx).await }
+        };
+        assert_eq!(rows(vec![ProviderEvent::Done], Some(&side.id)).await, TurnOutcome::Done(String::new()));
+        assert_eq!(rows(vec![ProviderEvent::Tool("$ ls".into()), ProviderEvent::Done], Some(&side.id)).await, TurnOutcome::Done(String::new()));
+        let got: Vec<(String, String, String)> = crate::side::messages(&db, &side.id).unwrap().into_iter().map(|m| (m.role, m.text, m.status)).collect();
+        let row = |role: &str, text: &str| (role.to_string(), text.to_string(), "done".to_string());
+        assert_eq!(got, [row("assistant", NO_REPLY), row("tool", "$ ls"), row("assistant", NO_REPLY)]);
+        rows(vec![ProviderEvent::Done], None).await;
+        assert!(db.list_messages("a", None, 10).unwrap().is_empty(), "the main chat gets no placeholder");
+    }
+
+    #[test]
+    fn held_messages_reach_the_next_turn_once() {
+        let (db, agent) = setup();
+        assert_eq!(turn_notes(&db, &agent), (vec![], vec![]));
+        let row = hold(&db, "a", None, "Scribe replied to your message:\n\nDone.", "Reply from Scribe").unwrap();
+        assert_eq!((row.role.as_str(), row.source.as_deref()), ("user", Some("Reply from Scribe")), "the person sees it");
+        hold(&db, "a", None, "Helper tests finished.", "Helper tests").unwrap();
+        let (notes, held) = turn_notes(&db, &agent);
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("Reply from Scribe") && notes[0].ends_with("Done."), "{}", notes[0]);
+        assert!(notes[1].ends_with("Helper tests finished."), "{}", notes[1]);
+        // A turn that fails to start leaves them for the next one; one that starts clears them.
+        assert_eq!(turn_notes(&db, &agent).0, notes);
+        clear_notes(&db, &held);
+        assert_eq!(turn_notes(&db, &agent), (vec![], vec![]));
+    }
+
+    #[test]
+    fn held_messages_wait_for_their_own_chat() {
+        let (db, agent) = setup();
+        let first = crate::chats::start(&db, "a").unwrap().id;
+        hold(&db, "a", Some(&first), "Reply for the first chat.", "Reply from Scribe").unwrap();
+        let second = crate::chats::start(&db, "a").unwrap().id;
+        assert!(turn_notes(&db, &agent).0.is_empty(), "a turn in another chat doesn't take it");
+        crate::chats::open(&db, "a", &first).unwrap();
+        assert_eq!(turn_notes(&db, &agent).0.len(), 1, "it waits for the first chat");
+        // A deleted home chat sends it to the current chat instead of losing it.
+        crate::chats::open(&db, "a", &second).unwrap();
+        crate::chats::delete(&db, &first).unwrap();
+        hold(&db, "a", Some(&first), "Reply after the chat was deleted.", "Reply from Scribe").unwrap();
+        let notes = turn_notes(&db, &agent).0;
+        assert!(notes.len() == 1 && notes[0].ends_with("Reply after the chat was deleted."), "{notes:?}");
+    }
+
     #[test]
     fn side_conversations_fork_the_main_session_once() {
         assert_eq!(lane_session(None, Some("m".into())), LaneSession::Fork("m".into()));
@@ -726,6 +1012,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: now_ms(),
         };
         db.insert_agent(&agent).unwrap();
@@ -790,6 +1077,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: now_ms(),
         };
         db.insert_agent(&agent).unwrap();
@@ -840,5 +1128,60 @@ mod tests {
         assert_eq!(saved.len(), 2);
         assert_eq!((saved[0].text.as_str(), saved[0].status.as_str()), ("partial", "done"));
         assert_eq!(saved[1].role, "error");
+    }
+
+    #[tokio::test]
+    async fn a_turn_for_an_offline_familiar_says_so_plainly() {
+        let (db, local) = setup();
+        let agent = Agent { id: "r".into(), host: Some("gate-test.local".into()), workspace: "~/w".into(), ..local };
+        db.insert_agent(&agent).unwrap();
+        db.set_setup_pending("r", true).unwrap();
+        let sink = Recorder::default();
+        let mut writer = TurnWriter::new(&db, &sink, &agent);
+        let gated = gate(&mut writer, &db, &agent, |_, _| async { Err(crate::remote::SshError::Offline) }).await;
+        let expected = "Ada runs on gate-test.local, and that Mac is offline. Grimoire will finish setting it up when it connects.";
+        assert_eq!(gated, Err(TurnOutcome::Failed(expected.into())), "the turn stops before anything spawns");
+        let rows: Vec<(String, String)> = db.list_messages("r", None, 10).unwrap().into_iter().map(|m| (m.role, m.text)).collect();
+        assert_eq!(rows, [("error".to_string(), expected.to_string())]);
+        assert_eq!(sink.messages.lock().unwrap().len(), 1, "the chat shows it");
+
+        // ssh failing once the CLI starts is explained the same way, without the raw ssh line.
+        crate::remote::set_offline("gate-test.local", false);
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(ProviderEvent::Failed("ssh: connect to host gate-test.local port 22: Operation timed out".into())).unwrap();
+        let outcome = stream_turn(&mut TurnWriter::new(&db, &sink, &agent), rx).await;
+        let later = "Ada runs on gate-test.local, and that Mac is offline. Try again when it's back.";
+        assert_eq!(outcome, TurnOutcome::Failed(later.into()));
+        assert!(crate::remote::is_offline("gate-test.local"));
+
+        fn down(_: String) -> crate::remote::ProbeFuture {
+            Box::pin(async { Err(crate::remote::SshError::Offline) })
+        }
+        // A familiar that's set up, on a Mac that went offline since its last turn, gets checked first.
+        db.set_setup_pending("r", false).unwrap();
+        let set_up = Agent { id: "s".into(), host: Some("first-turn-test.local".into()), ..agent.clone() };
+        db.insert_agent(&set_up).unwrap();
+        let mut writer = TurnWriter::new(&db, &sink, &set_up);
+        writer.probe = down;
+        let first = "Ada runs on first-turn-test.local, and that Mac is offline. Try again when it's back.";
+        let no_setup = |_, _| async { panic!("only a pending familiar runs setup") };
+        assert_eq!(gate(&mut writer, &db, &set_up, no_setup).await, Err(TurnOutcome::Failed(first.into())));
+
+        // A CLI that ends without a word from ssh gets the Mac checked, and a lost Mac says so.
+        crate::remote::set_offline("first-turn-test.local", false);
+        for event in [Some(ProviderEvent::Failed("claude stopped unexpectedly.".into())), None] {
+            let (tx, rx) = mpsc::unbounded_channel();
+            if let Some(event) = event {
+                tx.send(event).unwrap();
+            }
+            drop(tx);
+            let mut writer = TurnWriter::new(&db, &sink, &set_up);
+            writer.probe = down;
+            assert_eq!(stream_turn(&mut writer, rx).await, TurnOutcome::Failed(first.into()));
+        }
+
+        // A local familiar's turn never waits on ssh.
+        let mut writer = TurnWriter::new(&db, &sink, &setup().1);
+        assert_eq!(gate(&mut writer, &db, &setup().1, |_, _| async { Err(crate::remote::SshError::Offline) }).await, Ok(()));
     }
 }

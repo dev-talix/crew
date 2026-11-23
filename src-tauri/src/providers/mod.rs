@@ -106,6 +106,18 @@ pub fn command(program: &str, cwd: &str) -> Command {
     cmd
 }
 
+/// `program` in a familiar's workspace: on this Mac, or over ssh on its host.
+pub fn launch(host: Option<&str>, workspace: &str, program: &str, args: Vec<String>) -> Command {
+    match host {
+        Some(host) => crate::remote::command(host, workspace, program, &args),
+        None => {
+            let mut cmd = command(program, workspace);
+            cmd.args(args);
+            cmd
+        }
+    }
+}
+
 pub fn spawn_error(program: &str, err: std::io::Error) -> String {
     if err.kind() == std::io::ErrorKind::NotFound {
         format!("`{program}` is not installed or not on your PATH.")
@@ -115,10 +127,12 @@ pub fn spawn_error(program: &str, err: std::io::Error) -> String {
 }
 
 #[derive(Clone, Default)]
-pub struct StderrTail(Arc<Mutex<VecDeque<String>>>);
+pub struct StderrTail(Arc<Mutex<VecDeque<String>>>, Arc<tokio::sync::Notify>);
 
 impl StderrTail {
     const LINES: usize = 20;
+    /// How long a process that ended waits for the rest of its stderr, which can trail its stdout.
+    const SETTLE: Duration = Duration::from_millis(500);
 
     pub fn collect(&self, stderr: ChildStderr) {
         let tail = self.clone();
@@ -132,10 +146,14 @@ impl StderrTail {
                     buf.push_back(line);
                 }
             }
+            tail.1.notify_one();
         });
     }
 
-    pub fn text(&self) -> String {
+    /// The last lines once stderr closed, or after a short wait. For a process that ended, so its error,
+    /// like ssh saying it can't reach the other Mac, isn't lost to a race with stdout.
+    pub async fn final_text(&self) -> String {
+        let _ = tokio::time::timeout(Self::SETTLE, self.1.notified()).await;
         self.0
             .lock()
             .map(|buf| buf.iter().cloned().collect::<Vec<_>>().join("\n"))

@@ -3,9 +3,10 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createEffect, createSignal, onSettled, type Accessor } from "solid-js";
 import type { Avatar } from "./avatar";
 import type { ThemeFile } from "./theme";
-import type { Memory, MemoryScope } from "./memory";
+import type { Memory, MemoryDraft, MemoryKind, MemoryScope } from "./memory";
 import type * as Budgets from "./budgets";
 import type * as Transfer from "./transfer";
+import type { Ledger } from "./ledgers";
 
 export type Provider = "codex" | "claude";
 export type Access = "workspace" | "full";
@@ -25,7 +26,36 @@ export interface Agent {
   activeModel: string | null;
   /** The coven it sits in, if any. */
   covenId: string | null;
+  /** The SSH destination of the Mac it runs on. Null runs it on this Mac. */
+  host: string | null;
+  /** Saved while its Mac was offline. Grimoire makes its workspace there once the Mac answers. */
+  setupPending?: boolean;
+  /** Its Mac didn't answer the last time Grimoire tried. */
+  offline?: boolean;
   createdAt: number;
+}
+
+/** What the host badge says about a remote familiar's Mac, or null when there's nothing to flag. */
+export function hostState(agent: Pick<Agent, "setupPending" | "offline">): "Setup pending" | "Offline" | null {
+  if (agent.setupPending) return "Setup pending";
+  if (agent.offline) return "Offline";
+  return null;
+}
+
+/**
+ * The list with a newly saved familiar in it. A familiar already listed stays as listed: a refresh
+ * may have brought it in with a newer status than the saved copy, like a pending setup that finished.
+ */
+export function withAgent<T extends { id: string }>(list: T[], agent: T): T[] {
+  return list.some((a) => a.id === agent.id) ? list : [...list, agent];
+}
+
+/** What "Check connection" found on another Mac. */
+export interface HostCheck {
+  reachable: boolean;
+  codex: string | null;
+  claude: string | null;
+  error: string | null;
 }
 
 export interface Coven {
@@ -71,6 +101,22 @@ export interface SideChat {
 export interface SideThread {
   chat: SideChat;
   messages: Message[];
+}
+
+export type HandoffStatus = "waiting" | "accepted" | "done" | "failed";
+
+/** One ask_familiar or message_familiar request. Follow-ups in the same thread get their own. */
+export interface Handoff {
+  id: number;
+  /** The side conversation it was sent in. */
+  chatId: string;
+  fromId: string;
+  toId: string;
+  kind: "ask" | "message";
+  /** The request, trimmed. */
+  what: string;
+  createdAt: number;
+  status: HandoffStatus;
 }
 
 export interface SideMessageEvent {
@@ -127,7 +173,33 @@ export interface StagedFile {
 /** Where the window loads a stored attachment's bytes, for thumbnails. */
 export const attachmentUrl = (id: number) => convertFileSrc(String(id), "attachment");
 
-export type Schedule = { kind: "interval"; minutes: number } | { kind: "daily"; time: string; days: number[] };
+export type Schedule =
+  | { kind: "interval"; minutes: number }
+  | { kind: "daily"; time: string; days: number[] }
+  /** Runs when a pull request opens in `repo`, "owner/name". */
+  | { kind: "githubPr"; repo: string }
+  /** Runs when a file, or what's directly in a folder, changes. */
+  | { kind: "file"; path: string }
+  /** Runs when something POSTs to its local webhook. Grimoire makes the secret; send "" for a new one. */
+  | { kind: "webhook"; secret: string }
+  /** Runs when new mail reaches the Mail app's inbox. */
+  | { kind: "email" };
+
+/** How an event ritual's watcher is doing. */
+export interface TriggerState {
+  routineId: string;
+  checkedAt: number | null;
+  firedAt: number | null;
+  error: string | null;
+}
+
+export interface TriggerStatus {
+  /** Add a webhook ritual's secret to get its address. */
+  webhookBase: string;
+  /** Why webhooks are off, if they are. */
+  webhookError: string | null;
+  states: TriggerState[];
+}
 
 export interface Routine {
   id: string;
@@ -266,6 +338,8 @@ export interface NewAgentInput {
   avatar: Avatar;
   effort: string;
   covenId?: string | null;
+  /** An SSH destination to run it on another Mac. */
+  host?: string;
 }
 
 export interface AgentChanges {
@@ -374,6 +448,19 @@ export interface Delegation {
   approve: boolean;
 }
 
+/** A short-lived helper a familiar started for a long job. Its transcript is a side chat. */
+export interface Helper {
+  id: string;
+  agentId: string;
+  chatId: string;
+  label: string;
+  task: string;
+  status: "running" | "done" | "failed" | "stopped" | "timeout" | "interrupted";
+  result: string | null;
+  startedAt: number;
+  finishedAt: number | null;
+}
+
 export const api = {
   listAgents: () => invoke<Agent[]>("list_agents"),
   busyAgents: () => invoke<string[]>("busy_agents"),
@@ -398,6 +485,8 @@ export const api = {
   deleteChat: (chatId: string) => invoke<void>("delete_chat", { chatId }),
   searchMessages: (query: string) => invoke<SearchHit[]>("search_messages", { query, limit: 30 }),
   sideThread: (chatId: string) => invoke<SideThread>("side_thread", { chatId }),
+  /** The latest familiar to familiar handoffs, newest first. */
+  listHandoffs: () => invoke<Handoff[]>("list_handoffs"),
   lastMessages: () => invoke<Message[]>("last_messages"),
   listModels: (provider: Provider) => invoke<ModelOption[]>("list_models", { provider }),
   dockEdge: () => invoke<"left" | "right" | null>("dock_edge"),
@@ -410,10 +499,12 @@ export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
   providerStatus: () => invoke<ProviderStatus[]>("provider_status"),
+  checkHost: (host: string) => invoke<HostCheck>("check_host", { host }),
   listRoutines: () => invoke<Routine[]>("list_routines"),
   saveRoutine: (input: RoutineInput) => invoke<Routine>("save_routine", { input }),
   deleteRoutine: (id: string) => invoke<void>("delete_routine", { id }),
   runRoutine: (id: string) => invoke<void>("run_routine", { id }),
+  triggerStatus: () => invoke<TriggerStatus>("trigger_status"),
   listWorkflows: () => invoke<Workflow[]>("list_workflows"),
   runningWorkflows: () => invoke<string[]>("running_workflows"),
   saveWorkflow: (input: WorkflowInput) => invoke<Workflow>("save_workflow", { input }),
@@ -433,7 +524,9 @@ export const api = {
   saveCoven: (id: string | null, name: string, members: string[]) => invoke<Coven>("save_coven", { id, name, members }),
   deleteCoven: (id: string) => invoke<void>("delete_coven", { id }),
   getMemory: (scope: MemoryScope, id: string) => invoke<Memory>("get_memory", { scope, id }),
-  saveMemory: (scope: MemoryScope, id: string, text: string) => invoke<Memory>("save_memory", { scope, id, text }),
+  saveMemory: (scope: MemoryScope, id: string, entries: MemoryDraft[], removed: string[]) => invoke<Memory>("save_memory", { scope, id, entries, removed }),
+  addMemory: (scope: MemoryScope, id: string, kind: MemoryKind, project: string | null, text: string) =>
+    invoke<Memory>("add_memory", { scope, id, kind, project, text }),
   listVault: () => invoke<VaultItem[]>("list_vault"),
   vaultSecret: (id: string) => invoke<Record<string, string>>("vault_secret", { id }),
   saveVaultItem: (input: VaultItemInput) => invoke<VaultItem>("save_vault_item", { input }),
@@ -467,7 +560,42 @@ export const api = {
   /** Asks for a file and previews it. Null when cancelled. */
   pickImport: () => invoke<Transfer.Picked | null>("pick_import"),
   applyImport: (keepFullAccess: boolean) => invoke<Transfer.Imported>("apply_import", { keepFullAccess }),
+  /** Open questions from familiars and pending approvals, in one list. */
+  inbox: () => invoke<InboxItem[]>("inbox"),
+  /** An option's value, or the person's own words. */
+  answerQuestion: (id: string, answer: string) => invoke<void>("answer_question", { id, answer }),
+  dismissQuestion: (id: string) => invoke<void>("dismiss_question", { id }),
+  getLedger: (agentId: string) => invoke<Ledger>("get_ledger", { agentId }),
+  /** Fields left out stay as they are; an empty string clears one. */
+  saveLedger: (agentId: string, patch: Partial<Pick<Ledger, "goal" | "status" | "waitingOn" | "nextStep">>) =>
+    invoke<Ledger>("save_ledger", { agentId, patch }),
+  listHelpers: (agentId: string) => invoke<Helper[]>("list_helpers", { agentId }),
+  stopHelper: (id: string) => invoke<void>("stop_helper", { id }),
+  listDrafts: () => invoke<Draft[]>("list_drafts"),
+  /** Marks a draft sent, with the person's edits, or discarded. The familiar hears which. */
+  closeDraft: (id: string, sent: boolean, edits: DraftEdits | null) => invoke<Draft>("close_draft", { id, sent, edits }),
+  openDraftLink: (id: string, url: string) => invoke<void>("open_draft_link", { id, url }),
 };
+
+export interface InboxOption {
+  /** The option text for a question, or once/always/deny for an approval. */
+  value: string;
+  label: string;
+}
+
+/** A familiar's question from ask_person, or a pending approval. */
+export interface InboxItem {
+  id: string;
+  kind: "question" | ApprovalRequest["kind"];
+  agentId: string;
+  title: string;
+  detail: string;
+  options: InboxOption[];
+  /** The value of the recommended option. */
+  recommended: string;
+  /** Null for approvals. */
+  createdAt: number | null;
+}
 
 /**
  * Runs async setup once the component has mounted. Unlisten functions passed to `keep` run when the
@@ -506,7 +634,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));
@@ -543,6 +671,10 @@ export function errorText(error: unknown): string {
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 export function describeSchedule(schedule: Schedule): string {
+  if (schedule.kind === "githubPr") return `When a PR opens in ${schedule.repo}`;
+  if (schedule.kind === "file") return `When ${shortPath(schedule.path)} changes`;
+  if (schedule.kind === "webhook") return "When its webhook is called";
+  if (schedule.kind === "email") return "When new email arrives";
   if (schedule.kind === "interval") {
     const { minutes } = schedule;
     if (minutes % 1440 === 0) return minutes === 1440 ? "Every day" : `Every ${minutes / 1440} days`;
@@ -580,4 +712,22 @@ export function relativeTime(ms: number, now = Date.now()): string {
 
 export function shortPath(path: string): string {
   return path.replace(/^\/Users\/[^/]+/, "~");
+}
+
+export type DraftChannel = "email" | "slack" | "post";
+
+export interface DraftEdits {
+  to: string[];
+  subject: string | null;
+  body: string;
+}
+
+export interface Draft extends DraftEdits {
+  id: string;
+  agentId: string;
+  channel: DraftChannel;
+  note: string | null;
+  state: "draft" | "sent" | "discarded";
+  createdAt: number;
+  closedAt: number | null;
 }

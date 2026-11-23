@@ -1,4 +1,4 @@
-use super::{command, spawn_error, EventTx, IdleTimer, Lane, LaneSession, ProviderEvent, StderrTail};
+use super::{launch, spawn_error, EventTx, IdleTimer, Lane, LaneSession, ProviderEvent, StderrTail};
 use crate::db::{Access, Agent};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -69,7 +69,7 @@ pub struct Claude {
 }
 
 fn config_key(agent: &Agent) -> String {
-    format!("{:?}|{:?}|{:?}|{}", agent.model, agent.effort, agent.access, agent.workspace)
+    format!("{:?}|{:?}|{:?}|{}|{:?}", agent.model, agent.effort, agent.access, agent.workspace, agent.host)
 }
 
 fn args(agent: &Agent, lane: Option<&Lane>) -> Vec<String> {
@@ -91,7 +91,8 @@ fn args(agent: &Agent, lane: Option<&Lane>) -> Vec<String> {
         Access::Full => "bypassPermissions".into(),
     });
     // In a side conversation, Grimoire's tools know which one the familiar is calling from.
-    if let Some(tools) = crate::tools::server_command(lane.map_or(&agent.id, |l| &l.key)) {
+    // The tool socket is on this Mac, so a familiar on another Mac runs without the tools.
+    if let Some(tools) = crate::tools::server_command(lane.map_or(&agent.id, |l| &l.key)).filter(|_| agent.host.is_none()) {
         // "timeout" (ms) caps each tool call, and also lifts Claude's idle cutoff for silent calls like ask_familiar.
         let server = json!({
             "command": tools.command,
@@ -110,7 +111,7 @@ fn args(agent: &Agent, lane: Option<&Lane>) -> Vec<String> {
     if let Some(effort) = agent.effort.as_deref().filter(|e| !e.is_empty()) {
         args.extend(["--effort".into(), effort.into()]);
     }
-    if let Some(memory) = crate::memory::session_prompt(agent) {
+    if let Some(memory) = crate::briefing::session_prompt(agent) {
         // Claude records the system prompt when a chat starts and reuses it on resume, so a changed
         // memory reaches the familiar in its next new chat.
         args.extend(["--append-system-prompt".into(), memory]);
@@ -264,8 +265,7 @@ impl Claude {
             }
             existing.kill();
         }
-        let mut child = command("claude", &agent.workspace)
-            .args(args(agent, lane))
+        let mut child = launch(agent.host.as_deref(), &agent.workspace, "claude", args(agent, lane))
             .spawn()
             .map_err(|e| spawn_error("claude", e))?;
         let stdin = child.stdin.take().ok_or("claude has no stdin")?;
@@ -344,7 +344,7 @@ impl Claude {
                 }
             }
             if let Some(tx) = reader.take_route() {
-                let detail = stderr.text();
+                let detail = stderr.final_text().await;
                 let message = if detail.is_empty() { "claude stopped unexpectedly.".to_string() } else { detail };
                 let _ = tx.send(ProviderEvent::Failed(message));
             }
@@ -374,7 +374,7 @@ fn tool_label(name: &str, input: &Value) -> String {
         "WebFetch" => field("url").map(|u| format!("Fetch {u}")),
         "WebSearch" => field("query").map(|q| format!("Search {q}")),
         // Grimoire adds its own row that opens the side conversation.
-        "mcp__grimoire__ask_familiar" | "mcp__grimoire__message_familiar" => Some(String::new()),
+        "mcp__grimoire__ask_familiar" | "mcp__grimoire__message_familiar" | "mcp__grimoire__start_helper" => Some(String::new()),
         _ => None,
     }
     .unwrap_or_else(|| name.to_string())
@@ -583,6 +583,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: 0,
         };
         let joined = args(&agent, None).join(" ");
@@ -613,6 +614,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: 0,
         };
         let dir = crate::memory::test_dir();
@@ -620,6 +622,6 @@ mod tests {
         std::fs::write(dir.join("memory-claude.md"), "The user's cat is Miso.").unwrap();
         let args = args(&agent, None);
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
-        assert!(args[at + 1].contains("<memory of=\"you\">\nThe user's cat is Miso.\n</memory>"));
+        assert!(args[at + 1].contains("<memory of=\"you\">\nFacts:\n- ") && args[at + 1].contains(": The user's cat is Miso.\n</memory>"));
     }
 }

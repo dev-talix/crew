@@ -1,4 +1,4 @@
-use super::{command, spawn_error, EventTx, IdleTimer, Lane, LaneSession, ModelOption, ProviderEvent, StderrTail};
+use super::{launch, spawn_error, EventTx, IdleTimer, Lane, LaneSession, ModelOption, ProviderEvent, StderrTail};
 use crate::db::{Access, Agent};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -15,6 +15,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 type Pending = Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>;
 
+/// Numbers each app server Grimoire starts. JSON-RPC ids restart in every process, and several can
+/// run at once (one per remote workspace) or one after another, so approval keys carry this too.
+static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Default)]
 pub struct Route {
     tx: Option<EventTx>,
@@ -26,6 +30,7 @@ pub struct Route {
 }
 
 struct CodexProcess {
+    serial: u64,
     stdin: tokio::sync::Mutex<ChildStdin>,
     child: Mutex<Option<Child>>,
     next_id: AtomicU64,
@@ -80,6 +85,8 @@ pub struct Codex {
     process: tokio::sync::Mutex<Option<Arc<CodexProcess>>>,
     threads: Mutex<HashMap<String, String>>,
     idle: Arc<IdleTimer>,
+    /// The other Mac this app server runs on, for familiars there. None runs it here.
+    host: Option<String>,
 }
 
 /// "untrusted" makes Codex ask before commands it doesn't know are safe, so Grimoire's rules see them.
@@ -90,7 +97,6 @@ fn approval_policy() -> &'static str {
 /// `tools_key` is the familiar's id, or its side conversation's lane key, for Grimoire's tool server.
 fn thread_params(agent: &Agent, tools_key: &str) -> Value {
     let mut params = json!({
-        "cwd": agent.workspace,
         "approvalPolicy": approval_policy(),
         // Approval requests come to Grimoire, not to Codex's own automatic reviewer.
         "approvalsReviewer": "user",
@@ -99,10 +105,15 @@ fn thread_params(agent: &Agent, tools_key: &str) -> Value {
             Access::Full => "danger-full-access",
         },
     });
+    // On another Mac the app server already runs in the workspace, which may start with ~/.
+    if agent.host.is_none() {
+        params["cwd"] = json!(agent.workspace);
+    }
     if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
         params["model"] = json!(model);
     }
-    if let Some(tools) = crate::tools::server_command(tools_key) {
+    // The tool socket is on this Mac, so a familiar on another Mac runs without the tools.
+    if let Some(tools) = crate::tools::server_command(tools_key).filter(|_| agent.host.is_none()) {
         // Codex refuses MCP calls that need approval under approvalPolicy "never", so pre-approve Grimoire's own tools.
         // Codex gives up on a tool call after 60 seconds by default; ask_familiar can wait minutes for a reply.
         let server = json!({
@@ -114,7 +125,7 @@ fn thread_params(agent: &Agent, tools_key: &str) -> Value {
         });
         params["config"] = json!({ "mcp_servers": { (crate::tools::SERVER_NAME): server } });
     }
-    if let Some(memory) = crate::memory::session_prompt(agent) {
+    if let Some(memory) = crate::briefing::session_prompt(agent) {
         params["developerInstructions"] = json!(memory);
     }
     params
@@ -130,6 +141,11 @@ fn turn_input(text: &str, images: &[PathBuf]) -> Value {
 }
 
 impl Codex {
+    /// An app server on another Mac, started in one familiar's workspace there.
+    pub fn on(host: &str) -> Self {
+        Codex { host: Some(host.to_string()), ..Codex::default() }
+    }
+
     pub async fn start_turn(self: &Arc<Self>, agent: &Agent, text: &str, images: &[PathBuf], tx: EventTx) -> Result<(), String> {
         self.start_turn_in(agent, None, text, images, tx).await
     }
@@ -304,8 +320,7 @@ impl Codex {
         if let Some(process) = slot.as_ref().filter(|p| p.alive()) {
             return Ok(process.clone());
         }
-        let mut child = command("codex", cwd)
-            .arg("app-server")
+        let mut child = launch(self.host.as_deref(), cwd, "codex", vec!["app-server".into()])
             .spawn()
             .map_err(|e| spawn_error("codex", e))?;
         let stdin = child.stdin.take().ok_or("codex has no stdin")?;
@@ -315,6 +330,7 @@ impl Codex {
             stderr.collect(err);
         }
         let process = Arc::new(CodexProcess {
+            serial: NEXT_SERIAL.fetch_add(1, Ordering::Relaxed),
             stdin: tokio::sync::Mutex::new(stdin),
             child: Mutex::new(Some(child)),
             next_id: AtomicU64::new(1),
@@ -332,7 +348,7 @@ impl Codex {
                 codex.handle_message(&reader, message).await;
             }
             reader.kill();
-            let detail = stderr.text();
+            let detail = stderr.final_text().await;
             let reason = if detail.is_empty() { "codex stopped unexpectedly.".to_string() } else { detail };
             if let Ok(mut pending) = reader.pending.lock() {
                 for (_, waiter) in pending.drain() {
@@ -369,7 +385,7 @@ impl Codex {
                         let (id, process) = (id.clone(), process.clone());
                         tauri::async_runtime::spawn(async move {
                             let allowed = match agent {
-                                Some(key) => crate::permissions::check_command(crate::side::split(&key).0, &command, codex_request_key(&id)).await,
+                                Some(key) => crate::permissions::check_command(crate::side::split(&key).0, &command, codex_request_key(process.serial, &id)).await,
                                 None => false,
                             };
                             let decision = if allowed { "accept" } else { "decline" };
@@ -394,7 +410,7 @@ impl Codex {
             }
             (None, Some("serverRequest/resolved")) => {
                 // Codex settled a request on its own; take its card down.
-                crate::permissions::withdraw(&codex_request_key(&message["params"]["requestId"]));
+                crate::permissions::withdraw(&codex_request_key(process.serial, &message["params"]["requestId"]));
             }
             (None, Some(method)) => {
                 let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -422,9 +438,10 @@ impl Codex {
     }
 }
 
-/// The approval id for a Codex server request, so a later `serverRequest/resolved` can find it.
-fn codex_request_key(id: &Value) -> String {
-    format!("codex-{id}")
+/// The approval id for request `id` from app server `serial`, so a later `serverRequest/resolved`
+/// from the same server can find it.
+fn codex_request_key(serial: u64, id: &Value) -> String {
+    format!("codex-{serial}-{id}")
 }
 
 fn unwrap_shell(command: &str) -> &str {
@@ -481,7 +498,7 @@ fn tool_label(item: &Value) -> Option<String> {
             Some(format!("Edit {}", paths.join(", ")))
         }
         // Grimoire adds its own row that opens the side conversation.
-        "mcpToolCall" if text("server") == crate::tools::SERVER_NAME && matches!(text("tool").as_str(), "ask_familiar" | "message_familiar") => {
+        "mcpToolCall" if text("server") == crate::tools::SERVER_NAME && matches!(text("tool").as_str(), "ask_familiar" | "message_familiar" | "start_helper") => {
             Some(String::new())
         }
         "mcpToolCall" => Some(format!("{}.{}", text("server"), text("tool"))),
@@ -604,6 +621,14 @@ mod tests {
     }
 
     #[test]
+    fn approval_keys_tell_app_servers_apart() {
+        let (one, two) = (NEXT_SERIAL.fetch_add(1, Ordering::Relaxed), NEXT_SERIAL.fetch_add(1, Ordering::Relaxed));
+        assert_ne!(codex_request_key(one, &json!(0)), codex_request_key(two, &json!(0)), "both servers start counting at 0");
+        assert_eq!(codex_request_key(one, &json!(0)), codex_request_key(one, &json!(0)));
+        assert_ne!(codex_request_key(one, &json!(0)), codex_request_key(one, &json!("0")));
+    }
+
+    #[test]
     fn shows_commands_without_the_shell_wrapper() {
         assert_eq!(unwrap_shell("/bin/zsh -lc 'ls -la'"), "ls -la");
         assert_eq!(unwrap_shell("bash -lc \"pwd; git status\""), "pwd; git status");
@@ -649,6 +674,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: 0,
         };
         let params = thread_params(&agent, &agent.id);
@@ -656,6 +682,9 @@ mod tests {
         assert_eq!(params["approvalPolicy"], "never");
         assert!(params.get("model").is_none());
         assert!(params.get("developerInstructions").is_none(), "no memory yet");
+        assert_eq!(params["cwd"], "/tmp/ada");
+        let remote = Agent { host: Some("me@studio.local".into()), workspace: "~/ada".into(), ..agent.clone() };
+        assert!(thread_params(&remote, &remote.id).get("cwd").is_none(), "the remote app server runs in its workspace");
 
         let agent = Agent { id: "memory-codex".into(), ..agent };
         let dir = crate::memory::test_dir();

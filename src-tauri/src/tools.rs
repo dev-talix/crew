@@ -6,7 +6,7 @@
 use crate::approvals::{self, Approvals, Decision};
 use crate::db::{Agent, CheckWhen, Db, StepCheck, WorkflowStep};
 use crate::vault::{self, Kind, SecretStore};
-use crate::{memory, themes, workflows};
+use crate::{inbox, ledger, memory, themes, workflows};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -138,7 +138,7 @@ pub fn definitions() -> Value {
         },
         {
             "name": "ask_familiar",
-            "description": "Ask another familiar something and wait for its reply, which comes back as this tool's result. Use it when another familiar knows something or can do part of the work better. The two of you talk in a side conversation, out of both your main chats; the person can read it later. The other familiar answers from a copy of its own main conversation, so it knows what it knows, but it doesn't see yours, so include what it needs. It replies within 10 minutes or the wait ends. The result ends with the conversation's id: pass it as thread to follow up. You can't ask yourself or a familiar that is waiting on you, chains stop at 3 familiars in a row, and the person may limit who you can ask or approve each question.",
+            "description": "Ask another familiar something and wait for its reply, which comes back as this tool's result. Use it when another familiar knows something or can do part of the work better. The two of you talk in a side conversation, out of both your main chats; the person can read it later. The other familiar answers from a copy of its own main conversation, so it knows what it knows, but it doesn't see yours, so include what it needs. It replies within 10 minutes or the wait ends, and a later reply comes to you as a new message. The result ends with the conversation's id: pass it as thread to follow up. You can't ask yourself or a familiar that is waiting on you, chains stop at 3 familiars in a row, and the person may limit who you can ask or approve each question.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -174,13 +174,17 @@ pub fn definitions() -> Value {
     ]);
     if let Some(list) = list.as_array_mut() {
         list.extend(memory::definitions());
+        list.extend(inbox::definitions());
+        list.extend(ledger::definitions());
+        list.extend(crate::helpers::definitions().as_array().cloned().unwrap_or_default());
+        list.extend(crate::drafts::definitions());
     }
     list
 }
 
 /// Tool names as Claude's `--allowedTools` expects them.
 pub fn claude_tool_names() -> String {
-    TOOL_NAMES.iter().chain(&memory::TOOL_NAMES).map(|name| format!("mcp__{SERVER_NAME}__{name}")).collect::<Vec<_>>().join(",")
+    TOOL_NAMES.iter().chain(&memory::TOOL_NAMES).chain(&inbox::TOOL_NAMES).chain(&ledger::TOOL_NAMES).chain(&crate::helpers::TOOL_NAMES).chain(&[crate::drafts::TOOL]).map(|name| format!("mcp__{SERVER_NAME}__{name}")).collect::<Vec<_>>().join(",")
 }
 
 /// How a CLI starts the Grimoire tool server for one familiar.
@@ -189,6 +193,11 @@ pub struct ServerCommand {
     pub args: Vec<String>,
     /// Goes in the server's environment as `TOKEN_ENV`, never in its arguments.
     pub token: String,
+}
+
+/// Whether `agent` gets the Grimoire tools: the socket is up and the familiar runs on this Mac.
+pub fn available_for(agent: &Agent) -> bool {
+    agent.host.is_none() && LAUNCH.get().is_some()
 }
 
 /// The command a CLI runs to give `agent_id` the Grimoire tools, once the socket is up.
@@ -423,7 +432,9 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
                 .collect();
             (pretty(&items), None)
         }
-        tool if memory::TOOL_NAMES.contains(&tool) => (memory::call_tool(db, caller, tool, &arguments)?, memory::changed_event(tool)),
+        tool if memory::handles(tool) => (memory::call_tool(db, caller, tool, &arguments)?, memory::changed_event(tool)),
+        tool if inbox::TOOL_NAMES.contains(&tool) => (inbox::call_tool(db, caller, tool, &arguments)?, Some(inbox::CHANGED)),
+        tool if ledger::TOOL_NAMES.contains(&tool) => (ledger::call_tool(db, caller, tool, &arguments)?, ledger::changed_event(tool)),
         _ => return Err(format!("Grimoire has no tool named {tool}.")),
     };
     Ok(Outcome { text, changed })
@@ -571,10 +582,16 @@ async fn handle_connection(stream: UnixStream, ctx: Arc<Context>) {
                 // A familiar answering in a side conversation calls as "familiar~chat".
                 let (caller, lane) = crate::side::split(&request.agent);
                 let caller = caller.to_string();
-                let result = if request.tool == "ask_familiar" {
+                let result = if let Err(e) = crate::helpers::check_lane(&ctx.db, lane, &request.tool) {
+                    Err(e)
+                } else if crate::helpers::TOOL_NAMES.contains(&request.tool.as_str()) {
+                    crate::helpers::call_tool(&ctx, &caller, lane, &request.tool, request.arguments)
+                } else if request.tool == "ask_familiar" {
                     crate::delegation::run(&ctx, &caller, lane, request.arguments).await.map(|text| Outcome { text, changed: None })
                 } else if request.tool == "message_familiar" {
                     crate::delegation::run_message(&ctx, &caller, lane, request.arguments).await.map(|text| Outcome { text, changed: None })
+                } else if request.tool == crate::drafts::TOOL {
+                    crate::drafts::run(&ctx.app, &ctx.db, &caller, &request.arguments).map(|text| Outcome { text, changed: None })
                 } else if request.tool == "vault_use" {
                     let ask = |question| ctx.approvals.ask(&ctx.app, question);
                     let used = vault_use(&ctx.db, ctx.secrets.as_ref(), &caller, request.arguments, ask).await;
@@ -623,6 +640,7 @@ mod tests {
             effort: None,
             active_model: None,
             coven_id: None,
+            host: None,
             created_at: now_ms(),
         }
     }
@@ -709,6 +727,13 @@ mod tests {
         assert_eq!(list[0]["steps"][0]["familiar"], "Writer");
         assert_eq!(list[0]["createdBy"], Value::Null);
         assert!(call(&db, &dir, "w1", "delete_everything", json!({})).is_err());
+    }
+
+    #[test]
+    fn familiars_on_another_mac_are_not_offered_the_tools() {
+        let mut remote = agent("r1", "Remote");
+        remote.host = Some("me@studio.local".into());
+        assert!(!available_for(&remote));
     }
 
     #[test]

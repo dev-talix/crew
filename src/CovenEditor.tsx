@@ -84,7 +84,6 @@ export default function CovenEditor(props: {
         memory={memory}
         agents={props.agents}
         label="Shared memory"
-        rows={8}
         hint="Every familiar in the coven reads this at the start of a new chat, and any of them can add to it."
       />
       <Show when={error() || memory.error()}>
@@ -103,7 +102,7 @@ export default function CovenEditor(props: {
         <button type="button" class="ghost" onClick={props.onCancel}>
           Cancel
         </button>
-        <button class="primary" type="submit" disabled={saving() || !name().trim() || memory.usage().over}>
+        <button class="primary" type="submit" disabled={saving() || !name().trim() || memory.usage().over || !memory.valid()}>
           {props.coven ? "Save coven" : "Create coven"}
         </button>
       </div>

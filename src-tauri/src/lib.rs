@@ -1,17 +1,24 @@
 mod approvals;
 mod chats;
 mod attachments;
+mod briefing;
 mod budgets;
 mod covens;
 mod db;
 mod delegation;
 mod dock;
+mod drafts;
 mod exports;
+mod handoffs;
+mod helpers;
+mod inbox;
+mod ledger;
 mod mcp;
 mod memory;
 mod notify;
 mod permissions;
 mod providers;
+mod remote;
 mod routines;
 mod runtime;
 mod side;
@@ -19,6 +26,7 @@ mod status;
 mod themes;
 mod tools;
 mod tray;
+mod triggers;
 mod updates;
 mod vault;
 mod workflow_runs;
@@ -61,6 +69,9 @@ struct NewAgent {
     effort: Option<String>,
     #[serde(default)]
     coven_id: Option<String>,
+    /// An SSH destination to run the familiar on another Mac. Empty runs it here.
+    #[serde(default)]
+    host: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -179,8 +190,8 @@ fn strictly_inside(path: &Path, home: &Path) -> bool {
 }
 
 #[tauri::command]
-fn list_agents(state: State<AppState>) -> Result<Vec<Agent>, String> {
-    state.db.list_agents()
+fn list_agents(state: State<AppState>) -> Result<Vec<remote::AgentStatus>, String> {
+    remote::with_status(&state.db, state.db.list_agents()?)
 }
 
 #[tauri::command]
@@ -189,29 +200,50 @@ fn busy_agents(state: State<AppState>) -> Vec<String> {
 }
 
 #[tauri::command]
-fn create_agent(app: AppHandle, state: State<AppState>, input: NewAgent) -> Result<Agent, String> {
+async fn create_agent(app: AppHandle, state: State<'_, AppState>, input: NewAgent) -> Result<remote::AgentStatus, String> {
     let name = clean_name(&input.name)?;
     input.avatar.validate()?;
     let id = uuid::Uuid::new_v4().to_string();
-    let workspace = workspace_for(input.workspace.as_deref(), &name, &id, &home()?)?;
-    std::fs::create_dir_all(&workspace).map_err(|e| format!("Could not create {}: {e}", workspace.display()))?;
+    let host = remote::clean_host(input.host.as_deref())?;
+    let effort = clean_effort(input.effort)?;
+    let coven_id = clean_coven(&state.db, input.coven_id)?;
+    let mut setup_pending = false;
+    let workspace = match &host {
+        Some(host) => {
+            let workspace = remote::clean_workspace(input.workspace.as_deref(), &name, &id)?;
+            setup_pending = remote::setup_on_create(host, &workspace, remote::first_setup).await?;
+            workspace
+        }
+        None => {
+            let workspace = workspace_for(input.workspace.as_deref(), &name, &id, &home()?)?;
+            std::fs::create_dir_all(&workspace).map_err(|e| format!("Could not create {}: {e}", workspace.display()))?;
+            workspace.to_string_lossy().into_owned()
+        }
+    };
     let agent = Agent {
         id,
         name,
         provider: input.provider,
         model: clean_model(input.model),
-        workspace: workspace.to_string_lossy().into_owned(),
+        workspace,
         access: input.access,
         session_id: None,
         avatar: input.avatar,
-        effort: clean_effort(input.effort)?,
+        effort,
         active_model: None,
-        coven_id: clean_coven(&state.db, input.coven_id)?,
+        coven_id,
+        host,
         created_at: now_ms(),
     };
     state.db.insert_agent(&agent)?;
+    if setup_pending {
+        state.db.set_setup_pending(&agent.id, true).inspect_err(|_| {
+            let _ = state.db.delete_agent(&agent.id);
+        })?;
+    }
     let _ = app.emit("agents_changed", ());
-    Ok(agent)
+    let offline = agent.host.as_deref().is_some_and(remote::is_offline);
+    Ok(remote::AgentStatus { agent, setup_pending, offline })
 }
 
 #[tauri::command]
@@ -241,11 +273,15 @@ async fn update_agent(
 #[tauri::command]
 fn open_workspace(app: AppHandle, state: State<AppState>, agent_id: String) -> Result<(), String> {
     let agent = state.db.get_agent(&agent_id)?.ok_or("That familiar no longer exists.")?;
+    if let Some(host) = &agent.host {
+        return Err(format!("This familiar's workspace is {} on {host}, so Finder can't open it here.", agent.workspace));
+    }
     app.opener().open_path(&agent.workspace, None::<&str>).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn delete_agent(app: AppHandle, state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
+    helpers::stop_for(&state.db, &agent_id);
     state.runtime.remove_agent(&agent_id).await?;
     if let Ok(dir) = app.path().app_data_dir() {
         attachments::remove_for_agent(&state.db, &attachments::root(&dir), &agent_id);
@@ -362,7 +398,7 @@ fn save_routine(state: State<AppState>, input: routines::RoutineInput) -> Result
 
 #[tauri::command]
 fn delete_routine(state: State<AppState>, id: String) -> Result<(), String> {
-    state.db.delete_routine(&id)?;
+    triggers::while_editing(|| state.db.delete_routine(&id))?;
     state.scheduler.changed();
     Ok(())
 }
@@ -631,8 +667,15 @@ pub fn run() {
             attachments::clear_staging(&attachments::root(&dir));
             // A setup error ends the app with a panic nobody sees, so say what's wrong first.
             let db = Arc::new(Db::open(&dir.join("grimoire.db")).inspect_err(|e| startup_alert(&e.to_string()))?);
+            ledger::init(db.clone());
+            // Helpers' CLI sessions ended with the last launch; the chat's helpers list shows them as interrupted.
+            let _ = helpers::interrupt_leftovers(&db);
             let billing = db.setting(CLAUDE_BILLING).ok().flatten();
             providers::USE_CLAUDE_SUBSCRIPTION.store(billing.as_deref() != Some("api"), Ordering::Relaxed);
+            if let Err(e) = delegation::recover(&db) {
+                eprintln!("Couldn't close side conversations left unfinished: {e}");
+            }
+            remote::install(app.handle().clone(), db.clone());
             let runtime = Runtime::new(db.clone(), app.handle().clone());
             let workflows = WorkflowRunner::new(db.clone(), runtime.clone(), app.handle().clone());
             let edge = db.setting(DOCK_EDGE).ok().flatten().and_then(|e| dock::Edge::parse(&e));
@@ -686,6 +729,7 @@ pub fn run() {
             chats::delete_chat,
             chats::search_messages,
             side::side_thread,
+            handoffs::list_handoffs,
             get_settings,
             list_models,
             dock_edge,
@@ -749,7 +793,20 @@ pub fn run() {
             exports::export_item,
             exports::export_backup_file,
             exports::pick_import,
-            exports::apply_import
+            exports::apply_import,
+            triggers::trigger_status,
+            inbox::inbox,
+            inbox::answer_question,
+            inbox::dismiss_question,
+            ledger::get_ledger,
+            ledger::save_ledger,
+            helpers::list_helpers,
+            helpers::stop_helper,
+            memory::add_memory,
+            drafts::list_drafts,
+            drafts::close_draft,
+            drafts::open_draft_link,
+            remote::check_host
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {
