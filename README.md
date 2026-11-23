@@ -66,6 +66,19 @@ bunx tauri dev                    # development
 bunx tauri build --bundles app    # src-tauri/target/release/bundle/macos/Grimoire.app
 ```
 
+`tauri build` signs the app with the Developer ID certificate named in `src-tauri/tauri.conf.json`,
+which has to be in your keychain. To notarize a build for other Macs, save an App Store Connect API
+key once as a keychain profile, then submit and staple:
+
+```sh
+xcrun notarytool store-credentials grimoire-notary --key AuthKey_<id>.p8 --key-id <id> --issuer <issuer-id>
+
+cd src-tauri/target/release/bundle/macos
+ditto -c -k --keepParent Grimoire.app /tmp/Grimoire.zip
+xcrun notarytool submit /tmp/Grimoire.zip --keychain-profile grimoire-notary --wait
+xcrun stapler staple Grimoire.app
+```
+
 Shortcuts: ⌘K opens the command palette, ⌘N summons a familiar, ⌘, opens Settings, and ⌘1 to ⌘9 open
 a familiar.
 
