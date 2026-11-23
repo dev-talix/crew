@@ -1,6 +1,15 @@
 import { expect, test } from "bun:test";
 import { createRoot, createSignal } from "solid-js";
-import { createFetch, onMountAsync } from "./api";
+import { createFetch, describeSchedule, onMountAsync } from "./api";
+
+test("describeSchedule names clocks and event triggers", () => {
+  expect(describeSchedule({ kind: "interval", minutes: 120 })).toBe("Every 2 hours");
+  expect(describeSchedule({ kind: "interval", minutes: 45 })).toBe("Every 45 minutes");
+  expect(describeSchedule({ kind: "githubPr", repo: "openai/codex" })).toBe("When a PR opens in openai/codex");
+  expect(describeSchedule({ kind: "file", path: "/Users/ada/Notes" })).toBe("When ~/Notes changes");
+  expect(describeSchedule({ kind: "webhook", secret: "abc" })).toBe("When its webhook is called");
+  expect(describeSchedule({ kind: "email" })).toBe("When new email arrives");
+});
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 

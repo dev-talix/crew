@@ -127,7 +127,33 @@ export interface StagedFile {
 /** Where the window loads a stored attachment's bytes, for thumbnails. */
 export const attachmentUrl = (id: number) => convertFileSrc(String(id), "attachment");
 
-export type Schedule = { kind: "interval"; minutes: number } | { kind: "daily"; time: string; days: number[] };
+export type Schedule =
+  | { kind: "interval"; minutes: number }
+  | { kind: "daily"; time: string; days: number[] }
+  /** Runs when a pull request opens in `repo`, "owner/name". */
+  | { kind: "githubPr"; repo: string }
+  /** Runs when a file, or what's directly in a folder, changes. */
+  | { kind: "file"; path: string }
+  /** Runs when something POSTs to its local webhook. Grimoire makes the secret; send "" for a new one. */
+  | { kind: "webhook"; secret: string }
+  /** Runs when new mail reaches the Mail app's inbox. */
+  | { kind: "email" };
+
+/** How an event ritual's watcher is doing. */
+export interface TriggerState {
+  routineId: string;
+  checkedAt: number | null;
+  firedAt: number | null;
+  error: string | null;
+}
+
+export interface TriggerStatus {
+  /** Add a webhook ritual's secret to get its address. */
+  webhookBase: string;
+  /** Why webhooks are off, if they are. */
+  webhookError: string | null;
+  states: TriggerState[];
+}
 
 export interface Routine {
   id: string;
@@ -414,6 +440,7 @@ export const api = {
   saveRoutine: (input: RoutineInput) => invoke<Routine>("save_routine", { input }),
   deleteRoutine: (id: string) => invoke<void>("delete_routine", { id }),
   runRoutine: (id: string) => invoke<void>("run_routine", { id }),
+  triggerStatus: () => invoke<TriggerStatus>("trigger_status"),
   listWorkflows: () => invoke<Workflow[]>("list_workflows"),
   runningWorkflows: () => invoke<string[]>("running_workflows"),
   saveWorkflow: (input: WorkflowInput) => invoke<Workflow>("save_workflow", { input }),
@@ -543,6 +570,10 @@ export function errorText(error: unknown): string {
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 export function describeSchedule(schedule: Schedule): string {
+  if (schedule.kind === "githubPr") return `When a PR opens in ${schedule.repo}`;
+  if (schedule.kind === "file") return `When ${shortPath(schedule.path)} changes`;
+  if (schedule.kind === "webhook") return "When its webhook is called";
+  if (schedule.kind === "email") return "When new email arrives";
   if (schedule.kind === "interval") {
     const { minutes } = schedule;
     if (minutes % 1440 === 0) return minutes === 1440 ? "Every day" : `Every ${minutes / 1440} days`;

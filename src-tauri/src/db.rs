@@ -150,6 +150,24 @@ pub struct Message {
 pub enum Schedule {
     Interval { minutes: u32 },
     Daily { time: String, days: Vec<u8> },
+    /// Runs when a pull request opens in a GitHub repo, "owner/name". See `triggers`.
+    GithubPr { repo: String },
+    /// Runs when a file, or what's directly in a folder, changes.
+    File { path: String },
+    /// Runs when something POSTs to the ritual's local webhook. Grimoire makes the secret.
+    Webhook {
+        #[serde(default)]
+        secret: String,
+    },
+    /// Runs when new mail reaches the Mail app's inbox.
+    Email,
+}
+
+impl Schedule {
+    /// True for the kinds that run when something happens instead of by the clock.
+    pub fn is_event(&self) -> bool {
+        !matches!(self, Schedule::Interval { .. } | Schedule::Daily { .. })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -228,7 +246,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -441,6 +459,22 @@ impl Db {
         }
         if version < 14 {
             crate::side::migrate(&conn)?;
+        }
+        if version < 15 {
+            // What each event ritual's watcher has seen, so a restart doesn't run it again.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE trigger_state (
+                   routine_id TEXT PRIMARY KEY REFERENCES routines(id) ON DELETE CASCADE,
+                   source TEXT NOT NULL,
+                   cursor TEXT,
+                   checked_at INTEGER,
+                   fired_at INTEGER,
+                   error TEXT
+                 );
+                 PRAGMA user_version = 15;
+                 COMMIT;",
+            )?;
         }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",

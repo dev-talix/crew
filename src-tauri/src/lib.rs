@@ -20,6 +20,7 @@ mod status;
 mod themes;
 mod tools;
 mod tray;
+mod triggers;
 mod updates;
 mod vault;
 mod workflow_runs;
@@ -753,7 +754,8 @@ pub fn run() {
             exports::export_item,
             exports::export_backup_file,
             exports::pick_import,
-            exports::apply_import
+            exports::apply_import,
+            triggers::trigger_status
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {

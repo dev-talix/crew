@@ -4,7 +4,20 @@ import { AgentSelect, EmptyState, Page, Segmented, Sheet, Toggle } from "./ui";
 import { RitualArt, RITUAL_TEMPLATES, type RitualTemplate } from "./EmptyArt";
 import { PlusIcon } from "./icons";
 import { inkFor } from "./avatar";
-import { api, describeSchedule, errorText, onEvent, relativeTime, type Agent, type Routine, type Schedule, type Workflow } from "./api";
+import {
+  api,
+  describeSchedule,
+  errorText,
+  onEvent,
+  relativeTime,
+  shortPath,
+  type Agent,
+  type Routine,
+  type Schedule,
+  type TriggerState,
+  type TriggerStatus,
+  type Workflow,
+} from "./api";
 import { ritualAgents, ritualDoes } from "./spells";
 import { RitualPauseNotice } from "./BudgetControls";
 import type { RitualSkip } from "./budgets";
@@ -18,8 +31,11 @@ const MIN_MINUTES = 5;
 const MAX_MINUTES = 7 * 24 * 60;
 
 type Repeat = "interval" | "daily";
+type Trigger = "schedule" | "githubPr" | "file" | "webhook" | "email";
 type Target = "familiar" | "spell";
 type Unit = "minutes" | "hours";
+
+const REPO = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
 
 function agentStyle(agent: Agent) {
   return { "--agent": agent.avatar.color, "--agent-ink": inkFor(agent.avatar.color) };
@@ -27,8 +43,10 @@ function agentStyle(agent: Agent) {
 
 function runsText(schedule: Schedule): string {
   const text = describeSchedule(schedule);
-  return /^(Every|Weekdays|Weekends)/.test(text) ? `Runs ${text[0].toLowerCase()}${text.slice(1)}` : `Runs on ${text}`;
+  return /^(Every|Weekdays|Weekends|When)/.test(text) ? `Runs ${text[0].toLowerCase()}${text.slice(1)}` : `Runs on ${text}`;
 }
+
+const isEvent = (schedule: Schedule) => schedule.kind !== "interval" && schedule.kind !== "daily";
 
 export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id: string) => void }) {
   const [routines, setRoutines] = createSignal<Routine[]>([]);
@@ -38,10 +56,13 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
   const [editing, setEditing] = createSignal<Routine | "new" | { template: RitualTemplate } | null>(null);
   const [now, setNow] = createSignal(Date.now());
   const [skips, setSkips] = createSignal<RitualSkip[]>([]);
+  const [triggers, setTriggers] = createSignal<TriggerStatus | null>(null);
+  const loadTriggers = () => void api.triggerStatus().then(setTriggers, () => undefined);
 
   const load = async () => {
     try {
       void api.ritualSkips().then(setSkips, () => undefined);
+      loadTriggers();
       const [list, spellList] = await Promise.all([api.listRoutines(), api.listWorkflows()]);
       setRoutines(list);
       setSpells(spellList);
@@ -57,7 +78,11 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
   const unlisten = onEvent("routines_changed", () => void load());
   // Deleting a spell deletes the rituals that cast it.
   const unlistenSpells = onEvent("workflows_changed", () => void load());
-  const tick = window.setInterval(() => setNow(Date.now()), 60_000);
+  const tick = window.setInterval(() => {
+    setNow(Date.now());
+    // Watchers check quietly, so pick up their last check here.
+    loadTriggers();
+  }, 60_000);
   onCleanup(() => {
     clearInterval(tick);
     void unlisten.then((stop) => stop());
@@ -159,6 +184,8 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
                       routine={routine}
                       does={ritualDoes(routine, spells())}
                       skip={skips().find((s) => s.routineId === routine.id && s.at >= (routine.lastRunAt ?? 0))}
+                      trigger={triggers()?.states.find((t) => t.routineId === routine.id)}
+                      webhookError={triggers()?.webhookError ?? null}
                       now={now()}
                       onEdit={() => setEditing(routine)}
                       onToggle={(enabled) => void setEnabled(routine, enabled)}
@@ -190,6 +217,8 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
                       routine={routine}
                       does={ritualDoes(routine, spells())}
                       skip={skips().find((s) => s.routineId === routine.id && s.at >= (routine.lastRunAt ?? 0))}
+                      trigger={triggers()?.states.find((t) => t.routineId === routine.id)}
+                      webhookError={triggers()?.webhookError ?? null}
                       now={now()}
                       onEdit={() => setEditing(routine)}
                       onToggle={(enabled) => void setEnabled(routine, enabled)}
@@ -210,6 +239,7 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
             template={typeof current() === "object" && "template" in (current() as object) ? (current() as { template: RitualTemplate }).template : undefined}
             agents={props.agents}
             spells={spells()}
+            webhookBase={triggers()?.webhookBase ?? null}
             onClose={() => setEditing(null)}
             onSaved={(saved) => {
               upsert(saved);
@@ -232,6 +262,10 @@ function RoutineRow(props: {
   does: string;
   /** Set when the last run was skipped. */
   skip?: RitualSkip;
+  /** How an event ritual's watcher is doing. */
+  trigger?: TriggerState;
+  /** Why webhooks are off, if they are. */
+  webhookError: string | null;
   now: number;
   onEdit: () => void;
   onToggle: (enabled: boolean) => void;
@@ -256,8 +290,20 @@ function RoutineRow(props: {
     }
   };
 
+  const event = () => isEvent(props.routine.schedule);
+  const watching = () => {
+    const parts: string[] = [];
+    const t = props.trigger;
+    if (t?.checkedAt && props.routine.schedule.kind !== "webhook") parts.push(`Checked ${relativeTime(t.checkedAt, props.now)}.`);
+    if (t?.firedAt) parts.push(`Last ran on its trigger ${relativeTime(t.firedAt, props.now)}.`);
+    return parts.join(" ");
+  };
+  const triggerError = () =>
+    props.routine.schedule.kind === "webhook" ? props.webhookError : (props.trigger?.error ?? null);
+
   const nextRun = () => {
     if (!props.routine.enabled) return "Paused";
+    if (event()) return "Watching";
     const at = props.routine.nextRunAt;
     if (at === null) return "";
     return at <= props.now ? "Running soon" : `Next run ${relativeTime(at, props.now)}`;
@@ -269,6 +315,12 @@ function RoutineRow(props: {
         <span class="list-title">{props.routine.name}</span>
         <span class="list-sub">{describeSchedule(props.routine.schedule)}</span>
         <span class="list-sub routine-does">{props.does}</span>
+        <Show when={event() && props.routine.enabled && watching()}>
+          <span class="list-sub routine-watch">{watching()}</span>
+        </Show>
+        <Show when={event() && props.routine.enabled && triggerError()}>
+          {(error) => <span class="routine-skip">{error()}</span>}
+        </Show>
         <Show when={props.skip}>
           {(skip) => (
             <span class="routine-skip">
@@ -283,7 +335,7 @@ function RoutineRow(props: {
           <span aria-live="polite">{sent() ? "Sent" : "Run now"}</span>
         </button>
         <Toggle
-          label={`Run ${props.routine.name} on schedule`}
+          label={`Run ${props.routine.name} ${event() ? "on its trigger" : "on schedule"}`}
           checked={props.routine.enabled}
           onChange={props.onToggle}
         />
@@ -298,12 +350,32 @@ function RoutineEditor(props: {
   template?: RitualTemplate;
   agents: Agent[];
   spells: Workflow[];
+  /** Where webhooks arrive; the ritual's secret goes on the end. */
+  webhookBase: string | null;
   onClose: () => void;
   onSaved: (routine: Routine) => void;
   onDeleted: (id: string) => void;
 }) {
   const seed = props.routine ?? props.template;
   const initial = seed?.schedule;
+  const [trigger, setTrigger] = createSignal<Trigger>(!initial || !isEvent(initial) ? "schedule" : (initial.kind as Trigger));
+  const [repo, setRepo] = createSignal(initial?.kind === "githubPr" ? initial.repo : "");
+  const [path, setPath] = createSignal(initial?.kind === "file" ? shortPath(initial.path) : "");
+  const secret = initial?.kind === "webhook" ? initial.secret : "";
+  const webhookUrl = () => (secret && props.webhookBase ? `${props.webhookBase}${secret}` : "");
+  const [copied, setCopied] = createSignal(false);
+  let copiedTimer: number | undefined;
+  onCleanup(() => clearTimeout(copiedTimer));
+  const copyUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(webhookUrl());
+      setCopied(true);
+      clearTimeout(copiedTimer);
+      copiedTimer = window.setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      setError(errorText(err));
+    }
+  };
   const initialMinutes = initial?.kind === "interval" ? initial.minutes : 180;
   const initialUnit: Unit = initialMinutes % 60 === 0 ? "hours" : "minutes";
 
@@ -312,7 +384,7 @@ function RoutineEditor(props: {
   const [spellId, setSpellId] = createSignal(props.routine?.workflowId ?? props.spells[0]?.id ?? "");
   const [name, setName] = createSignal(seed?.name ?? "");
   const [prompt, setPrompt] = createSignal(seed?.prompt ?? "");
-  const [repeat, setRepeat] = createSignal<Repeat>(initial?.kind ?? "daily");
+  const [repeat, setRepeat] = createSignal<Repeat>(initial?.kind === "interval" ? "interval" : "daily");
   const [amount, setAmount] = createSignal(String(initialUnit === "hours" ? initialMinutes / 60 : initialMinutes));
   const [unit, setUnit] = createSignal<Unit>(initialUnit);
   const [time, setTime] = createSignal(initial?.kind === "daily" ? initial.time : "09:00");
@@ -340,6 +412,16 @@ function RoutineEditor(props: {
   const intervalValid = () => minutes() >= MIN_MINUTES && minutes() <= MAX_MINUTES;
 
   const schedule = (): Schedule | null => {
+    switch (trigger()) {
+      case "githubPr":
+        return REPO.test(repo().trim()) ? { kind: "githubPr", repo: repo().trim() } : null;
+      case "file":
+        return path().trim() ? { kind: "file", path: path().trim() } : null;
+      case "webhook":
+        return { kind: "webhook", secret };
+      case "email":
+        return { kind: "email" };
+    }
     if (repeat() === "interval") return intervalValid() ? { kind: "interval", minutes: minutes() } : null;
     if (!/^\d{2}:\d{2}$/.test(time())) return null;
     return { kind: "daily", time: time(), days: days().length === 7 ? [] : days() };
@@ -480,81 +562,145 @@ function RoutineEditor(props: {
           </label>
 
           <div class="field wide">
-            <span>Repeat</span>
+            <span>Runs</span>
             <Segmented
-              label="Repeat"
-              value={repeat()}
+              label="Runs"
+              value={trigger()}
               options={[
-                { value: "daily", label: "Daily" },
-                { value: "interval", label: "Every few hours" },
+                { value: "schedule", label: "On a schedule" },
+                { value: "githubPr", label: "GitHub PR" },
+                { value: "file", label: "File" },
+                { value: "webhook", label: "Webhook" },
+                { value: "email", label: "Email" },
               ]}
-              onChange={setRepeat}
+              onChange={setTrigger}
             />
-
-            <Show
-              when={repeat() === "daily"}
-              fallback={
-                <div class="routine-schedule">
-                  <span class="routine-inline-label">Every</span>
-                  <input
-                    class="routine-amount"
-                    type="number"
-                    inputmode="numeric"
-                    aria-label={unit() === "hours" ? "Number of hours" : "Number of minutes"}
-                    min={unit() === "hours" ? 1 : MIN_MINUTES}
-                    max={unit() === "hours" ? MAX_MINUTES / 60 : MAX_MINUTES}
-                    step={1}
-                    value={amount()}
-                    onInput={(e) => setAmount(e.currentTarget.value)}
-                  />
-                  <Segmented
-                    label="Unit"
-                    value={unit()}
-                    options={[
-                      { value: "minutes", label: "Minutes" },
-                      { value: "hours", label: "Hours" },
-                    ]}
-                    onChange={setUnit}
-                  />
-                </div>
-              }
-            >
-              <div class="routine-schedule">
-                <span class="routine-inline-label">At</span>
-                <input class="routine-time" type="time" aria-label="Time" value={time()} onInput={(e) => setTime(e.currentTarget.value)} />
-              </div>
-              <div class="routine-schedule">
-                <div class="routine-days" role="group" aria-label="Days">
-                  <For each={ALL_DAYS}>
-                    {(day) => (
-                      <button
-                        type="button"
-                        class="routine-day"
-                        aria-label={DAY_NAMES[day - 1]}
-                        aria-pressed={days().includes(day) ? "true" : "false"}
-                        onClick={() => toggleDay(day)}
-                      >
-                        {DAY_NAMES[day - 1][0]}
-                      </button>
-                    )}
-                  </For>
-                </div>
-                <button type="button" class="ghost small" aria-pressed={sameDays(WEEKDAYS) ? "true" : "false"} onClick={() => setDays(WEEKDAYS)}>
-                  Weekdays
-                </button>
-                <button type="button" class="ghost small" aria-pressed={sameDays(WEEKENDS) ? "true" : "false"} onClick={() => setDays(WEEKENDS)}>
-                  Weekends
-                </button>
-                <button type="button" class="ghost small" aria-pressed={sameDays(ALL_DAYS) ? "true" : "false"} onClick={() => setDays(ALL_DAYS)}>
-                  Every day
-                </button>
-              </div>
+            <Show when={trigger() === "githubPr"}>
+              <input
+                class="routine-trigger-input"
+                aria-label="GitHub repo"
+                value={repo()}
+                onInput={(e) => setRepo(e.currentTarget.value)}
+                placeholder="owner/repo"
+                spellcheck={false}
+              />
+              <p class="hint">Grimoire checks for new pull requests every 3 minutes with the gh command, so gh has to be signed in.</p>
             </Show>
-
-            <p class="hint" aria-live="polite">
-              {schedule() ? runsText(schedule()!) : repeat() === "interval" ? "Pick between 5 minutes and 7 days." : "Pick a time."}
-            </p>
+            <Show when={trigger() === "file"}>
+              <input
+                class="routine-trigger-input"
+                aria-label="File or folder"
+                value={path()}
+                onInput={(e) => setPath(e.currentTarget.value)}
+                placeholder="~/Documents/Inbox"
+                spellcheck={false}
+              />
+              <p class="hint">A file or folder in your home folder. Grimoire checks it every 30 seconds and runs when it changes.</p>
+            </Show>
+            <Show when={trigger() === "webhook"}>
+              <Show
+                when={webhookUrl()}
+                fallback={<p class="hint">Save the ritual to get its webhook address.</p>}
+              >
+                <div class="routine-webhook">
+                  <code>{webhookUrl()}</code>
+                  <button type="button" class="ghost small" onClick={() => void copyUrl()}>
+                    <span aria-live="polite">{copied() ? "Copied" : "Copy"}</span>
+                  </button>
+                </div>
+                <p class="hint">
+                  A POST to this address runs the ritual, with the request body passed along as untrusted text. It only answers on this Mac. Keep the address private.
+                </p>
+              </Show>
+            </Show>
+            <Show when={trigger() === "email"}>
+              <p class="hint">
+                Runs when a new message reaches the inbox in the Mail app. Mail has to be open, and macOS asks once to let Grimoire read it.
+              </p>
+            </Show>
+            <Show when={trigger() !== "schedule"}>
+              <p class="hint">An event ritual runs at most once a minute. Saving it never runs it; only something new after that does.</p>
+            </Show>
           </div>
+
+          <Show when={trigger() === "schedule"}>
+            <div class="field wide">
+              <span>Repeat</span>
+              <Segmented
+                label="Repeat"
+                value={repeat()}
+                options={[
+                  { value: "daily", label: "Daily" },
+                  { value: "interval", label: "Every few hours" },
+                ]}
+                onChange={setRepeat}
+              />
+
+              <Show
+                when={repeat() === "daily"}
+                fallback={
+                  <div class="routine-schedule">
+                    <span class="routine-inline-label">Every</span>
+                    <input
+                      class="routine-amount"
+                      type="number"
+                      inputmode="numeric"
+                      aria-label={unit() === "hours" ? "Number of hours" : "Number of minutes"}
+                      min={unit() === "hours" ? 1 : MIN_MINUTES}
+                      max={unit() === "hours" ? MAX_MINUTES / 60 : MAX_MINUTES}
+                      step={1}
+                      value={amount()}
+                      onInput={(e) => setAmount(e.currentTarget.value)}
+                    />
+                    <Segmented
+                      label="Unit"
+                      value={unit()}
+                      options={[
+                        { value: "minutes", label: "Minutes" },
+                        { value: "hours", label: "Hours" },
+                      ]}
+                      onChange={setUnit}
+                    />
+                  </div>
+                }
+              >
+                <div class="routine-schedule">
+                  <span class="routine-inline-label">At</span>
+                  <input class="routine-time" type="time" aria-label="Time" value={time()} onInput={(e) => setTime(e.currentTarget.value)} />
+                </div>
+                <div class="routine-schedule">
+                  <div class="routine-days" role="group" aria-label="Days">
+                    <For each={ALL_DAYS}>
+                      {(day) => (
+                        <button
+                          type="button"
+                          class="routine-day"
+                          aria-label={DAY_NAMES[day - 1]}
+                          aria-pressed={days().includes(day) ? "true" : "false"}
+                          onClick={() => toggleDay(day)}
+                        >
+                          {DAY_NAMES[day - 1][0]}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                  <button type="button" class="ghost small" aria-pressed={sameDays(WEEKDAYS) ? "true" : "false"} onClick={() => setDays(WEEKDAYS)}>
+                    Weekdays
+                  </button>
+                  <button type="button" class="ghost small" aria-pressed={sameDays(WEEKENDS) ? "true" : "false"} onClick={() => setDays(WEEKENDS)}>
+                    Weekends
+                  </button>
+                  <button type="button" class="ghost small" aria-pressed={sameDays(ALL_DAYS) ? "true" : "false"} onClick={() => setDays(ALL_DAYS)}>
+                    Every day
+                  </button>
+                </div>
+              </Show>
+
+              <p class="hint" aria-live="polite">
+                {schedule() ? runsText(schedule()!) : repeat() === "interval" ? "Pick between 5 minutes and 7 days." : "Pick a time."}
+              </p>
+            </div>
+          </Show>
         </div>
 
         <Show when={error()}>

@@ -25,6 +25,10 @@
   spell in the sidebar to cast it, and open any past cast to see each step.
 - **Memory** carries notes from one chat to the next, for each familiar and each coven.
 - **Rituals** send a familiar the same message, or cast a spell, on a schedule, like a morning summary.
+  A ritual can also run when something happens: a pull request opens in a GitHub repo (through `gh`),
+  a file or folder in your home folder changes, new mail reaches the Mail app's inbox, or something
+  POSTs to the ritual's private webhook on `127.0.0.1:47615`. The message says what set it off.
+  Saving or restarting never runs one, and each runs at most once a minute.
 - **Covens** group familiars. Home's summoning circle shows everyone or one coven at a time, with
   lines for the spells between familiars and gold arcs for their rituals.
 - **Themes** come as seven built-in inks, and you can edit or write your own as JSON.

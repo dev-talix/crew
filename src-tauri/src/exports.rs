@@ -260,7 +260,12 @@ pub fn export_backup(db: &Db, themes_dir: &Path, history: bool) -> Result<Grimoi
                 (None, Some(workflow_id)) if exported(workflow_id) => (None, workflows.iter().find(|w| &w.id == workflow_id).map(|w| w.name.clone())),
                 _ => return None,
             };
-            Some(RitualDoc { familiar, spell, name: r.name, prompt: r.prompt, schedule: r.schedule, enabled: r.enabled })
+            // A webhook's secret is its password, so it stays out of the file.
+            let schedule = match r.schedule {
+                Schedule::Webhook { .. } => Schedule::Webhook { secret: String::new() },
+                other => other,
+            };
+            Some(RitualDoc { familiar, spell, name: r.name, prompt: r.prompt, schedule, enabled: r.enabled })
         })
         .collect();
     for coven in crate::covens::list(db)? {
@@ -504,11 +509,12 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
     let existing_spells = db.list_workflows()?;
     let mut rituals = Vec::new();
     for doc in file.rituals {
-        let checked = crate::clean_name(&doc.name).and_then(|name| crate::routines::validate(&doc.schedule).map(|_| name)).and_then(|name| {
-            if doc.prompt.trim().is_empty() { Err("It has no prompt.".to_string()) } else { Ok(name) }
+        // A webhook ritual gets a new secret here; backups never carry one.
+        let checked = crate::clean_name(&doc.name).and_then(|name| crate::routines::prepare(doc.schedule.clone(), None).map(|s| (name, s))).and_then(|ok| {
+            if doc.prompt.trim().is_empty() { Err("It has no prompt.".to_string()) } else { Ok(ok) }
         });
-        let name = match checked {
-            Ok(name) => name,
+        let (name, schedule) = match checked {
+            Ok(ok) => ok,
             Err(why) => {
                 items.push(skipped("ritual", &doc.name, why));
                 continue;
@@ -551,8 +557,8 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
             workflow_id,
             name,
             prompt: doc.prompt.trim().to_string(),
-            next_run_at: if doc.enabled { crate::routines::next_run_ms(&doc.schedule, now) } else { None },
-            schedule: doc.schedule,
+            next_run_at: if doc.enabled { crate::routines::next_run_ms(&schedule, now) } else { None },
+            schedule,
             enabled: doc.enabled,
             last_run_at: None,
             created_at: now,

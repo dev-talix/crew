@@ -154,3 +154,25 @@
 .routine-no-spells {
   margin: 6px 0 0;
 }
+
+.field input.routine-trigger-input {
+  margin-top: 4px;
+}
+
+.routine-webhook {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.routine-webhook code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12.5px;
+  user-select: all;
+}
+
+.routine-watch {
+  font-size: 12px;
+}
