@@ -373,6 +373,10 @@ export const api = {
   listModels: (provider: Provider) => invoke<ModelOption[]>("list_models", { provider }),
   dockEdge: () => invoke<"left" | "right" | null>("dock_edge"),
   dockResize: (width: number, height: number, focus: boolean) => invoke<void>("dock_resize", { width, height, focus }),
+  dockHide: () => invoke<void>("dock_hide"),
+  /** The familiars left out of the dock. */
+  dockHidden: () => invoke<string[]>("dock_hidden"),
+  setDockHidden: (ids: string[]) => invoke<string[]>("set_dock_hidden", { ids }),
   showMain: (agentId?: string) => invoke<void>("show_main", { agentId: agentId ?? null }),
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
@@ -473,7 +477,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "chats_changed" | "budgets_changed",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

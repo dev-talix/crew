@@ -236,3 +236,17 @@
   right: 16px;
   z-index: 2;
 }
+
+.dock-picks {
+  margin-top: 8px;
+}
+
+.list-main.dock-pick {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.dock-pick > * {
+  flex-shrink: 0;
+}

@@ -1,9 +1,51 @@
+use crate::db::Db;
+use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 pub const LABEL: &str = "dock";
 const MARGIN: f64 = 6.0;
+/// The familiars left out of the dock, as a JSON list of ids. New familiars show until you hide them.
+const HIDDEN: &str = "dock_hidden";
+
+pub fn hidden(db: &Db) -> Vec<String> {
+    db.setting(HIDDEN).ok().flatten().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+}
+
+/// Saves which familiars the dock leaves out, once each and only ones that still exist.
+pub fn save_hidden(db: &Db, ids: &[String]) -> Result<Vec<String>, String> {
+    let agents = db.list_agents()?;
+    let mut kept: Vec<String> = Vec::new();
+    for id in ids {
+        if agents.iter().any(|a| &a.id == id) && !kept.contains(id) {
+            kept.push(id.clone());
+        }
+    }
+    db.set_setting(HIDDEN, &serde_json::to_string(&kept).map_err(|e| e.to_string())?)?;
+    Ok(kept)
+}
+
+#[tauri::command]
+pub fn dock_hidden(state: State<AppState>) -> Vec<String> {
+    hidden(&state.db)
+}
+
+#[tauri::command]
+pub fn set_dock_hidden(app: AppHandle, state: State<AppState>, ids: Vec<String>) -> Result<Vec<String>, String> {
+    let saved = save_hidden(&state.db, &ids)?;
+    let _ = app.emit("dock_hidden", &saved);
+    Ok(saved)
+}
+
+/// Takes the dock off the screen while it has no familiars to show. Its next resize brings it back.
+#[tauri::command]
+pub fn dock_hide(app: AppHandle) -> Result<(), String> {
+    match app.get_webview_window(LABEL) {
+        Some(window) => window.hide().map_err(|e| e.to_string()),
+        None => Ok(()),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -143,6 +185,33 @@ mod tests {
         let (open_x, open_y, open_w, open_h) = place(Edge::Right, SCREEN, 480.0, 600.0);
         assert_eq!(closed_x + closed_w, open_x + open_w);
         assert_eq!(closed_y + closed_h / 2.0, open_y + open_h / 2.0);
+    }
+
+    #[test]
+    fn remembers_hidden_familiars_once_and_only_real_ones() {
+        let db = Db::open_in_memory().unwrap();
+        for id in ["a", "b"] {
+            let agent = crate::db::Agent {
+                id: id.into(),
+                name: id.into(),
+                provider: crate::db::Provider::Claude,
+                model: None,
+                workspace: format!("/tmp/{id}"),
+                access: crate::db::Access::Workspace,
+                session_id: None,
+                avatar: crate::db::Avatar::for_seed(id),
+                effort: None,
+                active_model: None,
+                coven_id: None,
+                created_at: 0,
+            };
+            db.insert_agent(&agent).unwrap();
+        }
+        assert!(hidden(&db).is_empty(), "every familiar shows at first");
+        let ids = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(save_hidden(&db, &ids(&["b", "gone", "b", "a"])).unwrap(), ids(&["b", "a"]));
+        assert_eq!(hidden(&db), ids(&["b", "a"]));
+        assert!(save_hidden(&db, &[]).unwrap().is_empty());
     }
 
     #[test]

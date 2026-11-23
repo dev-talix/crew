@@ -113,23 +113,6 @@ html.dock-window #root {
   background: var(--agent);
 }
 
-.dock-sep {
-  width: 24px;
-  height: 1px;
-  margin: 2px 0;
-  flex-shrink: 0;
-  background: var(--line);
-}
-
-.dock-home {
-  color: var(--muted);
-}
-
-.dock-home:hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--text) 7%, transparent);
-}
-
 .dock-panel {
   flex: 1;
   align-self: stretch;
@@ -201,11 +184,4 @@ html.dock-window #root {
     transform: none !important;
     transition: opacity 120ms ease !important;
   }
-}
-
-.dock-logo {
-  display: block;
-  width: 36px;
-  height: 36px;
-  pointer-events: none;
 }

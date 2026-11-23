@@ -5,9 +5,6 @@ import Chat from "./Chat";
 import { createChatStore } from "./chatStore";
 import { api, onEvent, onMountAsync, subscribe, type Agent } from "./api";
 import { inkFor } from "./avatar";
-import { shownIcon } from "./themeStore";
-import nightIcon from "./assets/icon-night.svg";
-import paperIcon from "./assets/icon-paper.svg";
 import { createMoods } from "./moods";
 import { runningModelName } from "./models";
 import "./dock.css";
@@ -27,7 +24,10 @@ const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)"
 const nextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
 export default function Dock() {
-  const [agents, setAgents] = createSignal<Agent[]>([]);
+  const [all, setAgents] = createSignal<Agent[]>([]);
+  const [hidden, setHidden] = createSignal<string[]>([]);
+  // The familiars you chose to keep in the dock, in sidebar order.
+  const agents = createMemo(() => all().filter((a) => !hidden().includes(a.id)));
   const [busy, setBusy] = createStore<Record<string, boolean>>({});
   const [unread, setUnread] = createStore<Record<string, boolean>>({});
   const [edge, setEdge] = createSignal<"left" | "right">("right");
@@ -40,13 +40,15 @@ export default function Dock() {
   const current = () => agents().find((a) => a.id === selected());
   const panelVisible = () => phase() !== "closed";
 
-  const railHeight = createMemo(() => PAD + agents().length * SLOT + (agents().length ? 13 : 0) + SLOT + PAD - 6);
+  const railHeight = createMemo(() => PAD + agents().length * SLOT + PAD - 6);
   const closedSize = () => ({ width: RAIL + PAD * 2, height: railHeight() + PAD * 2 });
   const openSize = () => ({ width: RAIL + GAP + PANEL_WIDTH + PAD * 2, height: Math.max(PANEL_HEIGHT, railHeight()) + PAD * 2 });
 
   let busyResizing: Promise<void> = Promise.resolve();
   const resize = (size: { width: number; height: number }, focus: boolean) => {
-    busyResizing = busyResizing.then(() => api.dockResize(size.width, size.height, focus).catch(() => undefined));
+    // With no familiars to show, the dock steps off the screen until one comes back.
+    const empty = agents().length === 0;
+    busyResizing = busyResizing.then(() => (empty ? api.dockHide() : api.dockResize(size.width, size.height, focus)).catch(() => undefined));
     return busyResizing;
   };
 
@@ -76,24 +78,29 @@ export default function Dock() {
     setSelected(null);
   };
 
-  const openInGrimoire = async (id?: string) => {
+  const openInGrimoire = async (id: string) => {
     await api.showMain(id).catch(() => undefined);
     void close();
   };
 
-  const refreshAgents = async () => {
-    const list = await api.listAgents().catch(() => [] as Agent[]);
-    setAgents(list);
+  /** Applies a new list of familiars or of hidden ones, closing the chat if its familiar left. */
+  const settle = () => {
     flush(); // closedSize() below reads the new agent count.
-    if (selected() && !list.some((a) => a.id === selected())) void close();
+    if (selected() && !agents().some((a) => a.id === selected())) void close();
     if (phase() === "closed") void resize(closedSize(), false);
+  };
+
+  const refreshAgents = async () => {
+    setAgents(await api.listAgents().catch(() => [] as Agent[]));
+    settle();
   };
 
   onMountAsync(async (keep) => {
     const initial = await api.dockEdge().catch(() => null);
     if (initial) setEdge(initial);
-    const [list, running] = await Promise.all([api.listAgents(), api.busyAgents()]);
+    const [list, running, left] = await Promise.all([api.listAgents(), api.busyAgents(), api.dockHidden().catch(() => [] as string[])]);
     setAgents(list);
+    setHidden(left);
     setBusy((b) => {
       for (const id of running) b[id] = true;
     });
@@ -122,6 +129,10 @@ export default function Dock() {
         },
       }),
       onEvent<null>("agents_changed", refreshAgents),
+      onEvent<string[]>("dock_hidden", (next) => {
+        setHidden(next);
+        settle();
+      }),
       onEvent<{ agentId: string; model: string }>("agent_model", ({ agentId, model }) =>
         setAgents((list) => list.map((a) => (a.id === agentId ? { ...a, activeModel: model } : a))),
       ),
@@ -176,12 +187,6 @@ export default function Dock() {
             </button>
           )}
         </For>
-        <Show when={agents().length}>
-          <span class="dock-sep" aria-hidden="true" />
-        </Show>
-        <button class="dock-agent dock-home" aria-label="Open Grimoire" title="Open Grimoire" onClick={() => void openInGrimoire()}>
-          <img class="dock-logo" src={shownIcon() === "night" ? nightIcon : paperIcon} alt="" />
-        </button>
       </nav>
 
       <Show when={panelVisible() && current()}>
