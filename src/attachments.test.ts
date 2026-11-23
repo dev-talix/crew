@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { acceptFiles, formatSize, isImage, MAX_FILES, MAX_IMAGE_BYTES } from "./attachments";
+import { acceptFiles, formatSize, isImage, MAX_FILE_BYTES, MAX_FILES } from "./attachments";
 
 const file = (name: string, size = 10, type = "application/pdf") => ({ name, size, type });
 const png = (name: string, size = 10) => file(name, size, "image/png");
@@ -20,12 +20,13 @@ test("keeps at most ten files", () => {
   expect(acceptFiles([], [file("a")])).toEqual({ accepted: [file("a")], error: "" });
 });
 
-test("refuses images over 20 MB but not big files", () => {
-  const big = png("huge.png", MAX_IMAGE_BYTES + 1);
-  const { accepted, error } = acceptFiles([], [big, png("ok.png", MAX_IMAGE_BYTES), file("video.mov", MAX_IMAGE_BYTES * 3)]);
-  expect(accepted.map((f) => f.name)).toEqual(["ok.png", "video.mov"]);
-  expect(error).toBe("huge.png is over 20 MB. Images can be up to 20 MB.");
-  expect(acceptFiles([], [big, png("b.png", MAX_IMAGE_BYTES + 5)]).error).toBe("2 images are over 20 MB. Images can be up to 20 MB.");
+test("refuses any file over 20 MB, image or not", () => {
+  const big = png("huge.png", MAX_FILE_BYTES + 1);
+  const video = file("video.mov", MAX_FILE_BYTES * 3, "video/quicktime");
+  const { accepted, error } = acceptFiles([], [png("ok.png", MAX_FILE_BYTES), video, file("notes.pdf", MAX_FILE_BYTES)]);
+  expect(accepted.map((f) => f.name)).toEqual(["ok.png", "notes.pdf"]);
+  expect(error).toBe("video.mov is over 20 MB. Attachments can be up to 20 MB.");
+  expect(acceptFiles([], [big, video]).error).toBe("2 files are over 20 MB. Attachments can be up to 20 MB.");
 });
 
 test("formats sizes", () => {

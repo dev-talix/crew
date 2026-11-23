@@ -249,7 +249,8 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version > SCHEMA_VERSION {
-            return Err(rusqlite::Error::InvalidQuery);
+            let message = "This database comes from a newer version of Grimoire. Update the app to open it.";
+            return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN), Some(message.into())));
         }
         if version < 1 {
             conn.execute_batch(
@@ -960,5 +961,13 @@ mod tests {
         let db = Db::open(&path).unwrap();
         assert_eq!(db.list_messages("a", None, 1).unwrap()[0].status, "interrupted");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_database_from_a_newer_app_asks_for_an_update() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();
+        let error = Db::init(conn).err().unwrap();
+        assert_eq!(error.to_string(), "This database comes from a newer version of Grimoire. Update the app to open it.");
     }
 }

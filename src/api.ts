@@ -466,7 +466,7 @@ export const api = {
   exportBackup: (includeHistory: boolean) => invoke<string | null>("export_backup_file", { includeHistory }),
   /** Asks for a file and previews it. Null when cancelled. */
   pickImport: () => invoke<Transfer.Picked | null>("pick_import"),
-  applyImport: () => invoke<Transfer.Imported>("apply_import"),
+  applyImport: (keepFullAccess: boolean) => invoke<Transfer.Imported>("apply_import", { keepFullAccess }),
 };
 
 /**

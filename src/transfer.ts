@@ -21,6 +21,8 @@ export interface ImportPreview {
   items: ImportItem[];
   /** Chat messages that come with the familiars. */
   history: number;
+  /** A familiar asks for full access. It comes in with workspace access unless the person keeps it. */
+  fullAccess: boolean;
 }
 
 export interface Picked {

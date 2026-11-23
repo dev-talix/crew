@@ -1,5 +1,6 @@
 //! `grimoire mcp <socket> <agent-id>`: a stdio MCP server that Codex or Claude starts for an agent.
-//! It answers the protocol itself and relays each tool call to the running Grimoire app.
+//! It answers the protocol itself and relays each tool call to the running Grimoire app, with the
+//! token from `GRIMOIRE_TOOLS_TOKEN` that proves which agent it speaks for.
 
 use crate::tools;
 use serde_json::{json, Value};
@@ -11,6 +12,11 @@ pub fn main(args: &[String]) -> i32 {
         eprintln!("usage: grimoire mcp <socket> <agent-id>");
         return 2;
     };
+    let Ok(token) = std::env::var(tools::TOKEN_ENV) else {
+        eprintln!("grimoire mcp needs {} from the Grimoire app.", tools::TOKEN_ENV);
+        return 2;
+    };
+    let caller = Caller { socket: socket.clone(), agent: agent.clone(), token };
     let write = |reply: Value| {
         let mut out = std::io::stdout().lock();
         writeln!(out, "{reply}").and_then(|_| out.flush()).is_ok()
@@ -21,13 +27,13 @@ pub fn main(args: &[String]) -> i32 {
         // A tool call can take minutes (ask_familiar waits for a reply), so it runs on its own thread
         // and pings or other calls still get answered meanwhile.
         if message["method"] == "tools/call" {
-            let (socket, agent) = (socket.clone(), agent.clone());
+            let caller = caller.clone();
             std::thread::spawn(move || {
-                if let Some(reply) = respond(&message, |tool, arguments| relay(&socket, &agent, tool, arguments)) {
+                if let Some(reply) = respond(&message, |tool, arguments| relay(&caller, tool, arguments)) {
                     write(reply);
                 }
             });
-        } else if let Some(reply) = respond(&message, |tool, arguments| relay(socket, agent, tool, arguments)) {
+        } else if let Some(reply) = respond(&message, |tool, arguments| relay(&caller, tool, arguments)) {
             if !write(reply) {
                 break;
             }
@@ -62,10 +68,17 @@ pub fn respond(message: &Value, call: impl FnOnce(&str, Value) -> Result<String,
     Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
 }
 
-fn relay(socket: &str, agent: &str, tool: &str, arguments: Value) -> Result<String, String> {
+#[derive(Clone)]
+struct Caller {
+    socket: String,
+    agent: String,
+    token: String,
+}
+
+fn relay(caller: &Caller, tool: &str, arguments: Value) -> Result<String, String> {
     let closed = |e: std::io::Error| format!("Grimoire is not reachable ({e}). Is the app still open?");
-    let mut stream = UnixStream::connect(socket).map_err(closed)?;
-    let request = json!({ "agent": agent, "tool": tool, "arguments": arguments });
+    let mut stream = UnixStream::connect(&caller.socket).map_err(closed)?;
+    let request = json!({ "agent": caller.agent, "token": caller.token, "tool": tool, "arguments": arguments });
     writeln!(stream, "{request}").map_err(closed)?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).map_err(closed)?;

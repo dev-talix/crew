@@ -3,6 +3,7 @@ import { api, errorText, type Agent, type ThemeEntry } from "./api";
 import { mix, modesOf, palette, ROLE_LABELS, ROLES, seeds, type Colors, type Mode, type Role, type ThemeFile } from "./theme";
 import { activeTheme, previewMode, previewTheme, themes } from "./themeStore";
 import { Segmented, Sheet } from "./ui";
+import { Shield } from "./Shield";
 import { ExportButton } from "./ImportExport";
 import "./themes.css";
 
@@ -33,7 +34,15 @@ export function ThemePicker(props: { mode: "system" | "light" | "dark"; agents: 
   const active = () => activeTheme();
   const nameOf = (id: string) => props.agents.find((a) => a.id === id)?.name ?? "a deleted familiar";
 
-  const choose = async (entry: ThemeEntry) => {
+  // A familiar's theme can carry CSS, so it shows as a preview until the person applies it.
+  const [trying, setTrying] = createSignal<ThemeEntry | null>(null);
+  const stopTrying = () => {
+    setTrying(null);
+    previewTheme(null);
+  };
+  onCleanup(() => trying() && previewTheme(null));
+
+  const apply = async (entry: ThemeEntry) => {
     setError("");
     try {
       await api.setTheme(entry.id);
@@ -42,7 +51,17 @@ export function ThemePicker(props: { mode: "system" | "light" | "dark"; agents: 
     }
   };
 
+  const choose = (entry: ThemeEntry) => {
+    if (!entry.theme.createdBy || themes()?.active === entry.id) {
+      if (trying()) stopTrying();
+      return void apply(entry);
+    }
+    setTrying(entry);
+    previewTheme(entry.theme);
+  };
+
   const edit = () => {
+    if (trying()) stopTrying();
     const entry = active();
     if (!entry) return;
     if (entry.builtIn) setEditing({ id: null, theme: { ...entry.theme, name: `${entry.theme.name} copy`, createdBy: undefined } });
@@ -75,7 +94,7 @@ export function ThemePicker(props: { mode: "system" | "light" | "dark"; agents: 
                 role="radio"
                 aria-checked={selected() ? "true" : "false"}
                 class={["theme-card", { selected: selected() }]}
-                onClick={() => void choose(entry)}
+                onClick={() => choose(entry)}
               >
                 <span class="theme-thumb" style={{ background: colors().canvas, "border-color": colors().border }} aria-hidden="true">
                   <span class="theme-thumb-side" style={{ background: colors().sidebar, "border-color": colors().border }} />
@@ -112,6 +131,35 @@ export function ThemePicker(props: { mode: "system" | "light" | "dark"; agents: 
         <p class="error-box settings-error" role="alert">
           {error()}
         </p>
+      </Show>
+      <Show when={trying()}>
+        {(entry) => (
+          <Shield place="center">
+            <div class="approval" role="alertdialog" aria-label={`Apply ${entry().theme.name}?`}>
+              <div>
+                <p class="approval-title">Previewing {entry().theme.name}</p>
+                <p class="approval-detail">
+                  Made by {nameOf(entry().theme.createdBy!)}. A theme can restyle everything, so apply it only if Grimoire looks right.
+                </p>
+              </div>
+              <div class="approval-actions">
+                <span class="spacer" />
+                <button class="ghost small" onClick={stopTrying}>
+                  Cancel
+                </button>
+                <button
+                  class="primary small"
+                  onClick={async () => {
+                    await apply(entry());
+                    stopTrying();
+                  }}
+                >
+                  Apply theme
+                </button>
+              </div>
+            </div>
+          </Shield>
+        )}
       </Show>
       <Show when={editing()}>
         {(target) => (

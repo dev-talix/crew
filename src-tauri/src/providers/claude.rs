@@ -91,11 +91,18 @@ fn args(agent: &Agent, lane: Option<&Lane>) -> Vec<String> {
         Access::Full => "bypassPermissions".into(),
     });
     // In a side conversation, Grimoire's tools know which one the familiar is calling from.
-    if let Some((command, server_args)) = crate::tools::server_command(lane.map_or(&agent.id, |l| &l.key)) {
+    if let Some(tools) = crate::tools::server_command(lane.map_or(&agent.id, |l| &l.key)) {
         // "timeout" (ms) caps each tool call, and also lifts Claude's idle cutoff for silent calls like ask_familiar.
-        let server = json!({ "command": command, "args": server_args, "timeout": crate::tools::CALL_TIMEOUT_SECS * 1000 });
+        let server = json!({
+            "command": tools.command,
+            "args": tools.args,
+            "env": { (crate::tools::TOKEN_ENV): tools.token },
+            "timeout": crate::tools::CALL_TIMEOUT_SECS * 1000,
+        });
         let config = json!({ "mcpServers": { (crate::tools::SERVER_NAME): server } });
-        args.extend(["--mcp-config".into(), config.to_string(), "--allowedTools".into(), crate::tools::claude_tool_names()]);
+        if let Some(path) = crate::tools::claude_config_file(lane.map_or(&agent.id, |l| &l.key), &config) {
+            args.extend(["--mcp-config".into(), path.to_string_lossy().into_owned(), "--allowedTools".into(), crate::tools::claude_tool_names()]);
+        }
     }
     if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
         args.extend(["--model".into(), model.into()]);

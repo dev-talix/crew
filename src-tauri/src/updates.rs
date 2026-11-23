@@ -43,11 +43,12 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 
 pub fn parse_release(body: &Value) -> Option<Release> {
     let tag = body["tag_name"].as_str()?;
-    Some(Release {
-        version: tag.trim_start_matches('v').to_string(),
-        url: body["html_url"].as_str()?.to_string(),
-        published_at: body["published_at"].as_str().map(String::from),
-    })
+    // The Download button opens this link, so Grimoire builds it for this repository rather than
+    // trusting the html_url GitHub sends.
+    let ours = format!("https://github.com/{}/releases", repository());
+    let safe_tag = !tag.is_empty() && !tag.contains("..") && tag.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
+    let url = if safe_tag { format!("{ours}/tag/{tag}") } else { format!("{ours}/latest") };
+    Some(Release { version: tag.trim_start_matches('v').to_string(), url, published_at: body["published_at"].as_str().map(String::from) })
 }
 
 pub async fn check() -> Result<UpdateCheck, String> {
@@ -94,5 +95,18 @@ mod tests {
         assert_eq!(parse_release(&body).unwrap().version, "0.2.0");
         assert!(parse_release(&json!({ "message": "Not Found" })).is_none());
         assert!(!repository().contains("github.com") && repository().contains('/'));
+    }
+
+    #[test]
+    fn only_links_to_this_repository() {
+        let url = |tag: &str, html_url: &str| parse_release(&json!({ "tag_name": tag, "html_url": html_url })).unwrap().url;
+        let ours = "https://github.com/dev-talix/grimoire/releases/tag/v0.2.0";
+        for html_url in [ours, "https://evil.example/grimoire.dmg", "https://github.com/dev-talix/grimoire/%2e%2e/%2e%2e/other/project", "javascript:alert(1)"] {
+            assert_eq!(url("v0.2.0", html_url), ours, "html_url is never used: {html_url}");
+        }
+        let fallback = "https://github.com/dev-talix/grimoire/releases/latest";
+        for tag in ["../../other", "v1/../../x", "%2e%2e", "v1?x=1", "v1#x", "", "v 1"] {
+            assert_eq!(url(tag, ours), fallback, "{tag}");
+        }
     }
 }

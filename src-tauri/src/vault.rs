@@ -233,10 +233,18 @@ pub fn save(db: &Db, store: &dyn SecretStore, input: ItemInput) -> Result<VaultI
     Ok(item)
 }
 
+/// Removes the item and its grants, then its secret. A failed database write leaves the secret in
+/// place, so the item stays usable; a leftover secret is reported but the item is gone.
 pub fn delete(db: &Db, store: &dyn SecretStore, id: &str) -> Result<(), String> {
-    store.delete(id)?;
-    db.with(|c| c.execute("DELETE FROM vault_items WHERE id = ?1", params![id]).map(|_| ()))?;
-    db.with(|c| c.execute("DELETE FROM grants WHERE scope = ?1", params![scope(id)]).map(|_| ()))
+    db.with(|c| {
+        let tx = c.unchecked_transaction()?;
+        tx.execute("DELETE FROM vault_items WHERE id = ?1", params![id])?;
+        tx.execute("DELETE FROM grants WHERE scope = ?1", params![scope(id)])?;
+        tx.commit()
+    })?;
+    store.delete(id).map_err(|e| {
+        format!("Removed the item, but its secret is still in the Keychain ({e}). In Keychain Access, delete the dev.talix.grimoire.vault entry for {id}.")
+    })
 }
 
 /// The grant scope that lets a familiar use an item without asking.
@@ -394,6 +402,33 @@ mod tests {
         delete(&db, &store, &login.id).unwrap();
         assert!(store.get(&login.id).unwrap().is_none());
         assert_eq!(list(&db).unwrap().len(), 1);
+    }
+
+    struct LockedKeychain(MemoryStore);
+    impl SecretStore for LockedKeychain {
+        fn set(&self, id: &str, value: &str) -> Result<(), String> {
+            self.0.set(id, value)
+        }
+        fn get(&self, id: &str) -> Result<Option<String>, String> {
+            self.0.get(id)
+        }
+        fn delete(&self, _: &str) -> Result<(), String> {
+            Err("Keychain: locked".into())
+        }
+    }
+
+    #[test]
+    fn deletes_the_row_and_grants_before_the_secret() {
+        let (db, store) = (Db::open_in_memory().unwrap(), LockedKeychain(MemoryStore::new()));
+        let item = save(&db, &store, input(Kind::Login, "GitHub", json!({ "password": "x" }))).unwrap();
+        db.with(|c| c.execute("INSERT INTO agents (id, name, provider, workspace, access, created_at) VALUES ('a', 'A', '\"codex\"', '/tmp/a', '\"workspace\"', 0)", []).map(|_| ())).unwrap();
+        db.add_grant("a", &scope(&item.id)).unwrap();
+        assert!(db.has_grant("a", &scope(&item.id)).unwrap());
+
+        let error = delete(&db, &store, &item.id).unwrap_err();
+        assert!(error.contains("still in the Keychain (Keychain: locked)"), "{error}");
+        assert!(list(&db).unwrap().is_empty(), "the item is gone from the list");
+        assert!(!db.has_grant("a", &scope(&item.id)).unwrap());
     }
 
     #[test]

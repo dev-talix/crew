@@ -13,6 +13,7 @@ const item = (what: ImportItem["what"], name: string, finalName = name, skipped 
 const backup: ImportPreview = {
   kind: "backup",
   history: 0,
+  fullAccess: false,
   items: [
     item("spell", "Topic brief", "Topic brief (2)"),
     item("familiar", "Researcher", "Researcher (2)"),
@@ -28,7 +29,7 @@ test("groups the preview in a fixed order", () => {
 
 test("sums up what an import adds, renames, and leaves out", () => {
   expect(previewSummary(backup)).toBe('Adds 2 familiars and 1 spell. 2 names are taken, so they get "(2)". 1 item can\'t come in.');
-  const one: ImportPreview = { kind: "spell", history: 0, items: [item("spell", "Brief", "Brief", true)] };
+  const one: ImportPreview = { kind: "spell", history: 0, fullAccess: false, items: [item("spell", "Brief", "Brief", true)] };
   expect(previewSummary(one)).toBe("Nothing new to add. 1 item can't come in.");
   expect(canImport(one)).toBe(false);
   expect(canImport(backup)).toBe(true);

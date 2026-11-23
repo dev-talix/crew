@@ -1,7 +1,8 @@
 import { createSignal, For, Show } from "solid-js";
 import BotAvatar from "./BotAvatar";
+import { inkFor } from "./avatar";
 import { api, errorText, onEvent, onMountAsync, type Agent, type ApprovalDecision, type ApprovalRequest } from "./api";
-import "./approvals.css";
+import { Shield } from "./Shield";
 
 /** Familiars' requests that wait on the person, shown in the corner until answered or timed out. */
 export default function Approvals(props: { agents: Agent[] }) {
@@ -29,45 +30,47 @@ export default function Approvals(props: { agents: Agent[] }) {
 
   return (
     <Show when={requests().length > 0 || error()}>
-      <div class="approvals" role="region" aria-label="Requests from familiars">
-        <For each={requests()}>
-          {(request) => {
-            const agent = () => props.agents.find((a) => a.id === request.agentId);
-            return (
-              <div class="approval" role="alertdialog" aria-label={request.title} style={agent() ? { "--agent": agent()!.avatar.color } : undefined}>
-                <div class="approval-head">
-                  <Show when={agent()}>{(a) => <BotAvatar avatar={a().avatar} size={28} mood="concerned" />}</Show>
-                  <div>
-                    <p class="approval-title">{request.title}</p>
-                    <Show when={request.kind === "command"} fallback={<p class="approval-detail">{request.detail}</p>}>
-                      <pre class="approval-command">{request.detail}</pre>
+      <Shield place="corner">
+        <div class="approvals" role="region" aria-label="Requests from familiars">
+          <For each={requests()}>
+            {(request) => {
+              const agent = () => props.agents.find((a) => a.id === request.agentId);
+              return (
+                <div class="approval" role="alertdialog" aria-label={request.title} style={agent() ? { "--agent": agent()!.avatar.color, "--agent-ink": inkFor(agent()!.avatar.color) } : undefined}>
+                  <div class="approval-head">
+                    <Show when={agent()}>{(a) => <BotAvatar avatar={a().avatar} size={28} mood="concerned" />}</Show>
+                    <div>
+                      <p class="approval-title">{request.title}</p>
+                      <Show when={request.kind === "command"} fallback={<p class="approval-detail">{request.detail}</p>}>
+                        <pre class="approval-command">{request.detail}</pre>
+                      </Show>
+                    </div>
+                  </div>
+                  <div class="approval-actions">
+                    <button class="ghost small" onClick={() => void answer(request, "deny")}>
+                      Deny
+                    </button>
+                    <span class="spacer" />
+                    <Show when={request.canRemember}>
+                      <button class="ghost small" onClick={() => void answer(request, "always")}>
+                        Always allow
+                      </button>
                     </Show>
+                    <button class="primary small" onClick={() => void answer(request, "once")}>
+                      Allow once
+                    </button>
                   </div>
                 </div>
-                <div class="approval-actions">
-                  <button class="ghost small" onClick={() => void answer(request, "deny")}>
-                    Deny
-                  </button>
-                  <span class="spacer" />
-                  <Show when={request.canRemember}>
-                    <button class="ghost small" onClick={() => void answer(request, "always")}>
-                      Always allow
-                    </button>
-                  </Show>
-                  <button class="primary small" onClick={() => void answer(request, "once")}>
-                    Allow once
-                  </button>
-                </div>
-              </div>
-            );
-          }}
-        </For>
-        <Show when={error()}>
-          <p class="error-box" role="alert">
-            {error()}
-          </p>
-        </Show>
-      </div>
+              );
+            }}
+          </For>
+          <Show when={error()}>
+            <p class="error-box" role="alert">
+              {error()}
+            </p>
+          </Show>
+        </div>
+      </Shield>
     </Show>
   );
 }

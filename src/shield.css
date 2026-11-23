@@ -1,0 +1,99 @@
+/* Base styles inside a Shield. Colors are fixed here, not read from the theme. */
+.shield {
+  all: initial;
+  display: block;
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+  color-scheme: light;
+  --surface: #fbfafd;
+  --raised: #eceaee;
+  --text: #1c1929;
+  --muted: #5e5b69;
+  --faint: #807e8a;
+  --line: #d7d5d9;
+  --accent: #6a48e0;
+  --accent-ink: #ffffff;
+  --danger: #c2412d;
+  --danger-bg: #f4e4e5;
+  --agent: var(--accent);
+  --agent-ink: var(--accent-ink);
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--text);
+}
+
+.shield.dark {
+  color-scheme: dark;
+  --surface: #211f28;
+  --raised: #242031;
+  --text: #ece9f9;
+  --muted: #8c8997;
+  --faint: #6a6874;
+  --line: #302e38;
+  --accent: #9b7bff;
+  --accent-ink: #060412;
+  --danger: #f08d7a;
+  --danger-bg: #382a30;
+}
+
+p,
+pre {
+  margin: 0;
+}
+
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 6px 12px;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: default;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--agent);
+  outline-offset: 2px;
+}
+
+.primary {
+  background: var(--agent);
+  color: var(--agent-ink);
+  font-weight: 600;
+}
+
+.primary:hover {
+  filter: brightness(1.06);
+}
+
+.ghost {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.ghost:hover {
+  border-color: var(--faint);
+}
+
+.ghost.small {
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.error-box {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-radius: 9px;
+  padding: 8px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
