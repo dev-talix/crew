@@ -5,6 +5,7 @@ mod delegation;
 mod dock;
 mod mcp;
 mod memory;
+mod notify;
 mod permissions;
 mod providers;
 mod routines;
@@ -12,6 +13,7 @@ mod runtime;
 mod status;
 mod themes;
 mod tools;
+mod tray;
 mod updates;
 mod vault;
 mod workflows;
@@ -623,6 +625,9 @@ pub fn run() {
             let themes_dir = themes::dir(&dir);
             vault::clear_hand_offs();
             let approvals = Arc::new(approvals::Approvals::default());
+            app.manage(notify::Notifier::new(db.clone(), approvals.clone()));
+            notify::install(app.handle());
+            tray::install(app.handle(), db.clone());
             permissions::install(app.handle().clone(), db.clone(), approvals.clone());
             #[cfg(target_os = "macos")]
             let secrets: Arc<dyn vault::SecretStore> = Arc::new(vault::Keychain);
@@ -701,9 +706,17 @@ pub fn run() {
             save_coven,
             delete_coven,
             memory::get_memory,
-            memory::save_memory
+            memory::save_memory,
+            notify::notification_settings,
+            notify::save_notification_settings,
+            tray::set_open_agent,
+            tray::menu_bar_visible,
+            tray::set_menu_bar_visible
         ])
         .on_window_event(|window, event| {
+            if let (WindowEvent::Focused(true), "main") = (event, window.label()) {
+                tray::main_focused(window.app_handle());
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let dock_on = window.app_handle().state::<AppState>().dock.edge().is_some();
                 if window.label() == "main" && dock_on {

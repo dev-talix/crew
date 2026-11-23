@@ -15,7 +15,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-tauri = { version = "2.12", features = ["macos-private-api"] }
+tauri = { version = "2.12", features = ["macos-private-api", "tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -38,6 +38,9 @@ strip = true
 [target.'cfg(target_os = "macos")'.dependencies]
 # Already in the build through Tauri; used directly to swap the Dock icon at runtime.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSData"] }
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSBundle", "NSData", "NSSet", "NSString"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder"] }
 security-framework = "3"
+# Notifications with Allow and Deny buttons, which tauri-plugin-notification only offers on mobile.
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+block2 = "0.6"
