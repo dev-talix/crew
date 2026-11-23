@@ -99,6 +99,11 @@ fn args(agent: &Agent) -> Vec<String> {
     if let Some(effort) = agent.effort.as_deref().filter(|e| !e.is_empty()) {
         args.extend(["--effort".into(), effort.into()]);
     }
+    if let Some(memory) = crate::memory::session_prompt(agent) {
+        // Claude records the system prompt when a chat starts and reuses it on resume, so a changed
+        // memory reaches the familiar in its next new chat.
+        args.extend(["--append-system-prompt".into(), memory]);
+    }
     if let Some(session) = agent.session_id.as_deref() {
         args.extend(["--resume".into(), session.into()]);
     }
@@ -483,5 +488,30 @@ mod tests {
         assert!(joined.contains("--model sonnet"));
         assert!(!joined.contains("--effort"));
         assert!(joined.ends_with("--resume s1"));
+        assert!(!joined.contains("--append-system-prompt"), "no memory yet");
+    }
+
+    #[test]
+    fn appends_the_familiar_memory_to_the_system_prompt() {
+        let agent = Agent {
+            id: "memory-claude".into(),
+            name: "Scribe".into(),
+            provider: crate::db::Provider::Claude,
+            model: None,
+            workspace: "/tmp".into(),
+            access: Access::Workspace,
+            session_id: None,
+            avatar: crate::db::Avatar::for_seed("a"),
+            effort: None,
+            active_model: None,
+            coven_id: None,
+            created_at: 0,
+        };
+        let dir = crate::memory::test_dir();
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("memory-claude.md"), "The user's cat is Miso.").unwrap();
+        let args = args(&agent);
+        let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
+        assert!(args[at + 1].contains("<memory of=\"you\">\nThe user's cat is Miso.\n</memory>"));
     }
 }

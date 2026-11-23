@@ -105,6 +105,9 @@ fn thread_params(agent: &Agent) -> Value {
         let server = json!({ "command": command, "args": args, "default_tools_approval_mode": "approve" });
         params["config"] = json!({ "mcp_servers": { (crate::tools::SERVER_NAME): server } });
     }
+    if let Some(memory) = crate::memory::session_prompt(agent) {
+        params["developerInstructions"] = json!(memory);
+    }
     params
 }
 
@@ -578,5 +581,13 @@ mod tests {
         assert_eq!(params["sandbox"], "workspace-write");
         assert_eq!(params["approvalPolicy"], "never");
         assert!(params.get("model").is_none());
+        assert!(params.get("developerInstructions").is_none(), "no memory yet");
+
+        let agent = Agent { id: "memory-codex".into(), ..agent };
+        let dir = crate::memory::test_dir();
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("memory-codex.md"), "Deploys go out on Fridays.").unwrap();
+        let instructions = thread_params(&agent)["developerInstructions"].as_str().unwrap().to_string();
+        assert!(instructions.contains("Deploys go out on Fridays."));
     }
 }
