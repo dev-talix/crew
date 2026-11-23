@@ -606,12 +606,17 @@ impl Familiars for AppFamiliars {
     }
 }
 
+/// How long a request to a linked Mac waits for its reply before it counts as failed: a little past
+/// the 25 minutes the home Mac spends trying to bring a reply back (see `link::send_reply`).
+pub const REPLY_HORIZON: Duration = Duration::from_secs(30 * 60);
+
 /// Someone waiting for a reply from a linked Mac.
 struct Waiter {
     /// An `ask_familiar` call still waiting. None for `message_familiar`.
     reply: Option<tokio::sync::oneshot::Sender<TurnOutcome>>,
     /// The chat the asker sent from; see `Runtime::deliver`.
     home: Option<String>,
+    since: Instant,
 }
 
 /// Requests sent to linked Macs and still waiting for a reply, by their row in the handoffs list.
@@ -626,6 +631,36 @@ impl Waiters {
     fn take(&self, id: i64) -> Option<Waiter> {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&id)
     }
+
+    /// Takes the waiters that have waited REPLY_HORIZON by `now`, with the chats they sent from.
+    fn expired(&self, now: Instant) -> Vec<(i64, Option<String>)> {
+        let mut waiters = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let ids: Vec<i64> = waiters.iter().filter(|(_, w)| now.saturating_duration_since(w.since) >= REPLY_HORIZON).map(|(id, _)| *id).collect();
+        ids.into_iter().filter_map(|id| waiters.remove(&id).map(|w| (id, w.home))).collect()
+    }
+}
+
+/// Gives up on requests to linked Macs whose reply hasn't come within REPLY_HORIZON: each shows as
+/// failed, and the familiar that sent it hears so. Returns how many failed.
+pub fn expire(db: &Db, waiters: &Waiters, familiars: &dyn Familiars, now: Instant) -> Result<usize, String> {
+    let mut failed = 0;
+    for (id, home) in waiters.expired(now) {
+        let Some(sent) = crate::handoffs::sent(db, id)? else { continue };
+        if !matches!(sent.status, crate::handoffs::Status::Waiting | crate::handoffs::Status::Accepted) {
+            continue;
+        }
+        crate::handoffs::set(db, id, crate::handoffs::Status::Failed)?;
+        failed += 1;
+        let Some(thread) = sent.thread else { continue };
+        let mac = sent.mac.as_deref().unwrap_or("a linked Mac");
+        let label = format!("{} on {mac}", sent.target_name);
+        let reason = format!("its reply never came back from {mac}.");
+        familiars.deliver(&sent.asker_id, home, reply_text(&label, &thread, TurnOutcome::Failed(reason)), &format!("{REPLY_SOURCE}{label}"));
+    }
+    if failed > 0 {
+        familiars.changed();
+    }
+    Ok(failed)
 }
 
 /// What a request to a linked Mac goes through.
@@ -720,7 +755,7 @@ where
         Kind::Message => (None, None),
     };
     // Waiting before the request goes, since the reply may come back before the request returns.
-    reach.waiters.add(id, Waiter { reply, home });
+    reach.waiters.add(id, Waiter { reply, home, since: Instant::now() });
     let body = json!({
         "targetId": target.agent,
         "asker": { "id": out.asker.id, "name": out.asker.name, "mac": reach.link.name() },
@@ -770,11 +805,11 @@ pub fn away_reply(db: &Db, waiters: &Waiters, familiars: &dyn Familiars, peer: &
     familiars.changed();
     let label = format!("{} on {}", sent.target_name, sent.mac.as_deref().unwrap_or("a linked Mac"));
     let (home, outcome) = match waiters.take(id) {
-        Some(Waiter { reply: Some(tx), home }) => match tx.send(outcome) {
+        Some(Waiter { reply: Some(tx), home, .. }) => match tx.send(outcome) {
             Ok(()) => return Ok(()),
             Err(outcome) => (home, outcome),
         },
-        Some(Waiter { reply: None, home }) => (home, outcome),
+        Some(Waiter { reply: None, home, .. }) => (home, outcome),
         None => (None, outcome),
     };
     familiars.deliver(&sent.asker_id, home, reply_text(&label, thread, outcome), &format!("{REPLY_SOURCE}{label}"));
@@ -868,6 +903,7 @@ pub fn incoming(
         None => side::create_remote(db, peer, &request.asker.id, &asker_name, &target.id, &message)?.id,
     };
     let handoff = crate::handoffs::record(db, &chat, kind.as_str(), &message, crate::handoffs::Status::Waiting)?;
+    crate::handoffs::set_remote_request(db, handoff, request.request_id)?;
     familiars.changed();
     let chat_id = chat.clone();
     let turn = Box::pin(async move {
@@ -881,8 +917,8 @@ pub fn incoming(
 /// longer shows as working, and the familiar who started it hears that no reply is coming. The note
 /// waits in its current chat and comes with its next turn, rather than starting a turn as the app
 /// opens. Their requests show as failed in the handoffs list. Helpers' chats are left to
-/// `helpers::interrupt_leftovers`. A familiar on a linked Mac that asked hears nothing; its own Mac
-/// stops waiting when it restarts. Run once at startup.
+/// `helpers::interrupt_leftovers`. A familiar on a linked Mac that asked hears through the link: see
+/// `handoffs::cut_off_remote`, which must run first. Run once at startup.
 pub fn recover(db: &Db) -> Result<usize, String> {
     crate::handoffs::fail_unfinished(db)?;
     let unfinished = side::unfinished(db)?;
@@ -1221,6 +1257,47 @@ mod tests {
         assert_eq!(local_id("mac-b", "../x:y"), None);
         drop(held);
         assert_eq!(chains.chain_to("b"), ["b"]);
+    }
+
+    #[derive(Default)]
+    struct Delivered(Mutex<Vec<(String, Option<String>, String)>>);
+
+    impl Familiars for Delivered {
+        fn side_turn(&self, _: &str, _: i64, _: &str, _: &str) -> BoxFuture<'static, TurnOutcome> {
+            unreachable!()
+        }
+        fn deliver(&self, asker_id: &str, home: Option<String>, text: String, _: &str) {
+            self.0.lock().unwrap().push((asker_id.into(), home, text));
+        }
+        fn link_row(&self, _: Option<&str>, _: &str, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn changed(&self) {}
+    }
+
+    #[test]
+    fn requests_to_a_linked_mac_with_no_reply_fail_after_the_retry_horizon() {
+        let (db, a, ..) = setup();
+        let away = crate::handoffs::Away { thread: None, peer: "mac-b", asker_id: &a.id, target_id: "s1", target_name: "Scribe" };
+        let (old, fresh) = (
+            crate::handoffs::record_away(&db, &away, "message", "Draft it", crate::handoffs::Status::Waiting).unwrap(),
+            crate::handoffs::record_away(&db, &away, "message", "And this", crate::handoffs::Status::Waiting).unwrap(),
+        );
+        crate::handoffs::set_thread(&db, old, "t1").unwrap();
+        let (waiters, start) = (Waiters::default(), Instant::now());
+        waiters.add(old, Waiter { reply: None, home: Some("main".into()), since: start });
+        waiters.add(fresh, Waiter { reply: None, home: None, since: start + Duration::from_secs(600) });
+        let familiars = Delivered::default();
+
+        assert_eq!(expire(&db, &waiters, &familiars, start + REPLY_HORIZON - Duration::from_secs(1)).unwrap(), 0);
+        assert_eq!(expire(&db, &waiters, &familiars, start + REPLY_HORIZON).unwrap(), 1);
+        assert_eq!(crate::handoffs::sent(&db, old).unwrap().unwrap().status, crate::handoffs::Status::Failed);
+        assert_eq!(crate::handoffs::sent(&db, fresh).unwrap().unwrap().status, crate::handoffs::Status::Waiting);
+        let delivered = familiars.0.lock().unwrap().clone();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!((delivered[0].0.as_str(), delivered[0].1.as_deref()), ("a", Some("main")));
+        assert!(delivered[0].2.starts_with("Scribe on a linked Mac couldn't reply to your message: its reply never came back"), "{}", delivered[0].2);
+        assert!(waiters.take(old).is_none() && waiters.take(fresh).is_some(), "only the expired waiter is gone");
     }
 
     #[test]

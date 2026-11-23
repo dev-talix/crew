@@ -745,6 +745,10 @@ pub fn run() {
             let _ = helpers::interrupt_leftovers(&db);
             let billing = db.setting(CLAUDE_BILLING).ok().flatten();
             providers::USE_CLAUDE_SUBSCRIPTION.store(billing.as_deref() != Some("api"), Ordering::Relaxed);
+            let cut_off = handoffs::cut_off_remote(&db).unwrap_or_else(|e| {
+                eprintln!("Couldn't find requests from linked Macs left unfinished: {e}");
+                Vec::new()
+            });
             if let Err(e) = delegation::recover(&db) {
                 eprintln!("Couldn't close side conversations left unfinished: {e}");
             }
@@ -773,7 +777,7 @@ pub fn run() {
             if let Err(e) = tools::serve(Arc::new(tools), &dir.join("grimoire.sock")) {
                 eprintln!("Grimoire tools are off: {e}");
             }
-            if let Err(e) = link::install(app.handle(), db.clone(), secrets.clone(), runtime.clone()) {
+            if let Err(e) = link::install(app.handle(), db.clone(), secrets.clone(), runtime.clone(), cut_off) {
                 eprintln!("Linked Macs are off: {e}");
             }
             // Rituals can fire as soon as the scheduler starts, so the approval gate and the tool socket

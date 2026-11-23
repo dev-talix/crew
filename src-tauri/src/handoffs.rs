@@ -99,6 +99,17 @@ pub(crate) fn migrate_linked(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Schema version 27: on the home Mac, a request from a familiar on a linked Mac keeps the asking
+/// Mac's id for it, so a restart that cuts it off can still send that Mac a reply.
+pub(crate) fn migrate_remote_request(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "BEGIN;
+         ALTER TABLE handoffs ADD COLUMN remote_request INTEGER;
+         PRAGMA user_version = 27;
+         COMMIT;",
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -148,6 +159,33 @@ pub fn record(db: &Db, chat_id: &str, kind: &str, text: &str, status: Status) ->
             params![chat_id, kind, text, status.as_str(), now_ms()],
         )?;
         Ok(c.last_insert_rowid())
+    })
+}
+
+/// Saves the asking Mac's id for a request a familiar on that Mac sent here.
+pub fn set_remote_request(db: &Db, id: i64, request: i64) -> Result<(), String> {
+    db.with(|c| c.execute("UPDATE handoffs SET remote_request = ?2 WHERE id = ?1", params![id, request]).map(|_| ()))
+}
+
+/// A request from a familiar on a linked Mac that a restart here cut off, which that Mac still waits on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CutOff {
+    pub peer: String,
+    /// The side conversation here.
+    pub thread: String,
+    /// The asking Mac's id for it.
+    pub request: i64,
+}
+
+/// Requests from familiars on linked Macs still unfinished. Run at startup before `fail_unfinished`.
+pub fn cut_off_remote(db: &Db) -> Result<Vec<CutOff>, String> {
+    db.with(|c| {
+        let mut stmt = c.prepare(
+            "SELECT c.remote_peer, h.chat_id, h.remote_request FROM handoffs h JOIN chats c ON c.id = h.chat_id
+             WHERE h.status IN ('waiting', 'accepted') AND c.remote_peer IS NOT NULL AND h.remote_request IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| Ok(CutOff { peer: r.get(0)?, thread: r.get(1)?, request: r.get(2)? }))?;
+        rows.collect()
     })
 }
 

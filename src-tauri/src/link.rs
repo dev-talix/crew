@@ -5,7 +5,8 @@
 //!
 //! The server listens on port 47620 on the addresses Tailscale reports for this Mac, and drops
 //! connections from anything Tailscale doesn't list as a peer. 100.64.0.0/10 alone proves nothing:
-//! ISPs and hotspots use it for carrier-grade NAT. WireGuard encrypts the traffic, so the protocol is
+//! ISPs and hotspots use it for carrier-grade NAT. Without Tailscale's CLI there is no peer list, so
+//! linking stays off. WireGuard encrypts the traffic, so the protocol is
 //! plain HTTP/1.1 JSON. Pairing trades a one-time code for a token each way; the tokens live in the
 //! Keychain.
 
@@ -17,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
+use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -35,6 +36,8 @@ const RESPONSE_LIMIT: u64 = 32 * 1024 * 1024;
 const RING: usize = 1000;
 const LONG_POLL: Duration = Duration::from_secs(25);
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a connection without a token yet may take to send its request.
+const PRE_AUTH_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 const BIND_RETRY: Duration = Duration::from_secs(60);
@@ -50,11 +53,17 @@ const PAIR_PER_MINUTE: usize = 20;
 const MAX_CONNECTIONS: usize = 64;
 /// Connections that haven't shown a token yet, pairing included.
 const PRE_AUTH_CONNECTIONS: usize = 8;
+/// Of those, how many one address may hold, so one device can't take them all.
+const PRE_AUTH_PER_ADDRESS: usize = 2;
 /// How long both tokens from a crossed pairing stay valid. See `Tokens`.
 const PAIR_WINDOW: Duration = Duration::from_secs(2 * 60);
 /// The least time between two `tailscale status` runs for an address it didn't list.
 const TAILNET_RECHECK: Duration = Duration::from_secs(10);
 const TAILSCALE_TIMEOUT: Duration = Duration::from_secs(5);
+const TAILSCALE_APP: &str = "/Applications/Tailscale.app";
+/// Tailscale's Apple Developer Team ID, which signs its app.
+const TAILSCALE_TEAM: &str = "W5364U7YZB";
+const NO_CLI: &str = "Grimoire can't find Tailscale's command-line tool, so linking is off. Make sure the Tailscale app is installed.";
 const INSTALL_ID: &str = "link_install_id";
 /// How often the home Mac tries to bring a handoff's reply back before it gives up, and the longest
 /// wait between tries: about 25 minutes in all.
@@ -100,12 +109,14 @@ impl Linked {
     }
 }
 
+/// Tailscale's CLI isn't at a place Grimoire trusts, or isn't Tailscale's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NoCli;
+
 /// What Tailscale knows about this Mac: its CLI in the app, a fake in tests.
 pub trait Tailnet: Send + Sync {
-    /// The output of `tailscale status --json`, or None when the CLI isn't there or didn't answer.
-    fn status(&self) -> BoxFuture<'_, Option<String>>;
-    /// This Mac's network interfaces and their addresses.
-    fn interfaces(&self) -> Vec<(String, IpAddr)>;
+    /// The output of `tailscale status --json`, or None when the CLI didn't answer.
+    fn status(&self) -> BoxFuture<'_, Result<Option<String>, NoCli>>;
 }
 
 /// Where relayed events go: the app's windows, or a list in tests.
@@ -171,42 +182,6 @@ pub fn is_tailnet(ip: IpAddr) -> bool {
     }
 }
 
-/// Every interface address on this Mac, with its interface's name.
-fn interfaces() -> Vec<(String, IpAddr)> {
-    let mut found = Vec::new();
-    // SAFETY: getifaddrs fills a list that stays valid until freeifaddrs. Each sockaddr is read as the
-    // type its family says, and each name is a C string.
-    unsafe {
-        let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
-        if libc::getifaddrs(&mut head) != 0 {
-            return found;
-        }
-        let mut at = head;
-        while !at.is_null() {
-            let entry = &*at;
-            if !entry.ifa_addr.is_null() && !entry.ifa_name.is_null() {
-                let ip = match i32::from((*entry.ifa_addr).sa_family) {
-                    libc::AF_INET => {
-                        let sin = &*(entry.ifa_addr as *const libc::sockaddr_in);
-                        Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))))
-                    }
-                    libc::AF_INET6 => {
-                        let sin6 = &*(entry.ifa_addr as *const libc::sockaddr_in6);
-                        Some(IpAddr::V6(Ipv6Addr::from(sin6.sin6_addr.s6_addr)))
-                    }
-                    _ => None,
-                };
-                if let Some(ip) = ip {
-                    found.push((std::ffi::CStr::from_ptr(entry.ifa_name).to_string_lossy().into_owned(), ip));
-                }
-            }
-            at = entry.ifa_next;
-        }
-        libc::freeifaddrs(head);
-    }
-    found
-}
-
 /// Tailscale's addresses for this Mac and for its peers. A stopped Tailscale has none.
 #[derive(Debug, PartialEq)]
 struct TailscaleStatus {
@@ -235,25 +210,15 @@ fn parse_status(text: &str) -> Option<TailscaleStatus> {
     Some(TailscaleStatus { own, peers })
 }
 
-/// Without the CLI: tailnet-range addresses on Tailscale's tunnel interfaces (utun*) only. On Wi-Fi
-/// or Ethernet, 100.64.0.0/10 may be the ISP's.
-fn tunnel_addresses(interfaces: &[(String, IpAddr)]) -> Vec<IpAddr> {
-    let mut found: Vec<IpAddr> = Vec::new();
-    for (name, ip) in interfaces {
-        let ip = ip.to_canonical();
-        if name.starts_with("utun") && is_tailnet(ip) && !found.contains(&ip) {
-            found.push(ip);
-        }
-    }
-    found.sort_by_key(|ip| ip.is_ipv6());
-    found
+/// Tailnet addresses only, as a check on what Tailscale reports. Tests run on loopback.
+fn in_range(ip: IpAddr) -> bool {
+    is_tailnet(ip) || (cfg!(test) && ip.to_canonical().is_loopback())
 }
 
 /// The addresses this Mac listens on and the peers it trusts, as last checked.
 #[derive(Debug)]
 struct TailnetView {
-    /// The CLI answered, so `peers` is Tailscale's own list. Without it any tailnet-range address
-    /// passes, which is the best this Mac can tell.
+    /// Tailscale's CLI was found. Without it nothing is trusted and nothing listens.
     cli: bool,
     own: Vec<IpAddr>,
     peers: HashSet<IpAddr>,
@@ -265,42 +230,72 @@ impl TailnetView {
         TailnetView { cli: true, own: Vec::new(), peers: HashSet::new() }
     }
 
-    fn new(status: Option<&str>, interfaces: impl FnOnce() -> Vec<(String, IpAddr)>) -> Self {
-        match status.and_then(parse_status) {
-            Some(status) => TailnetView { cli: true, own: status.own, peers: status.peers },
-            None => TailnetView { cli: false, own: tunnel_addresses(&interfaces()), peers: HashSet::new() },
+    fn new(status: Result<Option<&str>, NoCli>) -> Self {
+        match status {
+            Err(NoCli) => TailnetView { cli: false, own: Vec::new(), peers: HashSet::new() },
+            Ok(text) => {
+                let (own, peers) = text.and_then(parse_status).map_or_else(Default::default, |s| (s.own, s.peers));
+                TailnetView { cli: true, own: own.into_iter().filter(|ip| in_range(*ip)).collect(), peers }
+            }
         }
     }
 
     fn trusts(&self, ip: IpAddr) -> bool {
         let ip = ip.to_canonical();
-        if self.cli {
-            self.peers.contains(&ip)
-        } else {
-            is_tailnet(ip)
-        }
+        in_range(ip) && self.peers.contains(&ip)
     }
 }
 
-/// Where the Tailscale CLI may be: the one the app installs, Homebrew's, the login shell's PATH, then
-/// the app's own binary, which works as the CLI.
+/// Where Tailscale's CLI may be, resolved, in the order to try. Only these fixed places, never the
+/// login shell's PATH: whatever answers as Tailscale picks the addresses this Mac sends tokens to.
 fn tailscale_programs() -> Vec<PathBuf> {
-    let mut programs: Vec<PathBuf> = vec!["/usr/local/bin/tailscale".into(), "/opt/homebrew/bin/tailscale".into()];
-    if let Some(path) = crate::providers::login_shell_path() {
-        programs.extend(std::env::split_paths(&path).map(|dir| dir.join("tailscale")));
+    let app = Path::new(TAILSCALE_APP);
+    let mut programs = Vec::new();
+    for path in ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale"] {
+        if let Some(program) = trusted_program(Path::new(path), app).filter(|p| !programs.contains(p)) {
+            programs.push(program);
+        }
     }
-    programs.push("/Applications/Tailscale.app/Contents/MacOS/Tailscale".into());
-    let mut seen = HashSet::new();
-    programs.retain(|p| p.is_absolute() && p.is_file() && seen.insert(p.clone()));
     programs
+}
+
+/// `path` resolved, when it lands inside the Tailscale app at `app`, or on a file root owns that no
+/// group or other user can change. Homebrew's folders belong to the person, so a link there counts
+/// only when it points into the app.
+fn trusted_program(path: &Path, app: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let real = std::fs::canonicalize(path).ok()?;
+    let meta = std::fs::metadata(&real).ok().filter(std::fs::Metadata::is_file)?;
+    (real.starts_with(app) || (meta.uid() == 0 && meta.mode() & 0o022 == 0)).then_some(real)
+}
+
+/// Whether macOS confirms `program` is signed by Tailscale. Any admin account can write to
+/// /Applications, so where a file sits there proves nothing.
+async fn signed_by_tailscale(program: &Path) -> bool {
+    let requirement = format!("-R=anchor apple generic and certificate leaf[subject.OU] = \"{TAILSCALE_TEAM}\"");
+    let mut command = tokio::process::Command::new("/usr/bin/codesign");
+    command
+        .arg("--verify")
+        .arg(requirement)
+        .arg(program)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    matches!(tokio::time::timeout(TAILSCALE_TIMEOUT, command.status()).await, Ok(Ok(status)) if status.success())
 }
 
 struct TailscaleCli;
 
 impl Tailnet for TailscaleCli {
-    fn status(&self) -> BoxFuture<'_, Option<String>> {
+    fn status(&self) -> BoxFuture<'_, Result<Option<String>, NoCli>> {
         Box::pin(async {
+            let mut found = false;
             for program in tailscale_programs() {
+                if program.starts_with(TAILSCALE_APP) && !signed_by_tailscale(&program).await {
+                    continue;
+                }
+                found = true;
                 let mut command = tokio::process::Command::new(&program);
                 command
                     .args(["status", "--json"])
@@ -311,15 +306,15 @@ impl Tailnet for TailscaleCli {
                 let Ok(Ok(output)) = tokio::time::timeout(TAILSCALE_TIMEOUT, command.output()).await else { continue };
                 let text = String::from_utf8_lossy(&output.stdout).into_owned();
                 if parse_status(&text).is_some() {
-                    return Some(text);
+                    return Ok(Some(text));
                 }
             }
-            None
+            if found {
+                Ok(None)
+            } else {
+                Err(NoCli)
+            }
         })
-    }
-
-    fn interfaces(&self) -> Vec<(String, IpAddr)> {
-        interfaces()
     }
 }
 
@@ -540,29 +535,59 @@ struct Pairing {
     wrong: u8,
 }
 
+/// A token this Mac takes from a peer.
+struct Expected {
+    token: String,
+    made: Instant,
+    /// The peer has used it, so it outlasts PAIR_WINDOW.
+    pinned: bool,
+}
+
 /// A pairing makes a token each way, and each Mac picks the token it expects. When two Macs pair each
-/// other at once, each runs two pairings and keeps the send token from whichever finished last, which
-/// may not be the one the other Mac kept. So a Mac keeps every token it expects from pairings in the
-/// last PAIR_WINDOW, and once the window passes, the first token the peer uses becomes the only one.
+/// other at once, each runs two pairings. Each keeps the send token from the pairing that finished
+/// first, and takes every token it expects from pairings in the last PAIR_WINDOW, since it can't tell
+/// which one the other Mac kept. The first token the peer uses is pinned and the others go at once.
+/// Once the window passes, a token the peer never used stops working, unless it's the only one.
 struct Tokens {
     /// What this Mac sends to the peer.
     send: String,
-    /// What the peer may send to this Mac, with when each was made. The Keychain keeps them
-    /// space-separated; one token is the format from before crossed pairings.
-    expect: Vec<(String, Instant)>,
+    /// When `send` was set, so a pairing that crosses it keeps it.
+    paired: Instant,
+    /// What the peer may send to this Mac. The Keychain keeps them space-separated; one token is the
+    /// format from before crossed pairings.
+    expect: Vec<Expected>,
 }
 
 impl Tokens {
+    fn valid(&self, i: usize, now: Instant) -> bool {
+        let e = &self.expect[i];
+        e.pinned || self.expect.len() == 1 || now.duration_since(e.made) < PAIR_WINDOW
+    }
+
+    /// The peer used token `i`: it becomes the only one.
+    fn pin(&mut self, i: usize) {
+        let mut used = self.expect.swap_remove(i);
+        used.pinned = true;
+        self.expect = vec![used];
+    }
+
+    /// What the Keychain keeps, space-separated.
     fn expect_text(&self) -> String {
-        self.expect.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join(" ")
+        self.expect.iter().map(|e| e.token.as_str()).collect::<Vec<_>>().join(" ")
     }
 }
 
-/// Tokens read back from the Keychain count as older than the window.
+/// Tokens read back from the Keychain count as older than the window. One is the pinned token, or the
+/// only one. Several come from a crossed pairing nobody used yet: they get a new window, and the
+/// first one the peer uses wins.
 fn loaded_tokens(send: String, expect: &str) -> Option<Tokens> {
-    let at = Instant::now().checked_sub(PAIR_WINDOW).unwrap_or_else(Instant::now);
-    let expect: Vec<(String, Instant)> = expect.split_whitespace().filter(|t| valid_token(t)).map(|t| (t.to_string(), at)).collect();
-    (valid_token(&send) && !expect.is_empty()).then_some(Tokens { send, expect })
+    let now = Instant::now();
+    let old = now.checked_sub(PAIR_WINDOW).unwrap_or(now);
+    let mut expect: Vec<Expected> = expect.split_whitespace().filter(|t| valid_token(t)).map(|t| Expected { token: t.to_string(), made: now, pinned: false }).collect();
+    if let [only] = expect.as_mut_slice() {
+        (only.made, only.pinned) = (old, true);
+    }
+    (valid_token(&send) && !expect.is_empty()).then_some(Tokens { send, paired: old, expect })
 }
 
 #[derive(Default)]
@@ -664,6 +689,30 @@ pub struct Link {
     server: Mutex<ThisMac>,
     connections: Arc<Semaphore>,
     pre_auth: Arc<Semaphore>,
+    /// How many pre-auth connections each address holds.
+    pre_auth_from: Arc<Mutex<HashMap<IpAddr, usize>>>,
+}
+
+/// A connection's place in the pre-auth pool, counted against its address too.
+struct PreAuth {
+    _permit: OwnedSemaphorePermit,
+    ip: IpAddr,
+    from: Arc<Mutex<HashMap<IpAddr, usize>>>,
+}
+
+impl Drop for PreAuth {
+    fn drop(&mut self) {
+        if let Ok(mut from) = self.from.lock() {
+            match from.get(&self.ip).copied() {
+                Some(held) if held > 1 => {
+                    from.insert(self.ip, held - 1);
+                }
+                _ => {
+                    from.remove(&self.ip);
+                }
+            }
+        }
+    }
 }
 
 static LINK: OnceLock<Arc<Link>> = OnceLock::new();
@@ -706,14 +755,15 @@ impl Link {
             server: Mutex::new(server),
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             pre_auth: Arc::new(Semaphore::new(PRE_AUTH_CONNECTIONS)),
+            pre_auth_from: Arc::new(Mutex::new(HashMap::new())),
         }))
     }
 
-    /// Asks Tailscale again for this Mac's addresses and its peers.
-    async fn check_tailnet(&self) -> Vec<IpAddr> {
+    /// Asks Tailscale again for this Mac's addresses and its peers. None when its CLI isn't found.
+    async fn check_tailnet(&self) -> Option<Vec<IpAddr>> {
         let status = self.tailnet.status().await;
-        let view = TailnetView::new(status.as_deref(), || self.tailnet.interfaces());
-        let own = view.own.clone();
+        let view = TailnetView::new(status.as_ref().map(Option::as_deref).map_err(|e| *e));
+        let own = view.cli.then(|| view.own.clone());
         if let Ok(mut slot) = self.view.lock() {
             *slot = (view, Some(Instant::now()));
         }
@@ -818,11 +868,15 @@ impl Link {
             // Held throughout, so two pairings with the same Mac at once both keep their token.
             let mut all = self.tokens.lock().map_err(|_| "link state poisoned")?;
             let now = Instant::now();
-            let mut tokens = Tokens { send, expect: Vec::new() };
+            let mut tokens = Tokens { send, paired: now, expect: Vec::new() };
             if let Some(old) = all.remove(id) {
-                tokens.expect = old.expect.into_iter().filter(|(_, at)| now.duration_since(*at) < PAIR_WINDOW).collect();
+                if now.duration_since(old.paired) < PAIR_WINDOW {
+                    // A crossed pairing: the other Mac may already be using the token sent from here.
+                    (tokens.send, tokens.paired) = (old.send, old.paired);
+                }
+                tokens.expect = old.expect.into_iter().filter(|e| now.duration_since(e.made) < PAIR_WINDOW).collect();
             }
-            tokens.expect.push((expect, now));
+            tokens.expect.push(Expected { token: expect, made: now, pinned: false });
             self.secrets.set(&send_key(id), &tokens.send)?;
             self.secrets.set(&expect_key(id), &tokens.expect_text())?;
             save_peer(&self.db, id, name, address)?;
@@ -865,8 +919,9 @@ impl Link {
         if code.len() != CODE_LEN || !code.bytes().all(|b| CODE_ALPHABET.contains(&b)) {
             return Err("A pairing code is 8 letters and digits, like K7QM3XRP.".into());
         }
-        let mine = self.server.lock().map_err(|_| "link state poisoned")?.addresses.first().cloned();
-        let mine = mine.ok_or("This Mac isn't on a tailnet yet. Connect Tailscale, then try again.")?;
+        let server = self.server.lock().map_err(|_| "link state poisoned")?.clone();
+        let not_listening = || server.error.clone().unwrap_or_else(|| "This Mac isn't on a tailnet yet. Connect Tailscale, then try again.".into());
+        let mine = server.addresses.first().cloned().ok_or_else(not_listening)?;
         let token_for_you = new_token();
         let body = json!({ "code": code, "installId": self.install_id, "name": self.name, "address": mine, "tokenForYou": token_for_you });
         let reply = match self.call(&address, None, "POST", "/v1/pair", Some(&body), CALL_TIMEOUT).await {
@@ -878,7 +933,11 @@ impl Link {
         let name = clean_mac_name(&reply.name);
         let ok = valid_id(&reply.install_id) && reply.install_id != self.install_id && valid_token(&reply.token_for_me);
         let Some(name) = name.filter(|_| ok) else { return Err("The other Mac sent an odd answer.".into()) };
-        self.add_peer(&reply.install_id, &name, &address, reply.token_for_me, token_for_you)
+        let peer = self.add_peer(&reply.install_id, &name, &address, reply.token_for_me, token_for_you)?;
+        // Use the new token at once, so the other Mac pins it and drops any other from a crossed
+        // pairing. The relay says hello too, but maybe later.
+        let _ = self.peer_call(&peer.id, "GET", "/v1/hello", None, CALL_TIMEOUT).await;
+        Ok(peer)
     }
 
     pub async fn unlink(&self, peer: &str) -> Result<(), String> {
@@ -907,28 +966,28 @@ impl Link {
 
     // ----- Server -----
 
-    /// The peer whose token this is. Once a crossed pairing's window has passed, the token the peer
-    /// uses becomes the only one it may use.
+    /// The peer whose token this is. A token that works is pinned; see `Tokens`.
     fn peer_for(&self, authorization: Option<&str>) -> Option<String> {
         let token = authorization?.strip_prefix("Bearer ")?.trim();
         let mut tokens = self.tokens.lock().ok()?;
         // Compare with every token so the time doesn't say which one matched.
-        let found = tokens.iter().fold(None, |found, (id, t)| {
-            let hit = t.expect.iter().fold(false, |hit, (expect, _)| hit | http::same_secret(expect, token));
-            if hit {
-                Some(id.clone())
-            } else {
-                found
+        let mut found = None;
+        for (id, t) in tokens.iter() {
+            for (i, expect) in t.expect.iter().enumerate() {
+                if http::same_secret(&expect.token, token) {
+                    found = Some((id.clone(), i));
+                }
             }
-        });
-        let peer = found?;
-        if let Some(t) = tokens.get_mut(&peer).filter(|t| t.expect.len() > 1) {
-            let now = Instant::now();
-            let before = t.expect.len();
-            t.expect.retain(|(expect, at)| expect == token || now.duration_since(*at) < PAIR_WINDOW);
-            if t.expect.len() != before {
-                let _ = self.secrets.set(&expect_key(&peer), &t.expect_text());
-            }
+        }
+        let (peer, i) = found?;
+        let t = tokens.get_mut(&peer)?;
+        let now = Instant::now();
+        if !t.valid(i, now) {
+            return None;
+        }
+        if t.expect.len() > 1 || !t.expect[i].pinned {
+            t.pin(i);
+            let _ = self.secrets.set(&expect_key(&peer), &t.expect_text());
         }
         Some(peer)
     }
@@ -944,7 +1003,7 @@ impl Link {
             };
             // Every connection starts in the small pre-auth pool, so strangers can't fill the slots
             // linked Macs use.
-            let Ok(permit) = self.pre_auth.clone().try_acquire_owned() else { continue };
+            let Some(permit) = self.admit(from.ip()) else { continue };
             let link = self.clone();
             tokio::spawn(async move {
                 if link.trusts(from.ip()).await {
@@ -954,9 +1013,24 @@ impl Link {
         }
     }
 
-    async fn answer(self: &Arc<Self>, mut stream: TcpStream, pre_auth: OwnedSemaphorePermit) {
+    /// A place in the pre-auth pool for a connection from `ip`, while the pool and that address's
+    /// share of it have room.
+    fn admit(&self, ip: IpAddr) -> Option<PreAuth> {
+        let ip = ip.to_canonical();
+        let mut from = self.pre_auth_from.lock().ok()?;
+        let held = from.get(&ip).copied().unwrap_or(0);
+        if held >= PRE_AUTH_PER_ADDRESS {
+            return None;
+        }
+        let permit = self.pre_auth.clone().try_acquire_owned().ok()?;
+        from.insert(ip, held + 1);
+        Some(PreAuth { _permit: permit, ip, from: self.pre_auth_from.clone() })
+    }
+
+    async fn answer(self: &Arc<Self>, mut stream: TcpStream, pre_auth: PreAuth) {
         let mut pre_auth = Some(pre_auth);
         let mut paired: Option<OwnedSemaphorePermit> = None;
+        let authorized = std::sync::atomic::AtomicBool::new(false);
         // Only pairing is open; anything else needs a token before its body is read. A good token
         // moves the connection from the pre-auth pool to the linked Macs' pool.
         let gate = |head: &http::Head| {
@@ -970,12 +1044,22 @@ impl Link {
                 Ok(permit) => {
                     paired = Some(permit);
                     pre_auth = None;
+                    authorized.store(true, std::sync::atomic::Ordering::Relaxed);
                     Ok(())
                 }
                 Err(_) => Err(("503 Service Unavailable", "This Mac is busy. Try again in a moment.")),
             }
         };
-        let read = tokio::time::timeout(READ_TIMEOUT, http::read_request(&mut stream, BODY_LIMIT, gate)).await;
+        // A request without a token gets a short time to arrive; one with a good token gets longer.
+        let started = Instant::now();
+        let read = {
+            let read = http::read_request(&mut stream, BODY_LIMIT, gate);
+            tokio::pin!(read);
+            match tokio::time::timeout_at(started + PRE_AUTH_READ_TIMEOUT, &mut read).await {
+                Err(_) if authorized.load(std::sync::atomic::Ordering::Relaxed) => tokio::time::timeout_at(started + READ_TIMEOUT, &mut read).await,
+                read => read,
+            }
+        };
         let (status, body) = match read {
             Ok(Ok(request)) => {
                 let (status, value) = self.route(request).await;
@@ -1126,6 +1210,14 @@ impl Link {
         eprintln!("Gave up bringing a handoff's reply back to a linked Mac that stayed offline.");
     }
 
+    /// Tells each Mac that asked something a restart here cut off that no reply is coming.
+    fn reply_cut_off(self: &Arc<Self>, cut_off: Vec<crate::handoffs::CutOff>) {
+        for request in cut_off {
+            let (link, reason) = (self.clone(), format!("Grimoire on {} closed before it finished. Ask again if you still need it.", self.name));
+            tokio::spawn(async move { link.send_reply(&request.peer, &request.thread, request.request, TurnOutcome::Failed(reason)).await });
+        }
+    }
+
     async fn events_here(&self, query: &str) -> Value {
         let Some(after) = http::query_param(query, "after").and_then(|v| v.parse::<u64>().ok()) else {
             return json!({ "seq": self.events.head(), "epoch": self.events.epoch, "events": [], "reset": false });
@@ -1140,48 +1232,56 @@ impl Link {
     async fn listen(self: Arc<Self>) {
         let mut bound: HashMap<IpAddr, AbortHandle> = HashMap::new();
         loop {
-            let found = self.check_tailnet().await;
-            bound.retain(|ip, server| {
-                let keep = found.contains(ip);
-                if !keep {
-                    server.abort();
-                }
-                keep
-            });
-            let mut failures = Vec::new();
-            for ip in &found {
-                if bound.contains_key(ip) {
-                    continue;
-                }
-                match TcpListener::bind((*ip, PORT)).await {
-                    Ok(listener) => {
-                        bound.insert(*ip, tokio::spawn(self.clone().serve(listener)).abort_handle());
-                    }
-                    Err(e) => failures.push(format!("{ip}: {e}")),
-                }
-            }
-            let error = if found.is_empty() {
-                Some("Tailscale isn't connected on this Mac, so other Macs can't reach it. Grimoire checks again every minute.".to_string())
-            } else if !failures.is_empty() {
-                Some(format!("Grimoire couldn't listen on port {PORT} at {}.", failures.join(", ")))
-            } else {
-                None
-            };
-            let addresses: Vec<String> = found.iter().filter(|ip| bound.contains_key(ip)).map(IpAddr::to_string).collect();
-            let changed = match self.server.lock() {
-                Ok(mut server) => {
-                    let changed = server.addresses != addresses || server.error != error;
-                    server.listening = !addresses.is_empty();
-                    server.addresses = addresses;
-                    server.error = error;
-                    changed
-                }
-                Err(_) => false,
-            };
-            if changed {
-                self.ui.event("links_changed", Value::Null);
-            }
+            self.rebind(&mut bound).await;
             tokio::time::sleep(BIND_RETRY).await;
+        }
+    }
+
+    /// One pass of `listen`: binds the addresses Tailscale reports and lets go of the rest.
+    async fn rebind(self: &Arc<Self>, bound: &mut HashMap<IpAddr, AbortHandle>) {
+        let checked = self.check_tailnet().await;
+        let found = checked.clone().unwrap_or_default();
+        bound.retain(|ip, server| {
+            let keep = found.contains(ip);
+            if !keep {
+                server.abort();
+            }
+            keep
+        });
+        let mut failures = Vec::new();
+        for ip in &found {
+            if bound.contains_key(ip) {
+                continue;
+            }
+            match TcpListener::bind((*ip, PORT)).await {
+                Ok(listener) => {
+                    bound.insert(*ip, tokio::spawn(self.clone().serve(listener)).abort_handle());
+                }
+                Err(e) => failures.push(format!("{ip}: {e}")),
+            }
+        }
+        let error = if checked.is_none() {
+            Some(NO_CLI.to_string())
+        } else if found.is_empty() {
+            Some("Tailscale isn't connected on this Mac, so other Macs can't reach it. Grimoire checks again every minute.".to_string())
+        } else if !failures.is_empty() {
+            Some(format!("Grimoire couldn't listen on port {PORT} at {}.", failures.join(", ")))
+        } else {
+            None
+        };
+        let addresses: Vec<String> = found.iter().filter(|ip| bound.contains_key(ip)).map(IpAddr::to_string).collect();
+        let changed = match self.server.lock() {
+            Ok(mut server) => {
+                let changed = server.addresses != addresses || server.error != error;
+                server.listening = !addresses.is_empty();
+                server.addresses = addresses;
+                server.error = error;
+                changed
+            }
+            Err(_) => false,
+        };
+        if changed {
+            self.ui.event("links_changed", Value::Null);
         }
     }
 
@@ -1204,7 +1304,10 @@ impl Link {
                 break;
             }
         }
-        let to = to.ok_or_else(|| untrusted(address))?;
+        let Some(to) = to else {
+            let cli = self.view.lock().is_ok_and(|slot| slot.0.cli);
+            return Err(if cli { untrusted(address) } else { CallError::Untrusted(NO_CLI.into()) });
+        };
         let mut stream = TcpStream::connect(to).await.map_err(|_| CallError::Offline)?;
         let body = body.map(Value::to_string).unwrap_or_default();
         let auth = token.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
@@ -1341,10 +1444,10 @@ impl Link {
                 Err(e) => return e,
             },
         };
-        self.set_cursor(peer, (epoch.clone(), seq));
         if let Err(e) = self.refresh(peer).await {
             return e;
         }
+        self.set_cursor(peer, (epoch.clone(), seq));
         let name = hello["name"].as_str().and_then(clean_mac_name);
         mark_seen(&self.db, peer, name.as_deref(), hello["version"].as_str().filter(|v| v.len() <= 40));
         self.set_online(peer, true);
@@ -1359,13 +1462,14 @@ impl Link {
             let next = batch["seq"].as_u64().unwrap_or(seq);
             if batch["epoch"] != epoch || batch["reset"] == true {
                 // It restarted or this Mac fell behind, so some messages never arrived. Start from now
-                // with a fresh list, and have the window reload every chat from that Mac.
-                (epoch, seq) = (batch["epoch"].clone(), next);
-                self.set_cursor(peer, (epoch.clone(), seq));
+                // with a fresh list, and have the window reload every chat from that Mac. The cursor
+                // moves last, so a reconnect after a failed refresh sees the gap again.
                 if let Err(e) = self.refresh(peer).await {
                     return e;
                 }
                 self.ui.event("link_reload", json!({ "agentId": null, "peerId": peer }));
+                (epoch, seq) = (batch["epoch"].clone(), next);
+                self.set_cursor(peer, (epoch.clone(), seq));
                 continue;
             }
             seq = next;
@@ -1613,11 +1717,18 @@ impl AppLocal {
     }
 }
 
-/// Starts the link: the server on the tailnet, and a relay for each linked Mac.
-pub fn install(app: &tauri::AppHandle, db: Arc<Db>, secrets: Arc<dyn SecretStore>, runtime: Arc<crate::runtime::Runtime>) -> Result<(), String> {
+/// Starts the link: the server on the tailnet, a relay for each linked Mac, failed replies for
+/// `cut_off` requests, and a sweep for replies that never came.
+pub fn install(
+    app: &tauri::AppHandle,
+    db: Arc<Db>,
+    secrets: Arc<dyn SecretStore>,
+    runtime: Arc<crate::runtime::Runtime>,
+    cut_off: Vec<crate::handoffs::CutOff>,
+) -> Result<(), String> {
     use tauri::Listener;
     let local = Arc::new(AppLocal { app: app.clone(), db: db.clone(), runtime });
-    let link = Link::new(db, secrets, local, Arc::new(app.clone()), Arc::new(TailscaleCli), mac_name())?;
+    let link = Link::new(db.clone(), secrets, local.clone(), Arc::new(app.clone()), Arc::new(TailscaleCli), mac_name())?;
     if LINK.set(link.clone()).is_err() {
         return Ok(());
     }
@@ -1632,7 +1743,17 @@ pub fn install(app: &tauri::AppHandle, db: Arc<Db>, secrets: Arc<dyn SecretStore
         for peer in peers {
             link.start_relay(&peer);
         }
+        link.reply_cut_off(cut_off);
         link.listen().await;
+    });
+    tauri::async_runtime::spawn(async move {
+        let familiars = local.familiars();
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            if let Err(e) = crate::delegation::expire(&db, &crate::delegation::WAITERS, &familiars, std::time::Instant::now()) {
+                eprintln!("Couldn't close requests to linked Macs that got no reply: {e}");
+            }
+        }
     });
     Ok(())
 }
@@ -1782,18 +1903,14 @@ mod tests {
     /// Tailscale as the tests need it: a status to report, or none for a Mac without the CLI.
     struct FakeTailnet {
         status: Mutex<Option<String>>,
-        interfaces: Vec<(String, IpAddr)>,
         asked: Mutex<usize>,
     }
 
     impl Tailnet for FakeTailnet {
-        fn status(&self) -> BoxFuture<'_, Option<String>> {
+        fn status(&self) -> BoxFuture<'_, Result<Option<String>, NoCli>> {
             *self.asked.lock().unwrap() += 1;
             let status = self.status.lock().unwrap().clone();
-            Box::pin(async move { status })
-        }
-        fn interfaces(&self) -> Vec<(String, IpAddr)> {
-            self.interfaces.clone()
+            Box::pin(async move { status.map(Some).ok_or(NoCli) })
         }
     }
 
@@ -1803,7 +1920,7 @@ mod tests {
     }
 
     fn fake_tailnet(status: Option<String>) -> Arc<FakeTailnet> {
-        Arc::new(FakeTailnet { status: Mutex::new(status), interfaces: Vec::new(), asked: Mutex::new(0) })
+        Arc::new(FakeTailnet { status: Mutex::new(status), asked: Mutex::new(0) })
     }
 
     #[derive(Default)]
@@ -1861,8 +1978,37 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), wait).await.unwrap_or_else(|_| panic!("timed out waiting for {what}"));
     }
 
+    fn expected(token: &str, made: Instant) -> Expected {
+        Expected { token: token.into(), made, pinned: false }
+    }
+
     fn tokens(send: &str, expect: &[&str]) -> Tokens {
-        Tokens { send: send.into(), expect: expect.iter().map(|t| (t.to_string(), Instant::now())).collect() }
+        Tokens { send: send.into(), paired: Instant::now(), expect: expect.iter().map(|t| expected(t, Instant::now())).collect() }
+    }
+
+    /// A stand-in for a linked Mac that answers each path, and how many times it was asked, as
+    /// `answer` says.
+    async fn fake_peer(answer: impl Fn(&str, usize) -> (u16, Value) + Send + Sync + 'static) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let (answer, asked) = (Arc::new(answer), Arc::new(Mutex::new(HashMap::<String, usize>::new())));
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let (answer, asked) = (answer.clone(), asked.clone());
+                tokio::spawn(async move {
+                    let Ok(request) = http::read_request(&mut stream, BODY_LIMIT, |_| Ok(())).await else { return };
+                    let times = {
+                        let mut asked = asked.lock().unwrap();
+                        let times = asked.entry(request.head.path.clone()).or_default();
+                        *times += 1;
+                        *times
+                    };
+                    let (status, body) = answer(&request.head.path, times);
+                    http::reply(&mut stream, status_line(status), "application/json", body.to_string().as_bytes()).await;
+                });
+            }
+        });
+        address
     }
 
     fn authorized(link: &Link, token: &str) -> bool {
@@ -2002,26 +2148,57 @@ mod tests {
     }
 
     #[test]
-    fn without_the_cli_only_tunnel_interfaces_count() {
-        let interfaces: Vec<(String, IpAddr)> = [("en0", "100.72.1.2"), ("utun4", "100.101.1.2"), ("utun4", "fd7a:115c:a1e0::9"), ("utun2", "10.8.0.1"), ("bridge0", "100.80.0.1"), ("lo0", "127.0.0.1")]
-            .iter()
-            .map(|(name, ip)| (name.to_string(), ip.parse().unwrap()))
-            .collect();
-        assert_eq!(tunnel_addresses(&interfaces), ["100.101.1.2".parse::<IpAddr>().unwrap(), "fd7a:115c:a1e0::9".parse().unwrap()]);
-        let view = TailnetView::new(None, || interfaces.clone());
-        assert!(!view.cli && view.trusts("100.72.9.9".parse().unwrap()), "in range is all this Mac can check");
-        assert!(!view.trusts("192.168.1.2".parse().unwrap()));
+    fn only_listed_peers_inside_the_tailnet_range_pass() {
+        let text = status_json(&["100.101.1.2", "192.168.1.5"], &["100.104.85.100", "10.0.0.5"]);
+        let view = TailnetView::new(Ok(Some(&text)));
+        assert_eq!(view.own, ["100.101.1.2".parse::<IpAddr>().unwrap()], "this Mac listens on tailnet addresses only");
+        assert!(view.trusts("100.104.85.100".parse().unwrap()));
+        assert!(view.trusts("::ffff:100.104.85.100".parse().unwrap()));
+        assert!(!view.trusts("10.0.0.5".parse().unwrap()), "outside the tailnet's range even when listed");
+        assert!(!view.trusts("100.72.9.9".parse().unwrap()), "carrier-grade NAT isn't the tailnet");
+        assert!(!view.trusts("100.101.1.2".parse().unwrap()), "this Mac isn't its own peer");
+        let silent = TailnetView::new(Ok(None));
+        assert!(silent.cli && silent.own.is_empty() && !silent.trusts("100.104.85.100".parse().unwrap()));
+        let missing = TailnetView::new(Err(NoCli));
+        assert!(!missing.cli && !missing.trusts("100.104.85.100".parse().unwrap()), "no CLI, no peers");
+    }
+
+    #[tokio::test]
+    async fn without_tailscales_cli_nothing_listens_and_no_token_leaves() {
+        let a = mac_on("Studio", fake_tailnet(None));
+        a.link.rebind(&mut HashMap::new()).await;
+        let this = a.link.status().unwrap().this_mac;
+        assert_eq!((this.listening, this.error.as_deref()), (false, Some(NO_CLI)));
+        assert_eq!(a.link.start_pairing().err().as_deref(), Some(NO_CLI));
+        assert_eq!(a.link.pair("100.104.85.100", "ABCDEFGH").await.unwrap_err(), NO_CLI);
+        save_peer(&a.db, "mac-b", "Laptop", "100.104.85.100").unwrap();
+        a.link.tokens.lock().unwrap().insert("mac-b".into(), tokens(&new_token(), &[&new_token()]));
+        match a.link.peer_call("mac-b", "GET", "/v1/hello", None, CALL_TIMEOUT).await {
+            Err(CallError::Untrusted(why)) => assert_eq!(why, NO_CLI),
+            other => panic!("{other:?}"),
+        }
+        assert!(!a.link.trusts("100.104.85.100".parse().unwrap()).await, "a tailnet address alone isn't enough");
     }
 
     #[test]
-    fn with_the_cli_only_listed_peers_pass() {
-        let text = status_json(&["100.101.1.2"], &["100.104.85.100"]);
-        let view = TailnetView::new(Some(&text), || panic!("interfaces aren't read when the CLI answers"));
-        assert_eq!(view.own, ["100.101.1.2".parse::<IpAddr>().unwrap()]);
-        assert!(view.trusts("100.104.85.100".parse().unwrap()));
-        assert!(view.trusts("::ffff:100.104.85.100".parse().unwrap()));
-        assert!(!view.trusts("100.72.9.9".parse().unwrap()), "carrier-grade NAT isn't the tailnet");
-        assert!(!view.trusts("100.101.1.2".parse().unwrap()), "this Mac isn't its own peer");
+    fn finds_tailscales_cli_only_in_its_app_or_in_a_file_only_root_can_change() {
+        let dir = std::env::temp_dir().join(format!("grimoire-cli-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(dir.join("Tailscale.app/Contents/MacOS")).unwrap();
+        let app = std::fs::canonicalize(dir.join("Tailscale.app")).unwrap();
+        let cli = app.join("Contents/MacOS/Tailscale");
+        std::fs::write(&cli, "").unwrap();
+        let into_app = dir.join("tailscale");
+        std::os::unix::fs::symlink(&cli, &into_app).unwrap();
+        assert_eq!(trusted_program(&into_app, &app), Some(cli.clone()), "a link into the app runs the app's CLI");
+        let impostor = dir.join("impostor");
+        std::fs::write(&impostor, "").unwrap();
+        let to_impostor = dir.join("tailscale-elsewhere");
+        std::os::unix::fs::symlink(&impostor, &to_impostor).unwrap();
+        assert_eq!(trusted_program(&impostor, &app), None, "a file the person owns could be anything");
+        assert_eq!(trusted_program(&to_impostor, &app), None);
+        assert_eq!(trusted_program(Path::new("/bin/ls"), &app), Some(PathBuf::from("/bin/ls")), "root's, and nobody else can write it");
+        assert_eq!(trusted_program(&dir.join("missing"), &app), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -2033,7 +2210,7 @@ mod tests {
         assert_eq!(*tailnet.asked.lock().unwrap(), 1, "the second stranger waits for the recheck");
         // The device joins; the listen loop's next check picks it up and moves the address.
         *tailnet.status.lock().unwrap() = Some(status_json(&["100.101.1.3"], &["100.104.0.7"]));
-        assert_eq!(a.link.check_tailnet().await, ["100.101.1.3".parse::<IpAddr>().unwrap()]);
+        assert_eq!(a.link.check_tailnet().await, Some(vec!["100.101.1.3".parse::<IpAddr>().unwrap()]));
         assert!(a.link.trusts("100.104.0.7".parse().unwrap()).await);
     }
 
@@ -2141,6 +2318,8 @@ mod tests {
         assert!(wrong.contains("wrong or has expired"), "{wrong}");
         let peer = b.link.pair(&a_address, &code).await.unwrap();
         assert_eq!((peer.id.as_str(), peer.name.as_str()), (a.link.install_id.as_str(), "Studio"));
+        let pinned = a.link.tokens.lock().unwrap()[&b.link.install_id].expect.iter().map(|e| e.pinned).collect::<Vec<_>>();
+        assert_eq!(pinned, [true], "B used its token before pair returned, so A pinned it");
         assert!(a.link.status().unwrap().peers.iter().any(|p| p.id == b.link.install_id && p.name == "Laptop"));
         assert!(b.link.pair(&a_address, &code).await.is_err(), "the code is used up");
 
@@ -2239,19 +2418,43 @@ mod tests {
     }
 
     #[test]
-    fn a_used_token_becomes_the_only_one_once_the_window_passes() {
+    fn a_used_token_is_pinned_and_the_others_stop_working_at_once() {
         let a = mac("Studio");
-        let (used, other) = (new_token(), new_token());
-        let mut both = tokens("s", &[&used, &other]);
-        a.link.tokens.lock().unwrap().insert("b".into(), tokens("s", &[&used, &other]));
+        let (before, used, after) = (new_token(), new_token(), new_token());
+        a.link.tokens.lock().unwrap().insert("b".into(), tokens("s", &[&before, &used, &after]));
         assert!(authorized(&a.link, &used));
-        assert!(authorized(&a.link, &other), "inside the window both work");
+        assert!(!authorized(&a.link, &before) && !authorized(&a.link, &after));
+        assert_eq!(a.secrets.get(&expect_key("b")).unwrap().as_deref(), Some(used.as_str()), "the Keychain keeps the pinned one");
+        // After a restart the pinned token alone works, long after the window.
+        let reloaded = mac_with("Studio", a.db.clone(), a.secrets.clone(), fake_tailnet(None));
+        reloaded.link.tokens.lock().unwrap().insert("b".into(), loaded_tokens("s".repeat(32), &a.secrets.get(&expect_key("b")).unwrap().unwrap()).unwrap());
+        assert!(authorized(&reloaded.link, &used) && !authorized(&reloaded.link, &after));
+    }
+
+    #[test]
+    fn tokens_nobody_used_stop_working_when_the_window_passes() {
+        let a = mac("Studio");
+        let (one, two) = (new_token(), new_token());
         let old = Instant::now().checked_sub(PAIR_WINDOW).unwrap();
-        both.expect.iter_mut().for_each(|(_, at)| *at = old);
-        a.link.tokens.lock().unwrap().insert("b".into(), both);
-        assert!(authorized(&a.link, &used));
-        assert!(!authorized(&a.link, &other), "after it, the one in use wins");
-        assert_eq!(a.secrets.get(&expect_key("b")).unwrap(), Some(used));
+        a.link.tokens.lock().unwrap().insert("b".into(), Tokens { send: "s".into(), paired: old, expect: vec![expected(&one, old), expected(&two, old)] });
+        assert!(!authorized(&a.link, &one) && !authorized(&a.link, &two));
+        // A link with one token keeps it, used or not.
+        let only = new_token();
+        a.link.tokens.lock().unwrap().insert("c".into(), Tokens { send: "s".into(), paired: old, expect: vec![expected(&only, old)] });
+        assert!(authorized(&a.link, &only));
+    }
+
+    #[test]
+    fn several_tokens_saved_by_a_crossed_pairing_load_and_the_first_used_wins() {
+        let a = mac("Studio");
+        let (one, two) = (new_token(), new_token());
+        let mut loaded = loaded_tokens(new_token(), &format!("{one} {two}")).unwrap();
+        assert!(loaded.expect.iter().all(|e| !e.pinned));
+        loaded.expect.iter_mut().for_each(|e| e.made = Instant::now());
+        a.link.tokens.lock().unwrap().insert("b".into(), loaded);
+        assert!(authorized(&a.link, &two));
+        assert!(!authorized(&a.link, &one));
+        assert_eq!(a.secrets.get(&expect_key("b")).unwrap(), Some(two));
     }
 
     #[tokio::test]
@@ -2355,7 +2558,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn connections_without_a_token_get_a_small_pool_of_their_own() {
+    async fn connections_without_a_token_get_a_small_pool_a_small_share_and_little_time() {
         let (a, _b, _) = linked().await;
         let address = a.link.server.lock().unwrap().addresses[0].clone();
         // B's long poll holds a linked Mac's slot, not a pre-auth one.
@@ -2363,17 +2566,101 @@ mod tests {
         assert!(a.link.connections.available_permits() < MAX_CONNECTIONS);
 
         let mut idle = Vec::new();
-        for _ in 0..PRE_AUTH_CONNECTIONS {
+        for _ in 0..PRE_AUTH_PER_ADDRESS {
             idle.push(TcpStream::connect(&address).await.unwrap());
         }
-        eventually("the idle connections to fill the pool", || a.link.pre_auth.available_permits() == 0).await;
+        eventually("the idle connections to take their share", || a.link.pre_auth.available_permits() == PRE_AUTH_CONNECTIONS - PRE_AUTH_PER_ADDRESS).await;
         let mut one_more = TcpStream::connect(&address).await.unwrap();
         let mut reply = Vec::new();
         let read = tokio::time::timeout(Duration::from_secs(2), one_more.read_to_end(&mut reply)).await;
-        assert!(matches!(read, Ok(Ok(0)) | Ok(Err(_))), "the ninth is dropped at once");
+        assert!(matches!(read, Ok(Ok(0)) | Ok(Err(_))), "the third from one address is dropped at once, though the pool has room");
         assert!(a.link.connections.available_permits() > 0, "linked Macs' slots are untouched");
-        drop(idle);
+
+        // A connection that never sends its request is closed after a few seconds.
+        let read = tokio::time::timeout(PRE_AUTH_READ_TIMEOUT + Duration::from_secs(3), idle[0].read_to_end(&mut reply)).await;
+        assert!(read.is_ok(), "the idle connection was closed");
         eventually("the pool to empty", || a.link.pre_auth.available_permits() == PRE_AUTH_CONNECTIONS).await;
+    }
+
+    #[test]
+    fn one_address_holds_at_most_two_pre_auth_slots() {
+        let a = mac("Studio");
+        let ip = |i: u8| IpAddr::V4(std::net::Ipv4Addr::new(100, 64, 0, i));
+        let first: Vec<PreAuth> = (0..PRE_AUTH_PER_ADDRESS).map(|_| a.link.admit(ip(1)).unwrap()).collect();
+        assert!(a.link.admit(ip(1)).is_none());
+        assert!(a.link.admit("::ffff:100.64.0.1".parse().unwrap()).is_none(), "the same address written as IPv6");
+        let others: Vec<PreAuth> = (2..=4).flat_map(|i| [a.link.admit(ip(i)).unwrap(), a.link.admit(ip(i)).unwrap()]).collect();
+        assert_eq!((a.link.pre_auth.available_permits(), others.len()), (0, 6));
+        assert!(a.link.admit(ip(9)).is_none(), "the pool is full");
+        drop(first);
+        assert!(a.link.admit(ip(1)).is_some(), "closed connections give their slots back");
+        assert!(!a.link.pre_auth_from.lock().unwrap().contains_key(&ip(1)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_whose_refresh_fails_shows_again_on_the_next_connect() {
+        let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let fail = failing.clone();
+        let address = fake_peer(move |path, times| match path {
+            "/v1/hello" => (200, json!({ "name": "Studio" })),
+            // The first list comes before the events; the next follows the reset.
+            "/v1/familiars" if times > 1 && fail.load(std::sync::atomic::Ordering::SeqCst) => (500, error("Busy.")),
+            "/v1/familiars" => (200, json!({ "familiars": [], "busy": [] })),
+            _ => (200, json!({ "seq": 9, "epoch": "restarted", "events": [], "reset": false })),
+        })
+        .await;
+        let b = mac("Laptop");
+        save_peer(&b.db, "mac-a", "Studio", &address).unwrap();
+        b.link.tokens.lock().unwrap().insert("mac-a".into(), tokens(&new_token(), &[&new_token()]));
+        b.link.set_cursor("mac-a", (json!("earlier"), 3));
+        assert!(matches!(b.link.follow("mac-a", &mut BACKOFF_MIN.clone()).await, CallError::Refused(500, _)));
+        assert_eq!(b.link.cursor("mac-a"), Some((json!("earlier"), 3)), "the cursor waits for the refresh");
+        assert!(events_named(&b, "link_reload").is_empty());
+
+        failing.store(false, std::sync::atomic::Ordering::SeqCst);
+        let link = b.link.clone();
+        let follow = tokio::spawn(async move { link.follow("mac-a", &mut BACKOFF_MIN.clone()).await });
+        eventually("the reload on the next connect", || !events_named(&b, "link_reload").is_empty()).await;
+        eventually("the cursor to move", || b.link.cursor("mac-a") == Some((json!("restarted"), 9))).await;
+        follow.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_linked_macs_familiars_show_as_offline_right_after_a_restart() {
+        let (_a, b, peer) = linked().await;
+        eventually("B to list Scribe", || b.link.remote_familiars().len() == 1).await;
+        // B restarts and can't reach A yet.
+        let restarted = mac_with("Laptop", b.db.clone(), b.secrets.clone(), fake_tailnet(Some(status_json(&["127.0.0.1"], &[]))));
+        let listed = restarted.link.remote_familiars();
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0]["id"].as_str(), listed[0]["name"].as_str()), (Some(remote_id(&peer, "f1").as_str()), Some("Scribe")));
+        assert_eq!(listed[0]["home"], json!({ "peerId": peer, "name": "Studio", "online": false }));
+        assert!(restarted.link.linked().iter().all(|f| f.name == "Scribe" && !f.online));
+        // Unlinking takes them away for good.
+        restarted.link.forget(&peer).unwrap();
+        assert!(restarted.link.remote_familiars().is_empty());
+        let rows: i64 = b.db.with(|c| c.query_row("SELECT COUNT(*) FROM link_peers", [], |r| r.get(0))).unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_on_the_home_mac_fails_the_request_the_other_mac_waits_on() {
+        let (a, b, a_id) = linked_with_ada().await;
+        // Ada on B messaged Scribe on A, and A quit before Scribe replied.
+        let away = crate::handoffs::Away { thread: None, peer: &a_id, asker_id: "ada", target_id: "f1", target_name: "Scribe" };
+        let request = crate::handoffs::record_away(&b.db, &away, "message", "Draft it", crate::handoffs::Status::Waiting).unwrap();
+        let chat = crate::side::create_remote(&a.db, &b.link.install_id, "ada", "Ada", "f1", "Draft it").unwrap();
+        let handoff = crate::handoffs::record(&a.db, &chat.id, "message", "Draft it", crate::handoffs::Status::Waiting).unwrap();
+        crate::handoffs::set_remote_request(&a.db, handoff, request).unwrap();
+
+        let cut_off = crate::handoffs::cut_off_remote(&a.db).unwrap();
+        assert_eq!(cut_off, [crate::handoffs::CutOff { peer: b.link.install_id.clone(), thread: chat.id.clone(), request }]);
+        crate::delegation::recover(&a.db).unwrap();
+        assert!(crate::handoffs::cut_off_remote(&a.db).unwrap().is_empty(), "the restart closed it on A");
+        a.link.reply_cut_off(cut_off);
+        let heard = || b.local.familiars.delivered.lock().unwrap().iter().any(|(asker, text, _)| asker == "ada" && text.contains("Grimoire on Studio closed before it finished"));
+        eventually("Ada to hear no reply is coming", heard).await;
+        assert_eq!(crate::handoffs::sent(&b.db, request).unwrap().unwrap().status, crate::handoffs::Status::Failed);
     }
 
     // ----- Familiars asking familiars on another Mac -----
@@ -2413,6 +2700,8 @@ mod tests {
         assert_eq!(shown, (remote_id(&b.link.install_id, "ada").as_str(), "Ada", Some("Laptop"), "f1", None));
         assert_eq!(home[0].status, crate::handoffs::Status::Done);
         assert!(a.db.get_agent("ada").unwrap().is_none(), "the asker isn't a familiar on A");
+        let asked_as: Option<i64> = a.db.with(|c| c.query_row("SELECT remote_request FROM handoffs", [], |r| r.get(0))).unwrap();
+        assert_eq!(asked_as, Some(crate::handoffs::list(&b.db, 10).unwrap()[0].id), "A keeps B's id for the request");
 
         // The asking Mac lists it too, with the thread on A, and its chat links there without opening it.
         let asked = crate::handoffs::list(&b.db, 10).unwrap();
