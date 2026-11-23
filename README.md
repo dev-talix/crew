@@ -22,6 +22,7 @@
   an error.
 - **Spells** chain familiars: research, then write, then review. Each step gets the last reply.
   Click a spell in the sidebar to cast it.
+- **Memory** carries notes from one chat to the next, for each familiar and each coven.
 - **Rituals** send a familiar the same message on a schedule, like a morning summary.
 - **Covens** group familiars. Home's summoning circle shows everyone or one coven at a time, with
   lines for the spells between familiars and gold arcs for their rituals.
@@ -91,6 +92,19 @@ circle switch between everyone and one coven; "All" seats each coven together un
 Create a coven with the + chip, change its name and familiars with "Edit", or pick a familiar's coven
 in its settings. The sidebar groups familiars by coven, with the rest under "Unbound", and
 `list_familiars` tells familiars which coven each one is in.
+
+## Memory
+
+Each familiar keeps a markdown memory, and each coven has one its familiars share. A familiar reads
+its own memory and its coven's at the start of every new chat (Claude through
+`--append-system-prompt`, Codex through the thread's developer instructions). It adds a dated note
+with `remember`, tidies with `rewrite_memory`, and checks the latest with `read_memory`; each takes
+`scope: "coven"` for the shared one. An edit made mid-chat reaches the familiar in its next new chat.
+
+The book button in the chat header opens a familiar's memory, and the coven editor on Home has the
+coven's. Both show the size against the 16 KB limit and who last changed it. The files live in
+`memory/` in the data folder: `<familiar id>.md` and `coven-<coven id>.md`. Deleting a familiar or
+coven deletes its memory.
 
 ## Spells and rituals
 
@@ -220,14 +234,15 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
   (Claude through its interrupt request, Codex through `turn/interrupt`) and cancels the queue.
 - **Familiar tools.** Grimoire gives each familiar an MCP server named `grimoire` (`--mcp-config`
   for Claude, thread config for Codex) with `list_familiars`, `list_spells`, `create_spell`,
-  `list_themes`, `create_theme`, `set_theme`, `vault_search`, and `vault_use`. The CLI starts `grimoire mcp <socket> <agent-id>`,
+  `list_themes`, `create_theme`, `set_theme`, `vault_search`, `vault_use`, `read_memory`, `remember`,
+  and `rewrite_memory`. The CLI starts `grimoire mcp <socket> <agent-id>`,
   which relays calls to the app over `grimoire.sock` in its data folder (owner-only). Familiars can't
   cast, edit, or delete spells.
 - **Claude billing.** With "Claude subscription" (the default), Grimoire removes
   `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` from the `claude` process
   so it uses your claude.ai Pro or Max sign-in. "API key" leaves them in place.
 - **Storage.** `~/Library/Application Support/dev.talix.grimoire/grimoire.db`, with your themes in
-  `themes/` beside it. Default workspaces go under `~/Grimoire`. Deleting a familiar keeps its
+  `themes/` and memories in `memory/` beside it. Default workspaces go under `~/Grimoire`. Deleting a familiar keeps its
   workspace folder.
 - **Names.** The code calls a familiar an agent, a spell a workflow, and a ritual a routine.
 

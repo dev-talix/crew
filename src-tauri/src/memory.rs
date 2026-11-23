@@ -422,4 +422,66 @@ mod tests {
         assert!(prompt.len() < 600, "the wrapper stays short");
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    /// Starts a new chat with a memory and a coven memory, and returns the familiar's reply.
+    async fn live_recall(provider: Provider, model: &str) -> String {
+        use crate::providers::{claude::Claude, codex::Codex, ProviderEvent};
+        let dir = test_dir();
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("live-memory.md"), "- 2026-11-20: The user's cat is named Miso.\n").unwrap();
+        std::fs::write(dir.join("coven-live-coven.md"), "- The coven meets on Thursdays.\n").unwrap();
+        let workspace = std::env::temp_dir().join(format!("grimoire-live-memory-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let agent = Agent {
+            id: "live-memory".into(),
+            name: "Scribe".into(),
+            provider: provider.clone(),
+            model: Some(model.into()),
+            workspace: workspace.to_string_lossy().into_owned(),
+            access: Access::Workspace,
+            session_id: None,
+            avatar: Avatar::for_seed("a"),
+            effort: None,
+            active_model: None,
+            coven_id: Some("live-coven".into()),
+            created_at: now_ms(),
+        };
+        let prompt = "What do you remember about me and about my coven? Answer in one short sentence and don't use any tools.";
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (codex, claude) = (std::sync::Arc::new(Codex::default()), Claude::default());
+        match provider {
+            Provider::Codex => codex.start_turn(&agent, prompt, tx).await.unwrap(),
+            Provider::Claude => claude.start_turn(&agent, prompt, tx).await.unwrap(),
+        }
+        let mut reply = String::new();
+        let collect = async {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    ProviderEvent::Delta(text) => reply.push_str(&text),
+                    ProviderEvent::Done => break,
+                    ProviderEvent::Failed(e) => panic!("turn failed: {e}"),
+                    _ => {}
+                }
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(180), collect).await.expect("no reply in time");
+        claude.forget("live-memory");
+        std::fs::remove_dir_all(workspace).unwrap();
+        println!("{provider:?} replied: {reply}");
+        reply
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "runs the real claude CLI"]
+    async fn live_claude_reads_its_memory() {
+        let reply = live_recall(Provider::Claude, "claude-haiku-5-5").await;
+        assert!(reply.contains("Miso") && reply.contains("Thursday"), "{reply}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "runs the real codex CLI"]
+    async fn live_codex_reads_its_memory() {
+        let reply = live_recall(Provider::Codex, "gpt-6.2-sol").await;
+        assert!(reply.contains("Miso") && reply.contains("Thursday"), "{reply}");
+    }
 }
