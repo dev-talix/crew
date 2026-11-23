@@ -379,7 +379,19 @@ impl Runtime {
 
     /// Runs one exchange in a side conversation: `asker`'s message goes to the familiar whose hidden
     /// chat it is, on that chat's own session, alongside whatever it's doing in its main chat.
-    pub async fn side_turn(self: &Arc<Self>, chat_id: &str, asker: &str, message: &str) -> TurnOutcome {
+    /// `handoff` is the request's row in the handoffs list, moved on as the exchange goes.
+    pub async fn side_turn(self: &Arc<Self>, chat_id: &str, handoff: i64, asker: &str, message: &str) -> TurnOutcome {
+        let outcome = self.side_exchange(chat_id, handoff, asker, message).await;
+        self.move_handoff(handoff, crate::handoffs::Status::of(&outcome));
+        outcome
+    }
+
+    fn move_handoff(&self, id: i64, status: crate::handoffs::Status) {
+        let _ = crate::handoffs::set(&self.db, id, status);
+        let _ = self.app.emit(crate::handoffs::CHANGED, ());
+    }
+
+    async fn side_exchange(self: &Arc<Self>, chat_id: &str, handoff: i64, asker: &str, message: &str) -> TurnOutcome {
         let Ok(Some(chat)) = crate::side::get(&self.db, chat_id) else {
             return TurnOutcome::Failed("That conversation was deleted.".into());
         };
@@ -416,15 +428,12 @@ impl Runtime {
             Provider::Claude => self.claude.start_turn_in(&agent, Some(&lane), &prompt, &[], tx).await,
         };
         match started {
-            Ok(()) => stream_turn(&mut writer, rx).await,
+            Ok(()) => {
+                self.move_handoff(handoff, crate::handoffs::Status::Accepted);
+                stream_turn(&mut writer, rx).await
+            }
             Err(e) => writer.fail_explained(e).await,
         }
-    }
-
-    /// Whether a side conversation's turn holds its lane (`side::lane_key`) right now.
-    pub fn side_running(&self, key: &str) -> bool {
-        let lock = self.sides.lock().ok().and_then(|sides| sides.get(key).cloned());
-        lock.is_some_and(|lock| lock.try_lock().is_err())
     }
 
     /// Runs a background helper's one turn in its hidden chat (see `helpers`): `task` is shown in the
@@ -581,6 +590,8 @@ pub struct TurnWriter<'a> {
     active_model: Option<String>,
     segment: Option<Segment>,
     last_text: String,
+    /// Whether the latest row this turn wrote is a reply, not a tool.
+    replied: bool,
     provider: Provider,
     /// "you", "ritual", or "spell".
     pub origin: &'static str,
@@ -592,6 +603,9 @@ pub struct TurnWriter<'a> {
     /// How a remote familiar's turn checks whether its Mac answers. `remote::probe` outside tests.
     probe: crate::remote::Probe,
 }
+
+/// The row a side conversation gets when a turn finishes without a reply after its last tool.
+const NO_REPLY: &str = "(no reply)";
 
 /// The settings key for Claude's latest plan limit snapshot.
 pub const CLAUDE_LIMITS: &str = "claude_limits";
@@ -606,6 +620,7 @@ impl<'a> TurnWriter<'a> {
             active_model: agent.active_model.clone(),
             segment: None,
             last_text: String::new(),
+            replied: false,
             provider: agent.provider.clone(),
             origin: "you",
             usage: None,
@@ -672,11 +687,13 @@ impl<'a> TurnWriter<'a> {
             let _ = self.db.update_message(segment.message.id, &segment.message.text, status);
             self.sink.message(&segment.message);
             self.last_text = segment.message.text;
+            self.replied = true;
         }
     }
 
     fn tool(&mut self, label: &str) {
         self.end_segment("done");
+        self.replied = false;
         // An empty label is a tool that adds its own row, like asking another familiar.
         if label.is_empty() {
             return;
@@ -706,6 +723,12 @@ impl<'a> TurnWriter<'a> {
 
     fn close(&mut self, status: &str) -> TurnOutcome {
         self.end_segment(status);
+        // A side conversation shows a turn that ended after a tool, or with no text at all, as finished.
+        if status == "done" && self.chat_id.is_some() && !self.replied {
+            if let Ok(message) = self.insert("assistant", NO_REPLY, "done") {
+                self.sink.message(&message);
+            }
+        }
         self.record_usage();
         if let Some((_, host)) = &self.remote {
             crate::remote::set_offline(host, false);
@@ -864,6 +887,31 @@ mod tests {
         assert_eq!(main, ["Main chat"], "the main chat is untouched");
         assert_eq!(db.get_agent("a").unwrap().unwrap().session_id.as_deref(), Some("main-session"));
         assert_eq!(crate::side::get(&db, &side.id).unwrap().unwrap().session_id.as_deref(), Some("side-session"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_side_turn_that_ends_without_a_reply_says_so() {
+        let (db, agent) = setup();
+        let side = crate::side::create(&db, "a", "a", "hello").unwrap();
+        let sink = Recorder::default();
+        let rows = |events: Vec<ProviderEvent>, chat: Option<&str>| {
+            let (tx, rx) = mpsc::unbounded_channel();
+            for event in events {
+                tx.send(event).unwrap();
+            }
+            let mut writer = match chat {
+                Some(chat) => TurnWriter::for_side(&db, &sink, &agent, chat, None),
+                None => TurnWriter::new(&db, &sink, &agent),
+            };
+            async move { stream_turn(&mut writer, rx).await }
+        };
+        assert_eq!(rows(vec![ProviderEvent::Done], Some(&side.id)).await, TurnOutcome::Done(String::new()));
+        assert_eq!(rows(vec![ProviderEvent::Tool("$ ls".into()), ProviderEvent::Done], Some(&side.id)).await, TurnOutcome::Done(String::new()));
+        let got: Vec<(String, String, String)> = crate::side::messages(&db, &side.id).unwrap().into_iter().map(|m| (m.role, m.text, m.status)).collect();
+        let row = |role: &str, text: &str| (role.to_string(), text.to_string(), "done".to_string());
+        assert_eq!(got, [row("assistant", NO_REPLY), row("tool", "$ ls"), row("assistant", NO_REPLY)]);
+        rows(vec![ProviderEvent::Done], None).await;
+        assert!(db.list_messages("a", None, 10).unwrap().is_empty(), "the main chat gets no placeholder");
     }
 
     #[test]

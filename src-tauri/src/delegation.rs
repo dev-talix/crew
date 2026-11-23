@@ -231,7 +231,7 @@ fn record_denial(db: &Db, out: &Outgoing, kind: &str) -> Result<(), String> {
         Some(chat) => chat.id.clone(),
         None => side::create(db, &out.asker.id, &out.target.id, &out.message)?.id,
     };
-    crate::handoffs::mark(db, &chat, kind)?;
+    crate::handoffs::record(db, &chat, kind, &out.message, crate::handoffs::Status::Failed)?;
     db.insert_message_in(&chat, &out.target.id, "user", &out.message, "done", Some(&format!("From {}", out.asker.name)))?;
     db.insert_message_in(&chat, &out.target.id, "error", "The person didn't allow this.", "done", None)?;
     Ok(())
@@ -330,15 +330,15 @@ static LIMITER: LazyLock<Limiter> = LazyLock::new(Limiter::default);
 
 /// Opens the conversation, a new one or the one being followed up, and links it from the asker's
 /// chat, or from the side conversation the asker is answering in (`lane`).
-/// `kind` is "ask" or "message", for the handoffs list.
-fn open(ctx: &crate::tools::Context, lane: Option<&str>, out: &Outgoing, verb: &str, kind: &str) -> Result<String, String> {
+/// `kind` is "ask" or "message". Returns the conversation and the request's row in the handoffs list.
+fn open(ctx: &crate::tools::Context, lane: Option<&str>, out: &Outgoing, verb: &str, kind: &str) -> Result<(String, i64), String> {
     let chat = match &out.thread {
         Some(chat) => chat.id.clone(),
         None => side::create(&ctx.db, &out.asker.id, &out.target.id, &out.message)?.id,
     };
-    crate::handoffs::mark(&ctx.db, &chat, kind)?;
     side::link(&ctx.app, &ctx.db, lane, &out.asker.id, &format!("{verb} {}", out.target.name), &chat)?;
-    Ok(chat)
+    let handoff = crate::handoffs::record(&ctx.db, &chat, kind, &out.message, crate::handoffs::Status::Waiting)?;
+    Ok((chat, handoff))
 }
 
 /// Brings a reply back to the familiar who sent it, in the chat it sent from (`home`); see `Runtime::deliver`.
@@ -350,14 +350,14 @@ fn deliver(runtime: &std::sync::Arc<crate::runtime::Runtime>, asker_id: &str, ho
 pub async fn run(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, arguments: Value) -> Result<String, String> {
     let approve = |request| ctx.approvals.ask(&ctx.app, request);
     let converse = |out: Outgoing| async move {
-        let chat = open(ctx, lane, &out, "Asked", "ask")?;
         let home = crate::chats::current(&ctx.db, &out.asker.id)?;
+        let (chat, handoff) = open(ctx, lane, &out, "Asked", "ask")?;
         // The exchange runs as its own task, so a reply that outlasts the wait still finishes and is
         // saved. When nobody is waiting for it any more, it comes back like a message_familiar reply.
         let (runtime, chat_id) = (ctx.runtime.clone(), chat.clone());
         let (tx, rx) = tokio::sync::oneshot::channel();
         tauri::async_runtime::spawn(async move {
-            let outcome = runtime.side_turn(&chat_id, &out.asker.name, &out.message).await;
+            let outcome = runtime.side_turn(&chat_id, handoff, &out.asker.name, &out.message).await;
             if let Err(outcome) = tx.send(outcome) {
                 deliver(&runtime, &out.asker.id, home, &out.target.name, &chat_id, outcome);
             }
@@ -366,7 +366,7 @@ pub async fn run(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, 
         Ok((chat, outcome))
     };
     let result = ask(&ctx.db, &CHAINS, caller, arguments, TIMEOUT, approve, converse).await;
-    // A denial or a timeout changes the handoffs list without a side message.
+    // A new request or a denial changes the handoffs list.
     let _ = ctx.app.emit(crate::handoffs::CHANGED, ());
     result
 }
@@ -376,11 +376,11 @@ pub async fn run(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, 
 pub async fn run_message(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, arguments: Value) -> Result<String, String> {
     let approve = |request| ctx.approvals.ask(&ctx.app, request);
     let start = |out: Outgoing| {
-        let chat = open(ctx, lane, &out, "Messaged", "message")?;
         let home = crate::chats::current(&ctx.db, &out.asker.id)?;
+        let (chat, handoff) = open(ctx, lane, &out, "Messaged", "message")?;
         let (runtime, chat_id) = (ctx.runtime.clone(), chat.clone());
         tauri::async_runtime::spawn(async move {
-            let outcome = runtime.side_turn(&chat_id, &out.asker.name, &out.message).await;
+            let outcome = runtime.side_turn(&chat_id, handoff, &out.asker.name, &out.message).await;
             deliver(&runtime, &out.asker.id, home, &out.target.name, &chat_id, outcome);
         });
         Ok(chat)
@@ -393,8 +393,10 @@ pub async fn run_message(ctx: &crate::tools::Context, caller: &str, lane: Option
 /// Closes side conversations that Grimoire quit in the middle of: each gets an error row, so it no
 /// longer shows as working, and the familiar who started it hears that no reply is coming. The note
 /// waits in its current chat and comes with its next turn, rather than starting a turn as the app
-/// opens. Helpers' chats are left to `helpers::interrupt_leftovers`. Run once at startup.
+/// opens. Their requests show as failed in the handoffs list. Helpers' chats are left to
+/// `helpers::interrupt_leftovers`. Run once at startup.
 pub fn recover(db: &Db) -> Result<usize, String> {
+    crate::handoffs::fail_unfinished(db)?;
     let unfinished = side::unfinished(db)?;
     for chat in &unfinished {
         let name = db.get_agent(&chat.target_id)?.map_or_else(|| "The other familiar".to_string(), |a| a.name);
@@ -558,7 +560,7 @@ mod tests {
         let err = ask(&db, &chains, "a", args(), TIMEOUT, approve(Decision::Deny), never_conversed).await.unwrap_err();
         assert!(err.contains("didn't let you ask Scribe"), "{err}");
         // The denied question still shows in the handoffs list, as failed.
-        let denied = crate::handoffs::list(&db, 10, |_| false).unwrap();
+        let denied = crate::handoffs::list(&db, 10).unwrap();
         assert_eq!(denied.len(), 1);
         assert_eq!((denied[0].kind.as_str(), denied[0].what.as_str(), denied[0].status), ("ask", "Check the draft", crate::handoffs::Status::Failed));
         assert!(ask(&db, &chains, "a", args(), TIMEOUT, approve(Decision::Once), replies("ok")).await.is_ok());
@@ -568,6 +570,16 @@ mod tests {
         let err = message(&db, &Limiter::default(), "a", args(), Instant::now(), approve(Decision::Deny), |_| panic!("sent")).await.unwrap_err();
         assert!(err.contains("didn't let you message Scribe"), "{err}");
         assert_eq!(asked.lock().unwrap()[2].0, "Researcher wants to message Scribe");
+
+        // A denied follow-up fails on its own row and leaves the earlier request in that thread done.
+        let thread = side::create(&db, "a", "b", "First").unwrap();
+        let first = crate::handoffs::record(&db, &thread.id, "ask", "First", crate::handoffs::Status::Done).unwrap();
+        let follow = json!({ "familiar": "Scribe", "message": "Second", "thread": thread.id });
+        assert!(message(&db, &Limiter::default(), "a", follow, Instant::now(), approve(Decision::Deny), |_| panic!("sent")).await.is_err());
+        let rows: Vec<_> = crate::handoffs::list(&db, 10).unwrap().into_iter().filter(|h| h.chat_id == thread.id).collect();
+        let got: Vec<_> = rows.iter().map(|h| (h.id, h.what.as_str(), h.status)).collect();
+        assert_eq!(got[1], (first, "First", crate::handoffs::Status::Done));
+        assert_eq!((got[0].1, got[0].2), ("Second", crate::handoffs::Status::Failed));
     }
 
     #[tokio::test(start_paused = true)]

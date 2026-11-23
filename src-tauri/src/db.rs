@@ -250,7 +250,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 23;
+const SCHEMA_VERSION: i64 = 24;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -528,6 +528,9 @@ impl Db {
         }
         if version < 23 {
             crate::handoffs::migrate(&conn)?;
+        }
+        if version < 24 {
+            crate::handoffs::migrate_requests(&conn)?;
         }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
@@ -1062,7 +1065,7 @@ mod tests {
         // Roll the file back to version 21, as the previous release left it.
         {
             let conn = Connection::open(&path).unwrap();
-            conn.execute_batch("ALTER TABLE agents DROP COLUMN setup_pending; ALTER TABLE chats DROP COLUMN handoff; PRAGMA user_version = 21;").unwrap();
+            conn.execute_batch("ALTER TABLE agents DROP COLUMN setup_pending; ALTER TABLE chats DROP COLUMN handoff; DROP TABLE handoffs; PRAGMA user_version = 21;").unwrap();
         }
         let db = Db::open(&path).unwrap();
         let version: i64 = db.with(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();

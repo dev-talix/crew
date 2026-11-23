@@ -1,16 +1,16 @@
 import { createSignal, For, Show } from "solid-js";
 import BotAvatar from "./BotAvatar";
-import { api, onEvent, onMountAsync, relativeTime, type Agent, type Handoff, type Message, type SideDeltaEvent } from "./api";
-import { linkLabel, startedReplying, STATUS_LABELS } from "./handoffList";
+import { api, onEvent, onMountAsync, relativeTime, type Agent, type Handoff, type Message } from "./api";
+import { linkLabel, STATUS_LABELS } from "./handoffList";
 import SideConversation from "./SideConversation";
 import { EmptyState, Page } from "./ui";
 import "./handoffs.css";
 
-/** Who handed what to whom, newest first, with where each one stands and its thread. */
+/** Who handed what to whom, one row per request, newest first, with where each one stands and its thread. */
 export default function HandoffsPage(props: { agents: Agent[]; onOpenAgent: (id: string) => void }) {
   const [handoffs, setHandoffs] = createSignal<Handoff[]>([]);
   const [loaded, setLoaded] = createSignal(false);
-  const [open, setOpen] = createSignal<string | null>(null);
+  const [open, setOpen] = createSignal<number | null>(null);
   const reload = () =>
     api.listHandoffs().then(
       (list) => {
@@ -20,10 +20,9 @@ export default function HandoffsPage(props: { agents: Agent[]; onOpenAgent: (id:
       () => setLoaded(true),
     );
   onMountAsync(async (keep) => {
-    for (const name of ["side_message", "handoffs_changed", "agents_changed"] as const) {
+    for (const name of ["handoffs_changed", "agents_changed"] as const) {
       keep(await onEvent(name, () => void reload()));
     }
-    keep(await onEvent<SideDeltaEvent>("side_delta", (e) => setHandoffs((list) => startedReplying(list, e.chatId))));
     await reload();
   });
   const agentById = (id: string) => props.agents.find((a) => a.id === id);
@@ -52,7 +51,7 @@ export default function HandoffsPage(props: { agents: Agent[]; onOpenAgent: (id:
                   role: "side",
                   text: linkLabel(h, toName()),
                   status: "done",
-                  source: h.id,
+                  source: h.chatId,
                   createdAt: h.createdAt,
                   updatedAt: null,
                 });

@@ -105,17 +105,17 @@ export interface SideThread {
 
 export type HandoffStatus = "waiting" | "accepted" | "done" | "failed";
 
-/** One ask_familiar or message_familiar exchange, by its side conversation. */
+/** One ask_familiar or message_familiar request. Follow-ups in the same thread get their own. */
 export interface Handoff {
-  /** The side conversation's id. */
-  id: string;
+  id: number;
+  /** The side conversation it was sent in. */
+  chatId: string;
   fromId: string;
   toId: string;
   kind: "ask" | "message";
-  /** The first message, trimmed. */
+  /** The request, trimmed. */
   what: string;
   createdAt: number;
-  updatedAt: number;
   status: HandoffStatus;
 }
 
