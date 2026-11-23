@@ -1,4 +1,16 @@
-export type Shape = "orbit" | "spark" | "cloud" | "drop" | "ears" | "classic";
+export type Shape =
+  | "orbit"
+  | "spark"
+  | "cloud"
+  | "drop"
+  | "ears"
+  | "classic"
+  | "owl"
+  | "candle"
+  | "tome"
+  | "cauldron"
+  | "crystal"
+  | "bat";
 export type Eyes = "pill" | "dot" | "slit";
 
 export interface Avatar {
@@ -19,6 +31,12 @@ export const SHAPES: PartOption<Shape>[] = [
   { value: "drop", label: "Drop" },
   { value: "ears", label: "Ears" },
   { value: "classic", label: "Classic" },
+  { value: "owl", label: "Owl" },
+  { value: "candle", label: "Candle" },
+  { value: "tome", label: "Tome" },
+  { value: "cauldron", label: "Cauldron" },
+  { value: "crystal", label: "Crystal ball" },
+  { value: "bat", label: "Bat" },
 ];
 
 export const EYES: PartOption<Eyes>[] = [

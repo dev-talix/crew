@@ -1,0 +1,7 @@
+/* One file per familiar shape, loaded after styles.css so they can reuse its keyframes. */
+@import "./owl.css";
+@import "./candle.css";
+@import "./tome.css";
+@import "./cauldron.css";
+@import "./crystal.css";
+@import "./bat.css";

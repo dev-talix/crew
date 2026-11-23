@@ -1,0 +1,227 @@
+/* Bat: wings breathe at rest, stretch on a fidget, flap while working, spread for a flip when happy,
+   and wrap round the lower head like a cloak when concerned. A glance lifts the wing on that side.
+   Each wing hinges at the single shoulder point where it touches the head, so open poses stay
+   clear of the head. */
+.shape-bat .g-bat-wing-l,
+.shape-bat .g-bat-wing-r {
+  transform-box: fill-box;
+  transition: transform 360ms cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+
+/* Shoulder points in each wing's fill box (left wing box starts at 2 20.75, right at 44.7 20.75). */
+.shape-bat .g-bat-wing-l {
+  transform-origin: 17.3px 12.25px;
+}
+
+.shape-bat .g-bat-wing-r {
+  transform-origin: 0 12.25px;
+}
+
+/* Idle: wings rise and settle like breathing. */
+.shape-bat.mood-idle .g-bat-wing-l {
+  animation: fam-bat-breathe-l 3.6s ease-in-out infinite;
+}
+
+.shape-bat.mood-idle .g-bat-wing-r {
+  animation: fam-bat-breathe-r 3.6s ease-in-out infinite;
+}
+
+@keyframes fam-bat-breathe-l {
+  50% {
+    transform: rotate(5deg);
+  }
+}
+
+@keyframes fam-bat-breathe-r {
+  50% {
+    transform: rotate(-5deg);
+  }
+}
+
+/* Fidget: the left wing stretches out and snaps back. */
+.shape-bat.mood-idle.fidget .g-bat-wing-l {
+  animation: fam-bat-stretch 700ms cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+
+@keyframes fam-bat-stretch {
+  45% {
+    transform: rotate(14deg) scale(1.16, 1.05);
+  }
+  62% {
+    transform: rotate(-6deg) scale(0.94);
+  }
+  80% {
+    transform: rotate(2deg);
+  }
+}
+
+/* Glance: the wing on that side lifts, the other one dips. */
+.shape-bat.glance-l .g-bat-wing-l,
+.shape-bat.glance-r .g-bat-wing-l,
+.shape-bat.glance-l .g-bat-wing-r,
+.shape-bat.glance-r .g-bat-wing-r {
+  animation: none;
+}
+
+.shape-bat.glance-l .g-bat-wing-l {
+  transform: rotate(16deg);
+}
+
+.shape-bat.glance-l .g-bat-wing-r {
+  transform: rotate(8deg);
+}
+
+.shape-bat.glance-r .g-bat-wing-r {
+  transform: rotate(-16deg);
+}
+
+.shape-bat.glance-r .g-bat-wing-l {
+  transform: rotate(-8deg);
+}
+
+/* Working: a steady flap. */
+.shape-bat.mood-working .g-bat-wing-l {
+  animation: fam-bat-flap-l 620ms ease-in-out infinite;
+}
+
+.shape-bat.mood-working .g-bat-wing-r {
+  animation: fam-bat-flap-r 620ms ease-in-out infinite;
+}
+
+@keyframes fam-bat-flap-l {
+  0%,
+  100% {
+    transform: rotate(16deg);
+  }
+  50% {
+    transform: rotate(-22deg) scaleX(0.86);
+  }
+}
+
+@keyframes fam-bat-flap-r {
+  0%,
+  100% {
+    transform: rotate(-16deg);
+  }
+  50% {
+    transform: rotate(22deg) scaleX(0.86);
+  }
+}
+
+/* Happy: wings spread wide and the bat leaps, turning a full flip in the air. */
+.shape-bat.mood-happy .bot-body {
+  transform-origin: 50% 60%;
+  animation: fam-bat-flip 820ms cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+
+@keyframes fam-bat-flip {
+  15% {
+    transform: translateY(1.5px) scale(1.05, 0.93);
+  }
+  45% {
+    transform: translateY(-6px) scaleX(-1);
+  }
+  75% {
+    transform: translateY(-2px) scaleX(1);
+  }
+}
+
+.shape-bat.mood-happy .g-bat-wing-l {
+  animation: fam-bat-spread-l 820ms cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+
+.shape-bat.mood-happy .g-bat-wing-r {
+  animation: fam-bat-spread-r 820ms cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+
+@keyframes fam-bat-spread-l {
+  30%,
+  60% {
+    transform: rotate(12deg) scale(1.14);
+  }
+}
+
+@keyframes fam-bat-spread-r {
+  30%,
+  60% {
+    transform: rotate(-12deg) scale(1.14);
+  }
+}
+
+/* Concerned: a shiver that settles into a hunch while both wings swing round and wrap the lower
+   head like a cloak, held while the mood lasts. Once the wrap lands, the head swaps to its cut
+   outline so nothing shows through the wings. Leaving the mood swaps back at once. */
+.shape-bat.mood-concerned .bot-body {
+  transform-origin: 50% 100%;
+  transform: translateY(1.5px) scale(0.95);
+  animation: fam-bat-cower 520ms ease-out;
+}
+
+@keyframes fam-bat-cower {
+  15%,
+  45% {
+    transform: translateY(1px) scale(0.96) translateX(-0.8px);
+  }
+  30%,
+  60% {
+    transform: translateY(1px) scale(0.96) translateX(0.8px);
+  }
+  to {
+    transform: translateY(1.5px) scale(0.95);
+  }
+}
+
+/* The wrap plays as an animation into the held transform below. Leaving the mood, the base
+   transition unfolds the wings. */
+.shape-bat.mood-concerned .g-bat-wing-l,
+.shape-bat.mood-concerned .g-bat-wing-r {
+  transition: none;
+  animation: fam-bat-wrap 300ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Written as a swing down past the outside of the body (rotate) while the wing turns over its long
+   edge (negative scaleY), so on the way in and out it passes outside the head, not across the face. */
+@keyframes fam-bat-wrap {
+  from {
+    transform: none;
+  }
+}
+
+.shape-bat.mood-concerned .g-bat-wing-l {
+  transform: translate(0, 5px) rotate(-100deg) scale(0.85, -0.8);
+}
+
+.shape-bat.mood-concerned .g-bat-wing-r {
+  transform: translate(0, 5px) rotate(100deg) scale(0.85, -0.8);
+}
+
+.shape-bat .g-bat-head-cut {
+  opacity: 0;
+}
+
+.shape-bat.mood-concerned .g-bat-head {
+  opacity: 0;
+  animation: fam-bat-show 240ms steps(1, end);
+}
+
+@keyframes fam-bat-show {
+  from {
+    opacity: 1;
+  }
+}
+
+.shape-bat.mood-concerned .g-bat-head-cut {
+  opacity: 1;
+  animation: fam-bat-hide 240ms steps(1, end);
+}
+
+@keyframes fam-bat-hide {
+  from {
+    opacity: 0;
+  }
+}
+
+.shape-bat.mood-concerned .g-bat-mouth {
+  opacity: 0;
+  transition: opacity 160ms;
+}

@@ -1,9 +1,11 @@
 import type { Shape } from "./avatar";
-
-export interface GlyphStyle {
-  color: string;
-  stroke: number;
-}
+import { bat } from "./familiars/bat";
+import { candle } from "./familiars/candle";
+import { cauldron } from "./familiars/cauldron";
+import { crystal } from "./familiars/crystal";
+import { owl } from "./familiars/owl";
+import { tome } from "./familiars/tome";
+import { lineOnly, outlined, type GlyphStyle } from "./strokes";
 
 export interface EyeAnchor {
   left: number;
@@ -16,12 +18,6 @@ export interface Glyph {
   body: (s: GlyphStyle) => string;
   eyes: EyeAnchor;
 }
-
-const outlined = (s: GlyphStyle) =>
-  `stroke="${s.color}" stroke-width="${s.stroke}" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round" fill="${s.color}" fill-opacity="0.12"`;
-
-const lineOnly = (s: GlyphStyle, opacity = 1) =>
-  `stroke="${s.color}" stroke-opacity="${opacity}" stroke-width="${s.stroke}" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round" fill="none"`;
 
 const moon = (s: GlyphStyle, begin: string) => {
   const timing = `dur="8s" begin="${begin}" repeatCount="indefinite"`;
@@ -61,4 +57,10 @@ export const GLYPHS: Record<Shape, Glyph> = {
       `<g class="g-antenna"><path d="M32 8V3" ${lineOnly(s)}/><circle class="g-bulb" cx="32" cy="2.5" r="2.5" fill="${s.color}"/></g><rect x="14" y="8" width="36" height="30" rx="10" ${outlined(s)}/><path d="M32 38v6M12 59a20 13 0 0 1 40 0" ${lineOnly(s)}/>`,
     eyes: { left: 25, right: 39, y: 23, scale: 1 },
   },
+  owl,
+  candle,
+  tome,
+  cauldron,
+  crystal,
+  bat,
 };
