@@ -43,12 +43,14 @@ impl Approvals {
         let id = request.id.clone();
         self.pending.lock().unwrap().insert(id.clone(), (request.clone(), tx));
         let _ = app.emit("approval_requested", &request);
+        crate::notify::approval_requested(app, &request);
         if let Some(main) = app.get_webview_window("main") {
             let _ = main.request_user_attention(Some(tauri::UserAttentionType::Informational));
         }
         let decision = tokio::time::timeout(TIMEOUT, rx).await.ok().and_then(Result::ok).unwrap_or(Decision::Deny);
         self.pending.lock().unwrap().remove(&id);
         let _ = app.emit("approval_closed", &id);
+        crate::notify::approval_closed(&request);
         decision
     }
 

@@ -71,6 +71,9 @@ export default function App() {
     return typeof v === "object" ? v.agent : null;
   };
   const chat = createChatStore(selected);
+  createEffect(selected, (id) => {
+    api.setOpenAgent(id).catch(() => {});
+  });
   // The Dock icon follows the app icon setting, including the appearance when it is set to match.
   createEffect(shownIcon, (icon) => {
     api.setAppIcon(icon).catch(() => {});

@@ -141,8 +141,12 @@ impl WorkflowRunner {
                 TurnOutcome::Stopped => ("stopped", None),
                 TurnOutcome::Failed(reason) => ("failed", Some(reason)),
             };
+            crate::notify::spell_ended(&self.app, &workflow.name, state, index + 1, total, &step.agent_id, error.as_deref());
             self.finish(&workflow.id, index + 1, total, Some(step.agent_id.clone()), state, error);
             return;
+        }
+        if let Some(last) = workflow.steps.last() {
+            crate::notify::spell_ended(&self.app, &workflow.name, "done", total, total, &last.agent_id, previous.as_deref());
         }
         self.finish(&workflow.id, total, total, None, "done", None);
     }

@@ -119,6 +119,14 @@ export interface Settings {
   dockEdge: DockEdge;
 }
 
+export interface NotificationPrefs {
+  replies: boolean;
+  approvals: boolean;
+  /** Rituals and spells. */
+  runs: boolean;
+  backgroundOnly: boolean;
+}
+
 export interface NewAgentInput {
   name: string;
   provider: Provider;
@@ -282,6 +290,12 @@ export const api = {
   planLimits: () => invoke<PlanLimits>("plan_limits"),
   checkForUpdates: () => invoke<UpdateCheck>("check_for_updates"),
   savePermissions: (permissions: Permissions) => invoke<Permissions>("save_permissions", { permissions }),
+  notificationSettings: () => invoke<NotificationPrefs>("notification_settings"),
+  saveNotificationSettings: (prefs: NotificationPrefs) => invoke<NotificationPrefs>("save_notification_settings", { prefs }),
+  menuBarVisible: () => invoke<boolean>("menu_bar_visible"),
+  setMenuBarVisible: (visible: boolean) => invoke<boolean>("set_menu_bar_visible", { visible }),
+  /** Tells the menu bar which familiar's chat the main window shows. */
+  setOpenAgent: (agentId: string | null) => invoke<void>("set_open_agent", { agentId }),
 };
 
 /**

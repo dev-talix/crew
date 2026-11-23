@@ -115,6 +115,7 @@ impl Runtime {
 
     fn set_busy(&self, agent_id: &str, busy: bool) {
         let _ = self.app.emit("agent_status", StatusPayload { agent_id, busy });
+        crate::tray::agent_status(&self.app, agent_id, busy);
     }
 
     pub fn send(self: &Arc<Self>, agent_id: &str, text: String, source: Option<&str>) -> Result<Message, String> {
@@ -230,6 +231,7 @@ impl Runtime {
         let runtime = self.clone();
         tauri::async_runtime::spawn(async move {
             let outcome = runtime.run_turn(&agent_id, &job.text, job.source.as_deref()).await;
+            crate::notify::turn_ended(&runtime.app, &agent_id, job.source.as_deref(), &outcome);
             if let Some(reply) = job.reply {
                 let _ = reply.send(outcome);
             }

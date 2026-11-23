@@ -134,6 +134,12 @@ export const ShieldIcon = () => (
   </Icon>
 );
 
+export const BellIcon = () => (
+  <Icon>
+    <path d="M4 11.5V7a4 4 0 0 1 8 0v4.5l1 1H3zM6.6 14a1.5 1.5 0 0 0 2.8 0" />
+  </Icon>
+);
+
 export const VaultIcon = () => (
   <Icon>
     <rect x="2" y="2.5" width="12" height="11" rx="1.8" />

@@ -135,6 +135,30 @@ command. Codex asks through its approval requests (Grimoire sets its approval po
 `untrusted`, so commands it knows only read run without asking); Claude asks through a `PreToolUse`
 hook on Bash that Grimoire registers, which runs even for commands your own Claude settings allow.
 
+## Notifications and the menu bar
+
+Grimoire sends a macOS notification when:
+
+- a familiar finishes a turn ("Scribe finished", with the first line of the reply) or fails one,
+- a familiar needs your OK ("Warden needs your OK", with the command or the vault item), with Allow
+  and Deny buttons on the notification,
+- a ritual runs ("Morning briefing ran"), or a spell ends ("Topic brief finished" or "Topic brief
+  failed at step 2"). The steps inside a spell stay quiet.
+
+Clicking a notification opens the main window on that familiar, where an approval card waits in the
+corner. macOS asks for permission when the first notification is about to go out. Settings,
+Notifications turns each kind off, and "Only while Grimoire is in the background" (on by default)
+keeps them quiet while the main window is in front.
+
+The menu bar shows Grimoire's seal with the number of familiars working beside it. Its menu lists
+each familiar as Working, New reply, or Idle (click one to open its chat), then Open Grimoire and
+Quit Grimoire. Settings, General hides it.
+
+Notifications use `UNUserNotificationCenter`, which works only from a bundled `Grimoire.app`; under
+`bunx tauri dev` they're off. The menu bar icon is drawn in `scripts/icons.mjs` as
+`src/assets/tray.svg`; render it with `bunx @resvg/resvg-js-cli --fit-width 18` (and 36 for
+`tray@2x.png`) into `src-tauri/icons/tray.png`.
+
 ## Usage
 
 Settings, Usage shows your plan limits and what Grimoire itself used:

@@ -2,12 +2,13 @@ import { getVersion } from "@tauri-apps/api/app";
 import { createEffect, createSignal, For, Match, onSettled, Show, Switch } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { api, createFetch, errorText, PROVIDER_NAMES, type Agent, type DockEdge, type Provider, type ProviderStatus, type Settings } from "./api";
-import { Page, Segmented } from "./ui";
+import { Page, Segmented, Toggle } from "./ui";
 import { ThemePicker } from "./ThemeEditor";
 import { appIcon, readMode, setAppIcon, setMode, type AppIconSetting, type ModeSetting } from "./themeStore";
 import nightIcon from "./assets/icon-night.svg";
 import paperIcon from "./assets/icon-paper.svg";
-import { BarsIcon, CloseIcon, DownloadIcon, GearIcon, PaletteIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
+import { BarsIcon, BellIcon, CloseIcon, DownloadIcon, GearIcon, PaletteIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
+import NotificationsPage from "./NotificationsPage";
 import UpdatesPage from "./UpdatesPage";
 import UsagePage from "./UsagePage";
 import PermissionsPage from "./PermissionsPage";
@@ -90,6 +91,20 @@ function GeneralSettings() {
   };
 
   const appVersion = createFetch(() => null, getVersion);
+
+  const [menuBar, setMenuBar] = createSignal(true);
+  const [menuBarError, setMenuBarError] = createSignal("");
+  api.menuBarVisible().then(setMenuBar, (e) => setMenuBarError(errorText(e)));
+  const changeMenuBar = async (on: boolean) => {
+    setMenuBar(on);
+    setMenuBarError("");
+    try {
+      await api.setMenuBarVisible(on);
+    } catch (e) {
+      setMenuBar(!on);
+      setMenuBarError(errorText(e));
+    }
+  };
 
   return (
     <Page title="General">
@@ -186,6 +201,20 @@ function GeneralSettings() {
           <div class="error-box settings-error">{dockError()}</div>
         </Show>
 
+        <h2 class="section-title">Menu bar</h2>
+        <div class="list">
+          <div class="list-row settings-row">
+            <div class="list-main">
+              <div class="list-title">Show Grimoire in the menu bar</div>
+              <p class="settings-detail">Lists your familiars and how many are working. Click one to open its chat.</p>
+            </div>
+            <Toggle label="Show Grimoire in the menu bar" checked={menuBar()} onChange={(on) => void changeMenuBar(on)} />
+          </div>
+        </div>
+        <Show when={menuBarError()}>
+          <div class="error-box settings-error">{menuBarError()}</div>
+        </Show>
+
         <h2 class="section-title">About</h2>
         <div class="list">
           <div class="list-row">
@@ -259,11 +288,12 @@ function AppearanceSettings() {
   );
 }
 
-export type SettingsSection = "general" | "appearance" | "vault" | "permissions" | "usage" | "updates";
+export type SettingsSection = "general" | "appearance" | "notifications" | "vault" | "permissions" | "usage" | "updates";
 
 const SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element }[] = [
   { id: "general", label: "General", icon: GearIcon },
   { id: "appearance", label: "Appearance", icon: PaletteIcon },
+  { id: "notifications", label: "Notifications", icon: BellIcon },
   { id: "vault", label: "Vault", icon: VaultIcon },
   { id: "permissions", label: "Permissions", icon: ShieldIcon },
   { id: "usage", label: "Usage", icon: BarsIcon },
@@ -303,6 +333,9 @@ export default function SettingsPage(props: { section?: SettingsSection; agents:
         </Match>
         <Match when={section() === "appearance"}>
           <AppearanceSettings />
+        </Match>
+        <Match when={section() === "notifications"}>
+          <NotificationsPage />
         </Match>
         <Match when={section() === "vault"}>
           <VaultPage agents={props.agents} />
