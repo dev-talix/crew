@@ -9,6 +9,7 @@ mod delegation;
 mod dock;
 mod exports;
 mod inbox;
+mod ledger;
 mod mcp;
 mod memory;
 mod notify;
@@ -634,6 +635,7 @@ pub fn run() {
             attachments::clear_staging(&attachments::root(&dir));
             // A setup error ends the app with a panic nobody sees, so say what's wrong first.
             let db = Arc::new(Db::open(&dir.join("grimoire.db")).inspect_err(|e| startup_alert(&e.to_string()))?);
+            ledger::init(db.clone());
             let billing = db.setting(CLAUDE_BILLING).ok().flatten();
             providers::USE_CLAUDE_SUBSCRIPTION.store(billing.as_deref() != Some("api"), Ordering::Relaxed);
             if let Err(e) = delegation::recover(&db) {
@@ -759,7 +761,9 @@ pub fn run() {
             triggers::trigger_status,
             inbox::inbox,
             inbox::answer_question,
-            inbox::dismiss_question
+            inbox::dismiss_question,
+            ledger::get_ledger,
+            ledger::save_ledger
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {

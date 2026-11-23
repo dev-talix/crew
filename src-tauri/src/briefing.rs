@@ -4,6 +4,6 @@
 use crate::db::Agent;
 
 pub fn session_prompt(agent: &Agent) -> Option<String> {
-    let parts: Vec<String> = [crate::memory::session_prompt(agent)].into_iter().flatten().collect();
+    let parts: Vec<String> = [crate::memory::session_prompt(agent), crate::ledger::session_prompt(agent)].into_iter().flatten().collect();
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }

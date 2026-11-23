@@ -6,6 +6,7 @@ import type { ThemeFile } from "./theme";
 import type { Memory, MemoryScope } from "./memory";
 import type * as Budgets from "./budgets";
 import type * as Transfer from "./transfer";
+import type { Ledger } from "./ledgers";
 
 export type Provider = "codex" | "claude";
 export type Access = "workspace" | "full";
@@ -499,6 +500,10 @@ export const api = {
   /** An option's value, or the person's own words. */
   answerQuestion: (id: string, answer: string) => invoke<void>("answer_question", { id, answer }),
   dismissQuestion: (id: string) => invoke<void>("dismiss_question", { id }),
+  getLedger: (agentId: string) => invoke<Ledger>("get_ledger", { agentId }),
+  /** Fields left out stay as they are; an empty string clears one. */
+  saveLedger: (agentId: string, patch: Partial<Pick<Ledger, "goal" | "status" | "waitingOn" | "nextStep">>) =>
+    invoke<Ledger>("save_ledger", { agentId, patch }),
 };
 
 export interface InboxOption {
@@ -558,7 +563,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

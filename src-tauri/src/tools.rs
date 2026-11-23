@@ -6,7 +6,7 @@
 use crate::approvals::{self, Approvals, Decision};
 use crate::db::{Agent, CheckWhen, Db, StepCheck, WorkflowStep};
 use crate::vault::{self, Kind, SecretStore};
-use crate::{inbox, memory, themes, workflows};
+use crate::{inbox, ledger, memory, themes, workflows};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -175,13 +175,14 @@ pub fn definitions() -> Value {
     if let Some(list) = list.as_array_mut() {
         list.extend(memory::definitions());
         list.extend(inbox::definitions());
+        list.extend(ledger::definitions());
     }
     list
 }
 
 /// Tool names as Claude's `--allowedTools` expects them.
 pub fn claude_tool_names() -> String {
-    TOOL_NAMES.iter().chain(&memory::TOOL_NAMES).chain(&inbox::TOOL_NAMES).map(|name| format!("mcp__{SERVER_NAME}__{name}")).collect::<Vec<_>>().join(",")
+    TOOL_NAMES.iter().chain(&memory::TOOL_NAMES).chain(&inbox::TOOL_NAMES).chain(&ledger::TOOL_NAMES).map(|name| format!("mcp__{SERVER_NAME}__{name}")).collect::<Vec<_>>().join(",")
 }
 
 /// How a CLI starts the Grimoire tool server for one familiar.
@@ -426,6 +427,7 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
         }
         tool if memory::TOOL_NAMES.contains(&tool) => (memory::call_tool(db, caller, tool, &arguments)?, memory::changed_event(tool)),
         tool if inbox::TOOL_NAMES.contains(&tool) => (inbox::call_tool(db, caller, tool, &arguments)?, Some(inbox::CHANGED)),
+        tool if ledger::TOOL_NAMES.contains(&tool) => (ledger::call_tool(db, caller, tool, &arguments)?, ledger::changed_event(tool)),
         _ => return Err(format!("Grimoire has no tool named {tool}.")),
     };
     Ok(Outcome { text, changed })

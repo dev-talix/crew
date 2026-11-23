@@ -5,6 +5,7 @@ import { api, changesFor, errorText, onEvent, onMountAsync, PROVIDER_NAMES, type
 import ChatsMenu, { chatTitle } from "./ChatsMenu";
 import { AttachButton, createComposerFiles, DropOverlay, MessageAttachments, PendingFiles } from "./ChatAttachments";
 import type { ChatStore } from "./chatStore";
+import Ledger from "./Ledger";
 import ModelPicker from "./ModelPicker";
 import SideConversation from "./SideConversation";
 import { effortName, runningModelName } from "./models";
@@ -538,6 +539,7 @@ export default function Chat(props: {
           </Show>
         </div>
       </header>
+      <Ledger agentId={props.agent.id} name={props.agent.name} />
 
       <div
         class="timeline"

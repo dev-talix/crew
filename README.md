@@ -27,6 +27,8 @@
   with a few short options and the one it recommends, then keeps working; your tap goes back to it
   as a new message.
 - **Memory** carries notes from one chat to the next, for each familiar and each coven.
+- **Ledgers** keep each familiar's goal, status, and what it's waiting on. A familiar gets its ledger
+  when a chat starts and updates it with `update_ledger`; you edit it in the strip under the chat bar.
 - **Rituals** send a familiar the same message, or cast a spell, on a schedule, like a morning summary.
   A ritual can also run when something happens: a pull request opens in a GitHub repo (through `gh`),
   a file or folder in your home folder changes, new mail reaches the Mail app's inbox, or something

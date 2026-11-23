@@ -339,10 +339,14 @@ impl Runtime {
         };
         let mut writer = TurnWriter::new(&self.db, &self.app, &agent);
         writer.origin = origin_of(source);
-        let input = match crate::attachments::turn_input(std::path::Path::new(&agent.workspace), text, attachments) {
+        let mut input = match crate::attachments::turn_input(std::path::Path::new(&agent.workspace), text, attachments) {
             Ok(input) => input,
             Err(e) => return writer.fail(&e),
         };
+        // A resumed chat keeps its old system prompt, so pass on the person's ledger edits here.
+        if let Some(note) = crate::ledger::turn_note(&self.db, &agent) {
+            input.text = format!("{note}\n\n{}", input.text);
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         let started = match agent.provider {
             Provider::Codex => self.codex.start_turn(&agent, &input.text, &input.images, tx).await,
