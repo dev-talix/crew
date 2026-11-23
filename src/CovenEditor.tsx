@@ -1,6 +1,7 @@
 import { createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 import BotAvatar from "./BotAvatar";
 import { api, errorText, type Agent, type Coven } from "./api";
+import { createMemory, MemoryField } from "./MemoryEditor";
 
 /** Names a coven and picks its familiars. A familiar picked here leaves its old coven. */
 export default function CovenEditor(props: {
@@ -16,6 +17,7 @@ export default function CovenEditor(props: {
   const [error, setError] = createSignal("");
   const [saving, setSaving] = createSignal(false);
   const [confirmDelete, setConfirmDelete] = createSignal(false);
+  const memory = createMemory("coven", () => props.coven?.id ?? null);
   let confirmTimer: number | undefined;
   onCleanup(() => clearTimeout(confirmTimer));
   let nameField!: HTMLInputElement;
@@ -30,7 +32,9 @@ export default function CovenEditor(props: {
     setSaving(true);
     setError("");
     try {
-      props.onSaved(await api.saveCoven(props.coven?.id ?? null, name(), members()));
+      const saved = await api.saveCoven(props.coven?.id ?? null, name(), members());
+      if (memory.dirty()) await memory.save(saved.id);
+      props.onSaved(saved);
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -75,9 +79,16 @@ export default function CovenEditor(props: {
         </div>
         <p class="hint">A familiar sits in one coven. Picking one that's in another coven moves it here.</p>
       </div>
-      <Show when={error()}>
+      <MemoryField
+        memory={memory}
+        agents={props.agents}
+        label="Shared memory"
+        rows={8}
+        hint="Every familiar in the coven reads this at the start of a new chat, and any of them can add to it."
+      />
+      <Show when={error() || memory.error()}>
         <p class="error-box" role="alert">
-          {error()}
+          {error() || memory.error()}
         </p>
       </Show>
       <div class="form-actions">
@@ -90,7 +101,7 @@ export default function CovenEditor(props: {
         <button type="button" class="ghost" onClick={props.onCancel}>
           Cancel
         </button>
-        <button class="primary" type="submit" disabled={saving() || !name().trim()}>
+        <button class="primary" type="submit" disabled={saving() || !name().trim() || memory.usage().over}>
           {props.coven ? "Save coven" : "Create coven"}
         </button>
       </div>

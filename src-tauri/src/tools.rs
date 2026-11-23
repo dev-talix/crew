@@ -6,7 +6,7 @@
 use crate::approvals::{self, Approvals, Decision};
 use crate::db::{Agent, Db, WorkflowStep};
 use crate::vault::{self, Kind, SecretStore};
-use crate::{themes, workflows};
+use crate::{memory, themes, workflows};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -33,7 +33,7 @@ pub fn definitions() -> Value {
         "properties": { "canvas": { "type": "string" }, "accent": { "type": "string" } },
         "additionalProperties": { "type": "string" }
     });
-    json!([
+    let mut list = json!([
         {
             "name": "list_familiars",
             "description": "List the familiars in Grimoire with their ids, names, providers, and models. Use an id or name in create_spell.",
@@ -115,12 +115,16 @@ pub fn definitions() -> Value {
                 "required": ["theme"]
             }
         }
-    ])
+    ]);
+    if let Some(list) = list.as_array_mut() {
+        list.extend(memory::definitions());
+    }
+    list
 }
 
 /// Tool names as Claude's `--allowedTools` expects them.
 pub fn claude_tool_names() -> String {
-    TOOL_NAMES.map(|name| format!("mcp__{SERVER_NAME}__{name}")).join(",")
+    TOOL_NAMES.iter().chain(&memory::TOOL_NAMES).map(|name| format!("mcp__{SERVER_NAME}__{name}")).collect::<Vec<_>>().join(",")
 }
 
 /// The command and arguments a CLI runs to give `agent_id` the Grimoire tools, once the socket is up.
@@ -278,6 +282,7 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
                 .collect();
             (pretty(&items), None)
         }
+        tool if memory::TOOL_NAMES.contains(&tool) => (memory::call_tool(db, caller, tool, &arguments)?, memory::changed_event(tool)),
         _ => return Err(format!("Grimoire has no tool named {tool}.")),
     };
     Ok(Outcome { text, changed })
@@ -515,6 +520,15 @@ mod tests {
         assert_eq!(list[0]["steps"][0]["familiar"], "Writer");
         assert_eq!(list[0]["createdBy"], Value::Null);
         assert!(call(&db, &dir, "w1", "delete_everything", json!({})).is_err());
+    }
+
+    #[test]
+    fn offers_the_memory_tools() {
+        let names: Vec<String> = definitions().as_array().unwrap().iter().map(|d| d["name"].as_str().unwrap().to_string()).collect();
+        for tool in memory::TOOL_NAMES {
+            assert!(names.iter().any(|n| n == tool));
+            assert!(claude_tool_names().contains(&format!("mcp__grimoire__{tool}")));
+        }
     }
 
     #[test]

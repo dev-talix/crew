@@ -3,6 +3,7 @@ mod covens;
 mod db;
 mod dock;
 mod mcp;
+mod memory;
 mod permissions;
 mod providers;
 mod routines;
@@ -209,6 +210,7 @@ fn open_workspace(app: AppHandle, state: State<AppState>, agent_id: String) -> R
 async fn delete_agent(app: AppHandle, state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
     state.runtime.remove_agent(&agent_id).await?;
     state.db.delete_agent(&agent_id)?;
+    memory::forget(&state.db, memory::Owner { scope: memory::Scope::Familiar, id: &agent_id })?;
     let _ = app.emit("agents_changed", ());
     Ok(())
 }
@@ -431,6 +433,7 @@ fn save_coven(app: AppHandle, state: State<AppState>, id: Option<String>, name: 
 #[tauri::command]
 fn delete_coven(app: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
     covens::delete(&state.db, &id)?;
+    memory::forget(&state.db, memory::Owner { scope: memory::Scope::Coven, id: &id })?;
     let _ = app.emit("covens_changed", ());
     let _ = app.emit("agents_changed", ());
     Ok(())
@@ -598,6 +601,7 @@ pub fn run() {
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
+            memory::init(&dir);
             let db = Arc::new(Db::open(&dir.join("grimoire.db"))?);
             let billing = db.setting(CLAUDE_BILLING).ok().flatten();
             providers::USE_CLAUDE_SUBSCRIPTION.store(billing.as_deref() != Some("api"), Ordering::Relaxed);
@@ -681,7 +685,9 @@ pub fn run() {
             check_for_updates,
             list_covens,
             save_coven,
-            delete_coven
+            delete_coven,
+            memory::get_memory,
+            memory::save_memory
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
