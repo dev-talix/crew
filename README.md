@@ -101,6 +101,28 @@ reply is added at the end when a step doesn't use it.
 A ritual sends a prompt every few hours, daily at a time, or on chosen weekdays. One timer sleeps
 until the next run, and a run missed while Grimoire was closed fires once at the next launch.
 
+## Familiars asking familiars
+
+A familiar can ask another one for help with `ask_familiar`. Grimoire sends the message to the other
+familiar's chat, labeled "Asked by Researcher", waits for its reply, and hands the reply back. The
+asking familiar's chat shows a row like "Asked Scribe". If the other familiar is busy, the question
+waits in its queue like any message.
+
+Grimoire refuses a question when:
+
+- a familiar asks itself;
+- it would make a loop, like Scribe asking Researcher while Researcher waits on Scribe;
+- it would be a fourth familiar in a row (A asks B, B asks C, C asks D is the limit);
+- Settings, Permissions says no. "Who can ask whom" is any familiar (the default), only familiars in
+  the same coven, or nobody.
+
+A familiar waits up to 10 minutes for a reply, counted from when its question is queued. Turn on
+"Approve each question" in the same section and Grimoire asks you first: "Researcher wants to ask
+Scribe", with the message. No answer in 2 minutes counts as Deny.
+
+Grimoire tells Codex (`tool_timeout_sec`) and Claude (the MCP server's `timeout`) to allow 15
+minutes for its tool calls, since their defaults are shorter than a reply can take.
+
 ## Vault
 
 Settings, Vault holds logins, API keys, and cards. Secret values go in your macOS Keychain under
@@ -220,7 +242,7 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
   (Claude through its interrupt request, Codex through `turn/interrupt`) and cancels the queue.
 - **Familiar tools.** Grimoire gives each familiar an MCP server named `grimoire` (`--mcp-config`
   for Claude, thread config for Codex) with `list_familiars`, `list_spells`, `create_spell`,
-  `list_themes`, `create_theme`, `set_theme`, `vault_search`, and `vault_use`. The CLI starts `grimoire mcp <socket> <agent-id>`,
+  `list_themes`, `create_theme`, `set_theme`, `vault_search`, `vault_use`, and `ask_familiar`. The CLI starts `grimoire mcp <socket> <agent-id>`,
   which relays calls to the app over `grimoire.sock` in its data folder (owner-only). Familiars can't
   cast, edit, or delete spells.
 - **Claude billing.** With "Claude subscription" (the default), Grimoire removes

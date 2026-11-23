@@ -17,6 +17,7 @@ describe("tool summaries", () => {
   test("a single tool keeps its own label", () => {
     expect(summarizeTools([classifyTool("$ ls -la")])).toBe("Ran ls -la");
     expect(summarizeTools([classifyTool("Edit src/a.rs")])).toBe("Edited src/a.rs");
+    expect(summarizeTools([classifyTool("Asked Scribe")])).toBe("Asked Scribe");
   });
 
   test("several tools are counted by kind", () => {

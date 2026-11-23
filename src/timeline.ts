@@ -24,6 +24,8 @@ export function classifyTool(raw: string): ToolEntry {
   const search = /^(Grep|Glob) (.+)$/.exec(text);
   if (search) return { kind: "search", label: `Searched for ${search[2]}`, count: 1 };
   if (/^(Fetch|Search) |^Web search/.test(text)) return { kind: "web", label: text, count: 1 };
+  // ask_familiar rows already read as a sentence: "Asked Scribe".
+  if (/^Asked /.test(text)) return { kind: "tool", label: text, count: 1 };
   return { kind: "tool", label: `Used ${text}`, count: 1 };
 }
 
