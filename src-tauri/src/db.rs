@@ -250,7 +250,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 24;
+const SCHEMA_VERSION: i64 = 25;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -531,6 +531,23 @@ impl Db {
         }
         if version < 24 {
             crate::handoffs::migrate_requests(&conn)?;
+        }
+        if version < 25 {
+            // Other Macs linked over Tailscale. Their tokens live in the Keychain, not here.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE link_peers (
+                   id TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   address TEXT NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   last_seen INTEGER,
+                   version TEXT,
+                   familiars TEXT NOT NULL DEFAULT '[]'
+                 );
+                 PRAGMA user_version = 25;
+                 COMMIT;",
+            )?;
         }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
@@ -1065,7 +1082,7 @@ mod tests {
         // Roll the file back to version 21, as the previous release left it.
         {
             let conn = Connection::open(&path).unwrap();
-            conn.execute_batch("ALTER TABLE agents DROP COLUMN setup_pending; ALTER TABLE chats DROP COLUMN handoff; DROP TABLE handoffs; PRAGMA user_version = 21;").unwrap();
+            conn.execute_batch("ALTER TABLE agents DROP COLUMN setup_pending; ALTER TABLE chats DROP COLUMN handoff; DROP TABLE handoffs; DROP TABLE link_peers; PRAGMA user_version = 21;").unwrap();
         }
         let db = Db::open(&path).unwrap();
         let version: i64 = db.with(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();

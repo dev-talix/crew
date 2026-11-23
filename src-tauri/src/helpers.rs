@@ -495,6 +495,7 @@ pub fn call_tool(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, 
 
 #[tauri::command]
 pub fn list_helpers(state: State<AppState>, agent_id: String) -> Result<Vec<Helper>, String> {
+    crate::link::local_only(&agent_id)?;
     list(&state.db, &agent_id, 20)
 }
 

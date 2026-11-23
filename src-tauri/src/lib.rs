@@ -11,8 +11,10 @@ mod drafts;
 mod exports;
 mod handoffs;
 mod helpers;
+mod http;
 mod inbox;
 mod ledger;
+mod link;
 mod mcp;
 mod memory;
 mod notify;
@@ -72,6 +74,26 @@ struct NewAgent {
     /// An SSH destination to run the familiar on another Mac. Empty runs it here.
     #[serde(default)]
     host: Option<String>,
+    /// A linked Mac to make the familiar on, which becomes its home.
+    #[serde(default)]
+    peer_id: Option<String>,
+}
+
+impl From<link::NewFamiliar> for NewAgent {
+    fn from(f: link::NewFamiliar) -> Self {
+        NewAgent {
+            name: f.name,
+            provider: f.provider,
+            model: f.model,
+            workspace: f.workspace,
+            access: f.access,
+            avatar: f.avatar,
+            effort: f.effort,
+            coven_id: None,
+            host: None,
+            peer_id: None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -189,24 +211,52 @@ fn strictly_inside(path: &Path, home: &Path) -> bool {
     real.starts_with(&real_home) && (existing != path || real != real_home)
 }
 
+/// This Mac's familiars, then every linked Mac's as last fetched. Each has `home`: null here, or
+/// the Mac it lives on.
 #[tauri::command]
-fn list_agents(state: State<AppState>) -> Result<Vec<remote::AgentStatus>, String> {
-    remote::with_status(&state.db, state.db.list_agents()?)
+fn list_agents(state: State<AppState>) -> Result<Vec<serde_json::Value>, String> {
+    let local = remote::with_status(&state.db, state.db.list_agents()?)?;
+    Ok(local.iter().map(link::local_value).chain(link::remote_familiars()).collect())
 }
 
 #[tauri::command]
 fn busy_agents(state: State<AppState>) -> Vec<String> {
-    state.runtime.busy_agents()
+    let mut busy = state.runtime.busy_agents();
+    busy.extend(link::remote_busy());
+    busy
 }
 
 #[tauri::command]
-async fn create_agent(app: AppHandle, state: State<'_, AppState>, input: NewAgent) -> Result<remote::AgentStatus, String> {
+async fn create_agent(app: AppHandle, state: State<'_, AppState>, input: NewAgent) -> Result<serde_json::Value, String> {
+    if let Some(peer) = input.peer_id.clone().filter(|p| !p.is_empty()) {
+        if input.host.as_deref().is_some_and(|h| !h.trim().is_empty()) {
+            return Err("A familiar on a linked Mac runs on that Mac, so it can't have an SSH host too.".into());
+        }
+        input.avatar.validate()?;
+        let familiar = link::NewFamiliar {
+            name: clean_name(&input.name)?,
+            provider: input.provider,
+            model: clean_model(input.model),
+            effort: clean_effort(input.effort)?,
+            access: input.access,
+            avatar: input.avatar,
+            workspace: input.workspace,
+        };
+        return link::create(&peer, familiar).await;
+    }
+    let status = new_agent(&state.db, input).await?;
+    let _ = app.emit("agents_changed", ());
+    Ok(link::local_value(&status))
+}
+
+/// Makes a familiar on this Mac, for the window or for a linked Mac.
+async fn new_agent(db: &Db, input: NewAgent) -> Result<remote::AgentStatus, String> {
     let name = clean_name(&input.name)?;
     input.avatar.validate()?;
     let id = uuid::Uuid::new_v4().to_string();
     let host = remote::clean_host(input.host.as_deref())?;
     let effort = clean_effort(input.effort)?;
-    let coven_id = clean_coven(&state.db, input.coven_id)?;
+    let coven_id = clean_coven(db, input.coven_id)?;
     let mut setup_pending = false;
     let workspace = match &host {
         Some(host) => {
@@ -235,13 +285,12 @@ async fn create_agent(app: AppHandle, state: State<'_, AppState>, input: NewAgen
         host,
         created_at: now_ms(),
     };
-    state.db.insert_agent(&agent)?;
+    db.insert_agent(&agent)?;
     if setup_pending {
-        state.db.set_setup_pending(&agent.id, true).inspect_err(|_| {
-            let _ = state.db.delete_agent(&agent.id);
+        db.set_setup_pending(&agent.id, true).inspect_err(|_| {
+            let _ = db.delete_agent(&agent.id);
         })?;
     }
-    let _ = app.emit("agents_changed", ());
     let offline = agent.host.as_deref().is_some_and(remote::is_offline);
     Ok(remote::AgentStatus { agent, setup_pending, offline })
 }
@@ -253,6 +302,7 @@ async fn update_agent(
     agent_id: String,
     changes: AgentChanges,
 ) -> Result<Agent, String> {
+    link::local_only(&agent_id)?;
     let mut agent = state.db.get_agent(&agent_id)?.ok_or("That familiar no longer exists.")?;
     changes.avatar.validate()?;
     let settings_changed = agent.model != clean_model(changes.model.clone()) || agent.access != changes.access;
@@ -272,6 +322,7 @@ async fn update_agent(
 
 #[tauri::command]
 fn open_workspace(app: AppHandle, state: State<AppState>, agent_id: String) -> Result<(), String> {
+    link::local_only(&agent_id)?;
     let agent = state.db.get_agent(&agent_id)?.ok_or("That familiar no longer exists.")?;
     if let Some(host) = &agent.host {
         return Err(format!("This familiar's workspace is {} on {host}, so Finder can't open it here.", agent.workspace));
@@ -281,6 +332,7 @@ fn open_workspace(app: AppHandle, state: State<AppState>, agent_id: String) -> R
 
 #[tauri::command]
 async fn delete_agent(app: AppHandle, state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
+    link::local_only(&agent_id)?;
     helpers::stop_for(&state.db, &agent_id);
     state.runtime.remove_agent(&agent_id).await?;
     if let Ok(dir) = app.path().app_data_dir() {
@@ -292,30 +344,47 @@ async fn delete_agent(app: AppHandle, state: State<'_, AppState>, agent_id: Stri
     Ok(())
 }
 
+/// A page of the familiar's current chat. A familiar on a linked Mac is read from there.
 #[tauri::command]
-fn list_messages(
-    state: State<AppState>,
+async fn list_messages(
+    state: State<'_, AppState>,
     agent_id: String,
     before_id: Option<i64>,
     limit: Option<i64>,
-) -> Result<Vec<Message>, String> {
+) -> Result<Vec<serde_json::Value>, String> {
+    if link::is_remote(&agent_id) {
+        return link::messages(&agent_id, before_id, limit).await;
+    }
     let mut messages = state.db.list_messages(&agent_id, before_id, limit.unwrap_or(100).clamp(1, 500))?;
     attachments::attach(&state.db, &mut messages)?;
-    Ok(messages)
+    messages.iter().map(|m| serde_json::to_value(m).map_err(|e| e.to_string())).collect()
 }
 
 #[tauri::command]
-fn send_message(app: AppHandle, state: State<AppState>, agent_id: String, text: String, attachments: Option<Vec<String>>) -> Result<Message, String> {
+async fn send_message(app: AppHandle, state: State<'_, AppState>, agent_id: String, text: String, attachments: Option<Vec<String>>) -> Result<serde_json::Value, String> {
     let text = text.trim();
+    if link::is_remote(&agent_id) {
+        if attachments.is_some_and(|a| !a.is_empty()) {
+            return Err("Attachments can't reach a familiar on a linked Mac yet. Send the message without them.".into());
+        }
+        if text.is_empty() {
+            return Err("The message is empty.".into());
+        }
+        return link::send(&agent_id, text).await;
+    }
     let staged = attachments::staged(&app, attachments.unwrap_or_default())?;
     if text.is_empty() && staged.is_empty() {
         return Err("The message is empty.".into());
     }
-    state.runtime.send_with(&agent_id, text.to_string(), staged)
+    let message = state.runtime.send_with(&agent_id, text.to_string(), staged)?;
+    serde_json::to_value(message).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn stop_turn(state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
+    if link::is_remote(&agent_id) {
+        return link::stop(&agent_id).await;
+    }
     state.runtime.stop(&agent_id).await
 }
 
@@ -391,6 +460,7 @@ fn list_routines(state: State<AppState>) -> Result<Vec<Routine>, String> {
 
 #[tauri::command]
 fn save_routine(state: State<AppState>, input: routines::RoutineInput) -> Result<Routine, String> {
+    input.agent_id.as_deref().map_or(Ok(()), link::local_only)?;
     let routine = routines::save(&state.db, input)?;
     state.scheduler.changed();
     Ok(routine)
@@ -429,6 +499,7 @@ fn running_workflows(state: State<AppState>) -> Vec<String> {
 
 #[tauri::command]
 fn save_workflow(app: AppHandle, state: State<AppState>, input: WorkflowInput) -> Result<Workflow, String> {
+    input.steps.iter().try_for_each(|step| link::local_only(&step.agent_id))?;
     let saved = workflows::save(&state.db, input.id.as_deref(), &input.name, input.steps, None)?;
     let _ = app.emit("workflows_changed", ());
     Ok(saved)
@@ -468,6 +539,7 @@ fn list_covens(state: State<AppState>) -> Result<Vec<covens::Coven>, String> {
 
 #[tauri::command]
 fn save_coven(app: AppHandle, state: State<AppState>, id: Option<String>, name: String, members: Vec<String>) -> Result<covens::Coven, String> {
+    members.iter().try_for_each(|m| link::local_only(m))?;
     let saved = covens::save(&state.db, id.as_deref(), &name, &members)?;
     let _ = app.emit("covens_changed", ());
     let _ = app.emit("agents_changed", ());
@@ -580,6 +652,7 @@ fn vault_activity(state: State<AppState>, id: String) -> Result<VaultActivity, S
 
 #[tauri::command]
 fn revoke_vault_grant(app: AppHandle, state: State<AppState>, id: String, agent_id: String) -> Result<(), String> {
+    link::local_only(&agent_id)?;
     state.db.remove_grant(&agent_id, &vault::scope(&id))?;
     let _ = app.emit("vault_changed", ());
     Ok(())
@@ -700,6 +773,9 @@ pub fn run() {
             if let Err(e) = tools::serve(Arc::new(tools), &dir.join("grimoire.sock")) {
                 eprintln!("Grimoire tools are off: {e}");
             }
+            if let Err(e) = link::install(app.handle(), db.clone(), secrets.clone(), runtime.clone()) {
+                eprintln!("Linked Macs are off: {e}");
+            }
             // Rituals can fire as soon as the scheduler starts, so the approval gate and the tool socket
             // have to be up first.
             let scheduler = Scheduler::start(db.clone(), &runtime, &workflows, app.handle().clone());
@@ -806,7 +882,11 @@ pub fn run() {
             drafts::list_drafts,
             drafts::close_draft,
             drafts::open_draft_link,
-            remote::check_host
+            remote::check_host,
+            link::link_status,
+            link::link_start_pairing,
+            link::link_pair,
+            link::link_unlink
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {

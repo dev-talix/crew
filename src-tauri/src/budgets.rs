@@ -418,6 +418,7 @@ pub(crate) fn list_budgets(state: State<crate::AppState>) -> Result<Vec<BudgetSt
 
 #[tauri::command]
 pub(crate) fn set_budget(app: AppHandle, state: State<crate::AppState>, agent_id: String, budget: Option<Budget>) -> Result<(), String> {
+    crate::link::local_only(&agent_id)?;
     if state.db.get_agent(&agent_id)?.is_none() {
         return Err("That familiar no longer exists.".into());
     }

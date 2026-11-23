@@ -247,11 +247,13 @@ pub fn changed_event(tool: &str) -> Option<&'static str> {
 
 #[tauri::command]
 pub fn get_ledger(state: State<AppState>, agent_id: String) -> Result<Ledger, String> {
+    crate::link::local_only(&agent_id)?;
     get(&state.db, &agent_id)
 }
 
 #[tauri::command]
 pub fn save_ledger(app: AppHandle, state: State<AppState>, agent_id: String, patch: Patch) -> Result<Ledger, String> {
+    crate::link::local_only(&agent_id)?;
     state.db.get_agent(&agent_id)?.ok_or("That familiar no longer exists.")?;
     let saved = update(&state.db, &agent_id, patch, "you")?;
     let _ = app.emit(CHANGED, ());

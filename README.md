@@ -160,6 +160,27 @@ are refused, and Finder can't open the workspace. The host can't be changed afte
 familiar. Your Permissions rules still apply, since Codex and Claude ask Grimoire over the same
 stream.
 
+### Linked Macs
+
+Two Macs running Grimoire on the same Tailscale tailnet can link, with no SSH. Each familiar lives
+on one Mac, its home, which keeps its chats, memory, ledger, and rituals. Every linked Mac lists it
+with its home Mac's name, shows its chat as it streams, and can send it messages and stop its turns.
+Only the home Mac can edit or delete it. A linked Mac can also summon a new familiar on another
+Mac, which then becomes its home.
+
+To link, make a pairing code on one Mac, then enter that Mac's Tailscale name or address and the
+code on the other. A code is 8 characters, works once, lasts 10 minutes, and dies after 5 wrong
+tries. Unlinking on either Mac removes the link from both, or from the other one the next time it
+connects.
+
+Grimoire listens on port 47620 on this Mac's Tailscale addresses only (100.64.0.0/10 and
+fd7a:115c:a1e0::/48), refuses connections from anywhere else, and checks for those addresses every
+minute until Tailscale connects. Tailscale encrypts the traffic. Each pair of Macs shares a token
+each way, kept in the Keychain. A linked Mac can only list familiars, read and send chat messages,
+stop turns, and summon familiars that run on the home Mac itself. It can't reach the vault,
+approvals, settings, memory, or Grimoire's tools. Attachments don't cross yet. When a linked Mac is
+offline, its familiars stay listed as of the last time it answered.
+
 ## Attachments
 
 Drop files on the chat, paste a screenshot, or click the paperclip in the composer. You can attach up
