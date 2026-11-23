@@ -2,6 +2,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { createEffect, createSignal, For, Match, onSettled, Show, Switch } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { api, createFetch, errorText, PROVIDER_NAMES, type Agent, type DockEdge, type Provider, type ProviderStatus, type Settings } from "./api";
+import BotAvatar from "./BotAvatar";
 import { Page, Segmented, Toggle } from "./ui";
 import { ThemePicker } from "./ThemeEditor";
 import { BackupSection } from "./ImportExport";
@@ -45,7 +46,7 @@ function WithCode(props: { text: string }) {
 }
 
 
-function GeneralSettings() {
+function GeneralSettings(props: { agents: Agent[] }) {
   const [statuses, setStatuses] = createSignal<ProviderStatus[]>();
   const [checking, setChecking] = createSignal(false);
   const [statusError, setStatusError] = createSignal("");
@@ -67,6 +68,19 @@ function GeneralSettings() {
   const [settings, setSettings] = createSignal<Settings>({ claudeBilling: "subscription", dockEdge: "off" });
   const [billingError, setBillingError] = createSignal("");
   const [dockError, setDockError] = createSignal("");
+  // Familiars left out of the dock; every other one shows, including new ones.
+  const [dockHidden, setDockHidden] = createSignal<string[]>([]);
+  api.dockHidden().then(setDockHidden, (e) => setDockError(errorText(e)));
+  const showInDock = (id: string, show: boolean) => {
+    const before = dockHidden();
+    const next = show ? before.filter((other) => other !== id) : [...before, id];
+    setDockHidden(next);
+    setDockError("");
+    api.setDockHidden(next).then(setDockHidden, (e) => {
+      setDockHidden(before);
+      setDockError(errorText(e));
+    });
+  };
   api.getSettings().then(setSettings, (e) => setBillingError(errorText(e)));
   const billing = () => settings().claudeBilling;
 
@@ -195,8 +209,23 @@ function GeneralSettings() {
             />
           </div>
         </div>
+        <Show when={settings().dockEdge !== "off" && props.agents.length}>
+          <div class="list dock-picks" role="group" aria-label="Familiars in the dock">
+            <For each={props.agents}>
+              {(agent) => (
+                <div class="list-row settings-row">
+                  <div class="list-main dock-pick">
+                    <BotAvatar avatar={agent.avatar} size={24} alive={false} />
+                    <div class="list-title">{agent.name}</div>
+                  </div>
+                  <Toggle label={`Show ${agent.name} in the dock`} checked={!dockHidden().includes(agent.id)} onChange={(on) => showInDock(agent.id, on)} />
+                </div>
+              )}
+            </For>
+          </div>
+        </Show>
         <p class="hint settings-footnote">
-          Click a familiar in the dock to chat without opening Grimoire. While the dock is on, closing the Grimoire window keeps your familiars running.
+          Click a familiar in the dock to chat without opening Grimoire. Turn off the ones you don't want there; new familiars show up until you do. While the dock is on, closing the Grimoire window keeps your familiars running.
         </p>
         <Show when={dockError()}>
           <div class="error-box settings-error">{dockError()}</div>
@@ -333,7 +362,7 @@ export default function SettingsPage(props: { section?: SettingsSection; agents:
       </nav>
       <Switch>
         <Match when={section() === "general"}>
-          <GeneralSettings />
+          <GeneralSettings agents={props.agents} />
         </Match>
         <Match when={section() === "appearance"}>
           <AppearanceSettings />

@@ -33,7 +33,8 @@
 - **The vault** keeps logins, API keys, and cards in your macOS Keychain. Familiars can use a
   secret in a command without ever seeing it, and Grimoire asks you first.
 - **The dock** pins your familiars to the edge of the screen, so you can chat without opening
-  the main window.
+  the main window. Pick which familiars it shows in Settings, General; new ones show up until you
+  turn them off.
 - **Voice** dictation in the composer uses macOS speech recognition.
 
 <table>
