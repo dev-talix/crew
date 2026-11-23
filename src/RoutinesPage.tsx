@@ -146,8 +146,8 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
             title="No rituals yet"
             body={
               noAgents()
-                ? "Summon a familiar first. A ritual sends it a message on a schedule."
-                : "A ritual sends a familiar the same message on a schedule, even while you're away from the window."
+                ? "Summon a familiar first. A ritual sends it a message on a schedule or when something happens."
+                : "A ritual sends a familiar the same message on a schedule or when something happens, like a new pull request, even while you're away from the window."
             }
             action={newButton(false)}
           >
