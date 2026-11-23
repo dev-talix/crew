@@ -69,7 +69,7 @@ const FALLBACK: Avatar[] = [
 const avatars = (agents: Agent[], count: number) =>
   Array.from({ length: count }, (_, i) => agents[i % Math.max(agents.length, 1)]?.avatar ?? FALLBACK[i % FALLBACK.length]);
 
-/** A familiar inside a ritual dial, with the moon rising over it. */
+/** A familiar inside a ritual dial. */
 export function RitualArt(props: { agents: Agent[] }) {
   return (
     <div class="empty-art ritual-art" aria-hidden="true">
@@ -83,7 +83,6 @@ export function RitualArt(props: { agents: Agent[] }) {
             return <line x1={60 + 50 * c} y1={60 + 50 * s} x2={60 + (i % 3 ? 46 : 43) * c} y2={60 + (i % 3 ? 46 : 43) * s} />;
           }}
         </For>
-        <path class="empty-art-moon" d="M98 14a10 10 0 1 0 8 15 8 8 0 1 1-8-15z" />
       </svg>
       <BotAvatar avatar={avatars(props.agents, 1)[0]} size={54} />
     </div>

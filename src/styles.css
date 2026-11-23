@@ -134,6 +134,13 @@ button:disabled {
   filter: brightness(1.06);
 }
 
+/* A disabled primary button looks like any other disabled button, not a faded call to action. */
+.primary:disabled {
+  border-color: var(--line);
+  background: var(--surface);
+  color: inherit;
+}
+
 .ghost {
   border-color: var(--line);
   background: var(--surface);
@@ -1430,7 +1437,6 @@ button:disabled {
   stroke-linecap: round;
 }
 
-.empty-art-moon,
 .empty-art-spark {
   fill: var(--warning);
   stroke: none;
