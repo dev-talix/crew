@@ -87,6 +87,15 @@ export const ComposeIcon = () => (
   </Icon>
 );
 
+export const PaletteIcon = () => (
+  <Icon>
+    <path d="M8 1.8a6.2 6.2 0 0 0 0 12.4c1 0 1.4-.6 1.4-1.3 0-.9-.8-1.2-.8-2 0-.7.6-1.2 1.4-1.2h1.6a2.6 2.6 0 0 0 2.6-2.6C14.2 4.3 11.4 1.8 8 1.8z" />
+    <circle cx="5" cy="7" r=".9" fill="currentColor" stroke="none" />
+    <circle cx="7.6" cy="4.6" r=".9" fill="currentColor" stroke="none" />
+    <circle cx="10.6" cy="5.4" r=".9" fill="currentColor" stroke="none" />
+  </Icon>
+);
+
 export const LockIcon = () => (
   <Icon size={14}>
     <rect x="3.5" y="7" width="9" height="6.5" rx="1.5" />

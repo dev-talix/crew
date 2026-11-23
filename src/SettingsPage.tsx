@@ -1,11 +1,13 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, Match, onSettled, Show, Switch } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import { api, createFetch, errorText, PROVIDER_NAMES, type DockEdge, type Provider, type ProviderStatus, type Settings } from "./api";
 import { Page, Segmented } from "./ui";
 import { ThemePicker } from "./ThemeEditor";
 import { appIcon, readMode, setAppIcon, setMode, type AppIconSetting, type ModeSetting } from "./themeStore";
 import nightIcon from "./assets/icon-night.svg";
 import paperIcon from "./assets/icon-paper.svg";
+import { GearIcon, PaletteIcon } from "./icons";
 import "./settings.css";
 
 type Billing = Settings["claudeBilling"];
@@ -44,7 +46,7 @@ function RefreshIcon() {
   );
 }
 
-export default function SettingsPage() {
+function GeneralSettings() {
   const [statuses, setStatuses] = createSignal<ProviderStatus[]>();
   const [checking, setChecking] = createSignal(false);
   const [statusError, setStatusError] = createSignal("");
@@ -61,7 +63,7 @@ export default function SettingsPage() {
       setChecking(false);
     }
   };
-  void checkAccounts();
+  onSettled(() => void checkAccounts());
 
   const [settings, setSettings] = createSignal<Settings>({ claudeBilling: "subscription", dockEdge: "off" });
   const [billingError, setBillingError] = createSignal("");
@@ -90,17 +92,10 @@ export default function SettingsPage() {
     if (next !== settings().dockEdge) void saveSetting({ dockEdge: next }, setDockError);
   };
 
-  const [mode, setModeSignal] = createSignal<ModeSetting>(readMode());
-  const changeMode = (next: ModeSetting) => {
-    setModeSignal(next);
-    setMode(next);
-  };
-  const agents = createFetch(() => null, api.listAgents);
-
   const appVersion = createFetch(() => null, getVersion);
 
   return (
-    <Page title="Settings">
+    <Page title="General">
       <div class="settings">
         <div class="section-title settings-caption">
           <h2>Accounts</h2>
@@ -194,7 +189,35 @@ export default function SettingsPage() {
           <div class="error-box settings-error">{dockError()}</div>
         </Show>
 
-        <h2 class="section-title">Appearance</h2>
+        <h2 class="section-title">About</h2>
+        <div class="list">
+          <div class="list-row">
+            <div class="list-main">
+              <div class="list-title">Grimoire</div>
+              <p class="settings-detail">
+                Grimoire keeps its data on this Mac in <code>~/Library/Application Support/dev.talix.grimoire</code>.
+              </p>
+            </div>
+            <span class="settings-value">Version {appVersion() ?? "0.1.0"}</span>
+          </div>
+        </div>
+      </div>
+    </Page>
+  );
+}
+
+function AppearanceSettings() {
+  const [mode, setModeSignal] = createSignal<ModeSetting>(readMode());
+  const changeMode = (next: ModeSetting) => {
+    setModeSignal(next);
+    setMode(next);
+  };
+  const agents = createFetch(() => null, api.listAgents);
+
+  return (
+    <Page title="Appearance">
+      <div class="settings">
+        <h2 class="section-title">Theme</h2>
         <div class="list">
           <div class="list-row">
             <div class="list-main">
@@ -234,20 +257,45 @@ export default function SettingsPage() {
           </For>
         </div>
         <p class="hint settings-footnote">The Dock shows your choice while Grimoire is open. Finder and a closed Dock icon keep the paper one.</p>
-
-        <h2 class="section-title">About</h2>
-        <div class="list">
-          <div class="list-row">
-            <div class="list-main">
-              <div class="list-title">Grimoire</div>
-              <p class="settings-detail">
-                Grimoire keeps its data on this Mac in <code>~/Library/Application Support/dev.talix.grimoire</code>.
-              </p>
-            </div>
-            <span class="settings-value">Version {appVersion() ?? "0.1.0"}</span>
-          </div>
-        </div>
       </div>
     </Page>
+  );
+}
+
+export type SettingsSection = "general" | "appearance";
+
+const SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element }[] = [
+  { id: "general", label: "General", icon: GearIcon },
+  { id: "appearance", label: "Appearance", icon: PaletteIcon },
+];
+
+export default function SettingsPage(props: { section?: SettingsSection }) {
+  const [section, setSection] = createSignal<SettingsSection>(props.section ?? "general");
+  return (
+    <div class="settings-shell">
+      <nav class="settings-nav" aria-label="Settings sections" data-tauri-drag-region>
+        <For each={SECTIONS}>
+          {(item) => (
+            <button
+              type="button"
+              class={["nav-item", { active: section() === item.id }]}
+              aria-current={section() === item.id ? "page" : undefined}
+              onClick={() => setSection(item.id)}
+            >
+              <item.icon />
+              <span>{item.label}</span>
+            </button>
+          )}
+        </For>
+      </nav>
+      <Switch>
+        <Match when={section() === "general"}>
+          <GeneralSettings />
+        </Match>
+        <Match when={section() === "appearance"}>
+          <AppearanceSettings />
+        </Match>
+      </Switch>
+    </div>
   );
 }
