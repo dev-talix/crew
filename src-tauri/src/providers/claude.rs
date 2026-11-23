@@ -232,7 +232,7 @@ impl Claude {
                     let (agent, process) = (agent_id.clone(), reader.clone());
                     tauri::async_runtime::spawn(async move {
                         let command = value["request"]["input"]["tool_input"]["command"].as_str().unwrap_or_default();
-                        let allowed = crate::permissions::check_command(&agent, command).await;
+                        let allowed = crate::permissions::check_command(&agent, command, uuid::Uuid::new_v4().to_string()).await;
                         let output = json!({ "hookSpecificOutput": {
                             "hookEventName": "PreToolUse",
                             "permissionDecision": if allowed { "allow" } else { "deny" },

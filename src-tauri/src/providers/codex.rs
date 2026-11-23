@@ -90,6 +90,8 @@ fn thread_params(agent: &Agent) -> Value {
     let mut params = json!({
         "cwd": agent.workspace,
         "approvalPolicy": approval_policy(),
+        // Approval requests come to Grimoire, not to Codex's own automatic reviewer.
+        "approvalsReviewer": "user",
         "sandbox": match agent.access {
             Access::Workspace => "workspace-write",
             Access::Full => "danger-full-access",
@@ -132,7 +134,7 @@ impl Codex {
             routes.insert(thread_id.clone(), Route { tx: Some(tx), ..Route::default() });
         }
         let input = json!([{ "type": "text", "text": text, "text_elements": [] }]);
-        let mut params = json!({ "threadId": thread_id, "input": input, "approvalPolicy": approval_policy() });
+        let mut params = json!({ "threadId": thread_id, "input": input, "approvalPolicy": approval_policy(), "approvalsReviewer": "user" });
         if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
             params["model"] = json!(model);
         }
@@ -312,7 +314,7 @@ impl Codex {
                         let (id, process) = (id.clone(), process.clone());
                         tauri::async_runtime::spawn(async move {
                             let allowed = match agent {
-                                Some(agent) => crate::permissions::check_command(&agent, &command).await,
+                                Some(agent) => crate::permissions::check_command(&agent, &command, codex_request_key(&id)).await,
                                 None => false,
                             };
                             let decision = if allowed { "accept" } else { "decline" };
@@ -334,6 +336,10 @@ impl Codex {
                     };
                     let _ = waiter.send(result);
                 }
+            }
+            (None, Some("serverRequest/resolved")) => {
+                // Codex settled a request on its own; take its card down.
+                crate::permissions::withdraw(&codex_request_key(&message["params"]["requestId"]));
             }
             (None, Some(method)) => {
                 let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -359,6 +365,11 @@ impl Codex {
             (None, None) => {}
         }
     }
+}
+
+/// The approval id for a Codex server request, so a later `serverRequest/resolved` can find it.
+fn codex_request_key(id: &Value) -> String {
+    format!("codex-{id}")
 }
 
 fn unwrap_shell(command: &str) -> &str {

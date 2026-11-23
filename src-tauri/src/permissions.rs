@@ -76,10 +76,13 @@ pub fn glob(pattern: &str, text: &str) -> bool {
     true
 }
 
+fn matches(permissions: &Permissions, kind: RuleKind, command: &str) -> bool {
+    permissions.rules.iter().any(|r| r.kind == kind && glob(r.pattern.trim(), command.trim()))
+}
+
 /// "Always ask" wins over "allow" when both match, so a broad allow rule can't hide a risky command.
 pub fn verdict(permissions: &Permissions, command: &str) -> Verdict {
-    let command = command.trim();
-    let matches = |kind: RuleKind| permissions.rules.iter().any(|r| r.kind == kind && glob(r.pattern.trim(), command));
+    let matches = |kind: RuleKind| matches(permissions, kind, command);
     match permissions.mode {
         Mode::Off => Verdict::Allow,
         _ if matches(RuleKind::Ask) => Verdict::Ask,
@@ -126,8 +129,16 @@ pub fn active() -> bool {
     GATE.get().is_some_and(|gate| load(&gate.db).mode != Mode::Off)
 }
 
-/// Decides whether `agent_id` may run `command`, asking the person when the rules say so.
-pub async fn check_command(agent_id: &str, command: &str) -> bool {
+/// Takes down a question the CLI settled itself, as a denial on Grimoire's side.
+pub fn withdraw(id: &str) {
+    if let Some(gate) = GATE.get() {
+        let _ = gate.approvals.answer(id, Decision::Deny);
+    }
+}
+
+/// Decides whether `agent_id` may run `command`, asking the person when the rules say so. `id` names
+/// the question so `withdraw` can find it.
+pub async fn check_command(agent_id: &str, command: &str, id: String) -> bool {
     let Some(gate) = GATE.get() else { return true };
     let permissions = load(&gate.db);
     if verdict(&permissions, command) == Verdict::Allow {
@@ -135,12 +146,13 @@ pub async fn check_command(agent_id: &str, command: &str) -> bool {
     }
     let name = gate.db.get_agent(agent_id).ok().flatten().map_or("A familiar".to_string(), |a| a.name);
     let request = approvals::Request {
-        id: uuid::Uuid::new_v4().to_string(),
+        id,
         agent_id: agent_id.to_string(),
         kind: "command",
         title: format!("{name} wants to run a command"),
         detail: command.trim().to_string(),
-        can_remember: true,
+        // An allow rule can't beat a matching "always ask" rule, so offering "Always allow" would be a lie.
+        can_remember: !matches(&permissions, RuleKind::Ask, command),
     };
     match gate.approvals.ask(&gate.app, request).await {
         Decision::Once => true,

@@ -27,6 +27,8 @@ export default function HomePage(props: {
   const [last, setLast] = createStore<Record<string, Message>>({});
   const [routines, setRoutines] = createSignal<Routine[]>([]);
   const [now, setNow] = createSignal(Date.now());
+  // A reply can land after the clock last ticked; it still happened, so never call it "in a moment".
+  const ago = (ms: number) => (ms >= now() - 30_000 ? "just now" : relativeTime(ms, now()));
 
   const loadRoutines = () => api.listRoutines().then(setRoutines).catch(() => undefined);
 
@@ -103,7 +105,7 @@ export default function HomePage(props: {
                   </span>
                   <span class="home-meta">
                     <span>{PROVIDER_NAMES[agent.provider]}</span>
-                    <Show when={last[agent.id]}>{(m) => <span>{relativeTime(Math.min(m().createdAt, now()), now())}</span>}</Show>
+                    <Show when={last[agent.id]}>{(m) => <span>{ago(m().createdAt)}</span>}</Show>
                   </span>
                 </button>
               )}
