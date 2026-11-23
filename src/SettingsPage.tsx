@@ -261,13 +261,14 @@ function AppearanceSettings() {
 
 export type SettingsSection = "general" | "appearance" | "vault" | "permissions" | "usage" | "updates";
 
-const SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element }[] = [
-  { id: "general", label: "General", icon: GearIcon },
-  { id: "appearance", label: "Appearance", icon: PaletteIcon },
-  { id: "vault", label: "Vault", icon: VaultIcon },
-  { id: "permissions", label: "Permissions", icon: ShieldIcon },
-  { id: "usage", label: "Usage", icon: BarsIcon },
-  { id: "updates", label: "Updates", icon: DownloadIcon },
+/** The sections, with words the ⌘K palette also finds them by. */
+export const SETTINGS_SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element; keywords: string }[] = [
+  { id: "general", label: "General", icon: GearIcon, keywords: "claude billing dock providers about" },
+  { id: "appearance", label: "Appearance", icon: PaletteIcon, keywords: "theme dark light mode app icon colors" },
+  { id: "vault", label: "Vault", icon: VaultIcon, keywords: "keychain passwords logins api keys cards secrets" },
+  { id: "permissions", label: "Permissions", icon: ShieldIcon, keywords: "approvals rules commands ask allow" },
+  { id: "usage", label: "Usage", icon: BarsIcon, keywords: "tokens plan limits rate" },
+  { id: "updates", label: "Updates", icon: DownloadIcon, keywords: "version release download" },
 ];
 
 export default function SettingsPage(props: { section?: SettingsSection; agents: Agent[] }) {
@@ -283,7 +284,7 @@ export default function SettingsPage(props: { section?: SettingsSection; agents:
   return (
     <div class="settings-shell">
       <nav class="settings-nav" aria-label="Settings sections" data-tauri-drag-region>
-        <For each={SECTIONS}>
+        <For each={SETTINGS_SECTIONS}>
           {(item) => (
             <button
               type="button"

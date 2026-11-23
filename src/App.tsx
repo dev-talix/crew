@@ -3,7 +3,8 @@ import type { JSX } from "@solidjs/web";
 import AgentForm from "./AgentForm";
 import Approvals from "./Approvals";
 import BotAvatar from "./BotAvatar";
-import Chat from "./Chat";
+import Chat, { type ChatIntent } from "./Chat";
+import CommandPalette, { type PaletteActions } from "./CommandPalette";
 import { createChatStore } from "./chatStore";
 import HomePage from "./HomePage";
 import RoutinesPage from "./RoutinesPage";
@@ -61,6 +62,8 @@ export default function App() {
     return [...groups, { label: "Unbound", agents: unbound }].filter((g) => g.agents.length > 0);
   });
   const ordered = () => sidebarGroups().flatMap((g) => g.agents);
+  const [palette, setPalette] = createSignal(false);
+  const [chatIntent, setChatIntent] = createSignal<ChatIntent | null>(null);
   const openSpells = (intent: SpellIntent | null) => {
     setSpellIntent(intent);
     setView("workflows");
@@ -139,7 +142,10 @@ export default function App() {
 
   const onKey = (e: KeyboardEvent) => {
     if (!e.metaKey || e.altKey || e.ctrlKey) return;
-    if (e.key === "n") {
+    if (e.key === "k") {
+      e.preventDefault();
+      setPalette((open) => !open);
+    } else if (e.key === "n") {
       e.preventDefault();
       setView("new");
     } else if (e.key === ",") {
@@ -175,6 +181,27 @@ export default function App() {
     setAgents(rest);
     setEditing(false);
     setView(rest.length ? "home" : "new");
+  };
+
+  // Every palette choice but a settings section leaves Settings.
+  const away = (go: () => void) => {
+    setSettings(null);
+    go();
+  };
+  const openChatWith = (intent: ChatIntent) => {
+    setChatIntent(intent);
+    openAgent(intent.agentId);
+  };
+  const paletteActions: PaletteActions = {
+    openAgent: (id) => away(() => openAgent(id)),
+    castSpell: (id) => away(() => openSpells({ cast: id })),
+    newSpell: () => away(() => openSpells({ create: true })),
+    openRituals: () => away(() => setView("routines")),
+    openHome: () => away(() => setView("home")),
+    openSettings: (section) => setSettings(section),
+    summon: () => away(() => setView("new")),
+    newChat: (agentId) => away(() => openChatWith({ agentId, fresh: true })),
+    openMessage: (hit) => away(() => openChatWith({ agentId: hit.agentId, chatId: hit.chatId, messageId: hit.messageId })),
   };
 
   const status = (agent: Agent) => {
@@ -289,6 +316,8 @@ export default function App() {
                     store={chat}
                     onEdit={() => setEditing(true)}
                     onAgentUpdated={replaceAgent}
+                    intent={chatIntent()}
+                    onIntentDone={() => setChatIntent(null)}
                   />
                   <Show when={editing()}>
                     <Sheet label="Familiar settings" wide onClose={() => setEditing(false)}>
@@ -327,6 +356,15 @@ export default function App() {
       </main>
       <Show when={settings()}>
         {(section) => <SettingsDialog agents={agents()} section={section()} onClose={() => setSettings(null)} />}
+      </Show>
+      <Show when={palette()}>
+        <CommandPalette
+          agents={agents()}
+          spells={spells()}
+          current={current()}
+          onClose={() => setPalette(false)}
+          actions={paletteActions}
+        />
       </Show>
       <Approvals agents={agents()} />
     </div>
