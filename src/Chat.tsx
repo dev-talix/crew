@@ -3,6 +3,7 @@ import type { JSX } from "@solidjs/web";
 import BotAvatar, { type Mood } from "./BotAvatar";
 import { api, changesFor, errorText, onEvent, onMountAsync, PROVIDER_NAMES, type Agent, type Attachment, type ChatInfo, type Message } from "./api";
 import ChatsMenu, { chatTitle } from "./ChatsMenu";
+import { RuleButton } from "./MemoryEditor";
 import { AttachButton, createComposerFiles, DropOverlay, MessageAttachments, PendingFiles } from "./ChatAttachments";
 import type { ChatStore } from "./chatStore";
 import Ledger from "./Ledger";
@@ -168,6 +169,9 @@ function UserRow(props: { message: Message; onOpen: (attachment: Attachment) => 
         <span class="hover-only">{clock(m().createdAt)}</span>
         <span class="hover-only">
           <CopyButton text={() => m().text} label="Copy message" />
+          <Show when={m().text.trim() && !m().source}>
+            <RuleButton message={m()} />
+          </Show>
         </span>
       </div>
     </div>

@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createEffect, createSignal, onSettled, type Accessor } from "solid-js";
 import type { Avatar } from "./avatar";
 import type { ThemeFile } from "./theme";
-import type { Memory, MemoryScope } from "./memory";
+import type { Memory, MemoryDraft, MemoryKind, MemoryScope } from "./memory";
 import type * as Budgets from "./budgets";
 import type * as Transfer from "./transfer";
 import type { Ledger } from "./ledgers";
@@ -474,7 +474,9 @@ export const api = {
   saveCoven: (id: string | null, name: string, members: string[]) => invoke<Coven>("save_coven", { id, name, members }),
   deleteCoven: (id: string) => invoke<void>("delete_coven", { id }),
   getMemory: (scope: MemoryScope, id: string) => invoke<Memory>("get_memory", { scope, id }),
-  saveMemory: (scope: MemoryScope, id: string, text: string) => invoke<Memory>("save_memory", { scope, id, text }),
+  saveMemory: (scope: MemoryScope, id: string, entries: MemoryDraft[], removed: string[]) => invoke<Memory>("save_memory", { scope, id, entries, removed }),
+  addMemory: (scope: MemoryScope, id: string, kind: MemoryKind, project: string | null, text: string) =>
+    invoke<Memory>("add_memory", { scope, id, kind, project, text }),
   listVault: () => invoke<VaultItem[]>("list_vault"),
   vaultSecret: (id: string) => invoke<Record<string, string>>("vault_secret", { id }),
   saveVaultItem: (input: VaultItemInput) => invoke<VaultItem>("save_vault_item", { input }),

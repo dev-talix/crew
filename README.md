@@ -26,7 +26,7 @@
 - **The inbox** gathers every familiar's open questions and approvals in one list. A familiar asks
   with a few short options and the one it recommends, then keeps working; your tap goes back to it
   as a new message.
-- **Memory** carries notes from one chat to the next, for each familiar and each coven.
+- **Memory** carries rules, facts, and project notes from one chat to the next, for each familiar and each coven.
 - **Ledgers** keep each familiar's goal, status, and what it's waiting on. A familiar gets its ledger
   when a chat starts and updates it with `update_ledger`; you edit it in the strip under the chat bar.
 - **Rituals** send a familiar the same message, or cast a spell, on a schedule, like a morning summary.
@@ -165,16 +165,29 @@ in its settings. The sidebar groups familiars by coven, with the rest under "Unb
 
 ## Memory
 
-Each familiar keeps a markdown memory, and each coven has one its familiars share. A familiar reads
-its own memory and its coven's at the start of every new chat (Claude through
-`--append-system-prompt`, Codex through the thread's developer instructions). It adds a dated note
-with `remember`, tidies with `rewrite_memory`, and checks the latest with `read_memory`; each takes
-`scope: "coven"` for the shared one. An edit made mid-chat reaches the familiar in its next new chat.
+Each familiar keeps a memory, and each coven has one its familiars share. A memory is a list of
+entries, each a rule (a standing instruction), a fact (lasting, about you or your world), or a
+project note (tied to a named project). Each entry holds up to 1,000 characters and records the day
+Grimoire saved it and who saved it. A familiar reads its own memory and its coven's at the start of
+every new chat (Claude through `--append-system-prompt`, Codex through the thread's developer
+instructions): rules first, as instructions to follow, then facts, then project notes grouped by
+project, each with its date. An edit made mid-chat reaches the familiar in its next new chat.
 
-The book button in the chat header opens a familiar's memory, and the coven editor on Home has the
-coven's. Both show the size against the 16 KB limit and who last changed it. The files live in
-`memory/` in the data folder: `<familiar id>.md` and `coven-<coven id>.md`. Deleting a familiar or
-coven deletes its memory.
+A familiar saves an entry with `remember` (`kind` fact, rule, or project, plus `project` for a
+project note), lists entries and their ids with `read_memory`, and deletes one with
+`forget_memory`. `remember` and `read_memory` take `scope: "coven"` for the shared memory, and
+`forget_memory` finds the id in either. Familiars are told to save a correction, or how you want
+something done from now on, as a rule in your words. `rewrite_memory` is gone; a chat that calls it
+gets told to use the other three.
+
+Hover a message you sent and click the book button to make it a rule for that familiar. The book
+button in the chat header opens a familiar's memory, and the coven editor on Home has the coven's.
+Both list Rules, Facts, and Projects, where you can add, edit, delete, and change the kind of any
+entry, with the 16 KB limit and who last changed it. The files live in `memory/` in the data folder:
+`<familiar id>.json` and `coven-<coven id>.json`. A markdown memory from before entries
+(`<id>.md`) reads as facts, one per line or list item, and becomes a `.json` file the first time it
+changes, with the old file kept as `.md.bak`. Backups carry memory, and importing an older backup
+turns its markdown memory into facts. Deleting a familiar or coven deletes its memory.
 
 ## Spells and rituals
 
@@ -333,7 +346,7 @@ themes from the theme editor. Each becomes one JSON file, like `Researcher.grimo
 - A spell names the familiar for each step, so it works on another Mac with familiars of those names.
 - A coven carries its members' names. A theme is the same JSON as a file in the themes folder.
 
-Settings, General, "Export a backup" saves familiars, spells, rituals, covens, your themes, and
+Settings, General, "Export a backup" saves familiars and covens with their memory, spells, rituals, your themes, and
 settings (Claude billing, the dock, permission rules, and the plan limit guard) in one file. Chat
 history goes in only when you tick "Include chat history". Vault items, Keychain secrets, and vault
 grants never do.
@@ -427,7 +440,7 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
 - **Familiar tools.** Grimoire gives each familiar an MCP server named `grimoire` (`--mcp-config`
   for Claude, thread config for Codex) with `list_familiars`, `list_spells`, `create_spell`,
   `list_themes`, `create_theme`, `set_theme`, `vault_search`, `vault_use`, `ask_familiar`,
-  `read_memory`, `remember`, and `rewrite_memory`. The CLI starts `grimoire mcp <socket> <agent-id>`,
+  `read_memory`, `remember`, and `forget_memory`. The CLI starts `grimoire mcp <socket> <agent-id>`,
   which relays calls to the app over `grimoire.sock` in its data folder (owner-only). Each server gets
   a random token for its familiar in `GRIMOIRE_TOOLS_TOKEN`, and the app refuses a call whose token
   doesn't match the familiar it names. Familiars can't cast, edit, or delete spells.

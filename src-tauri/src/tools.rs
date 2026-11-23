@@ -426,7 +426,7 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
                 .collect();
             (pretty(&items), None)
         }
-        tool if memory::TOOL_NAMES.contains(&tool) => (memory::call_tool(db, caller, tool, &arguments)?, memory::changed_event(tool)),
+        tool if memory::handles(tool) => (memory::call_tool(db, caller, tool, &arguments)?, memory::changed_event(tool)),
         tool if inbox::TOOL_NAMES.contains(&tool) => (inbox::call_tool(db, caller, tool, &arguments)?, Some(inbox::CHANGED)),
         tool if ledger::TOOL_NAMES.contains(&tool) => (ledger::call_tool(db, caller, tool, &arguments)?, ledger::changed_event(tool)),
         _ => return Err(format!("Grimoire has no tool named {tool}.")),

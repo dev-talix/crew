@@ -3,6 +3,7 @@
 //! so they work on another Mac. Vault items, Keychain secrets, and grants never leave.
 
 use crate::budgets::{self, Budget, PlanGuard};
+use crate::memory::{self, Entry, Owner, Scope};
 use crate::db::{now_ms, Access, Agent, Avatar, Db, Provider, Routine, Schedule, Workflow, WorkflowStep};
 use crate::permissions::Permissions;
 use rusqlite::params;
@@ -83,6 +84,9 @@ pub struct FamiliarDoc {
     pub budget: Option<Budget>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<HistoryDoc>,
+    /// Memory entries, in backups. Older backups hold markdown text, read as facts.
+    #[serde(default, deserialize_with = "memory::from_doc", skip_serializing_if = "Vec::is_empty")]
+    pub memory: Vec<Entry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -130,6 +134,9 @@ pub struct CovenDoc {
     pub name: String,
     /// Familiar names.
     pub members: Vec<String>,
+    /// Shared memory entries, in backups, as in FamiliarDoc.
+    #[serde(default, deserialize_with = "memory::from_doc", skip_serializing_if = "Vec::is_empty")]
+    pub memory: Vec<Entry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -172,6 +179,7 @@ fn familiar_doc(db: &Db, agent: &Agent, history: bool) -> Result<FamiliarDoc, St
         avatar: agent.avatar.clone(),
         budget: budgets::get(db, &agent.id)?,
         history,
+        memory: Vec::new(),
     })
 }
 
@@ -194,7 +202,12 @@ fn spell_doc(workflow: &Workflow, names: &HashMap<String, String>) -> Result<Spe
 
 fn coven_doc(db: &Db, coven: &crate::covens::Coven) -> Result<CovenDoc, String> {
     let members = db.list_agents()?.into_iter().filter(|a| a.coven_id.as_deref() == Some(&coven.id)).map(|a| a.name).collect();
-    Ok(CovenDoc { name: coven.name.clone(), members })
+    Ok(CovenDoc { name: coven.name.clone(), members, memory: Vec::new() })
+}
+
+/// A memory for a backup, with the familiars that saved entries named instead of given by id.
+fn memory_doc(owner: Owner, names: &HashMap<String, String>) -> Result<Vec<Entry>, String> {
+    Ok(memory::entries(owner)?.into_iter().map(|e| Entry { source: e.source.and_then(|id| names.get(&id).cloned()), ..e }).collect())
 }
 
 /// A theme as it would be written to the themes folder, without who made it, since that names a
@@ -244,7 +257,9 @@ pub fn export_backup(db: &Db, themes_dir: &Path, history: bool) -> Result<Grimoi
     let agents = db.list_agents()?;
     let names: HashMap<String, String> = agents.iter().map(|a| (a.id.clone(), a.name.clone())).collect();
     for agent in &agents {
-        file.familiars.push(familiar_doc(db, agent, history)?);
+        let mut doc = familiar_doc(db, agent, history)?;
+        doc.memory = memory_doc(Owner { scope: Scope::Familiar, id: &agent.id }, &names)?;
+        file.familiars.push(doc);
     }
     // A spell with a deleted familiar can't be rebuilt, so it stays behind.
     let workflows = db.list_workflows()?;
@@ -269,7 +284,9 @@ pub fn export_backup(db: &Db, themes_dir: &Path, history: bool) -> Result<Grimoi
         })
         .collect();
     for coven in crate::covens::list(db)? {
-        file.covens.push(coven_doc(db, &coven)?);
+        let mut doc = coven_doc(db, &coven)?;
+        doc.memory = memory_doc(Owner { scope: Scope::Coven, id: &coven.id }, &names)?;
+        file.covens.push(doc);
     }
     file.themes = crate::themes::list(db, themes_dir)?.themes.into_iter().filter(|t| !t.built_in).map(|t| theme_doc(&t.theme)).collect();
     file.settings = Some(SettingsDoc {
@@ -322,6 +339,7 @@ struct NewFamiliar {
     agent: Agent,
     budget: Option<Budget>,
     history: Vec<HistoryDoc>,
+    memory: Vec<Entry>,
 }
 
 /// What an import adds, worked out before anything is written.
@@ -330,8 +348,8 @@ pub struct Plan {
     familiars: Vec<NewFamiliar>,
     spells: Vec<Workflow>,
     rituals: Vec<Routine>,
-    /// Coven id, name, and the familiar ids that sit in it.
-    covens: Vec<(String, String, Vec<String>)>,
+    /// Coven id, name, the familiar ids that sit in it, and its memory.
+    covens: Vec<(String, String, Vec<String>, Vec<Entry>)>,
     themes: Vec<Value>,
     settings: Option<SettingsDoc>,
 }
@@ -367,6 +385,16 @@ fn shortened(path: &Path, home: &Path) -> String {
     }
 }
 
+/// "Brings 3 memory entries.", and how many didn't fit or weren't valid.
+fn memory_note(line: &mut PreviewItem, kept: usize, dropped: usize) {
+    if kept > 0 {
+        line.notes.push(format!("Brings {kept} memory {}.", if kept == 1 { "entry" } else { "entries" }));
+    }
+    if dropped > 0 {
+        line.notes.push(format!("Leaves out {dropped} memory {} that didn't fit or weren't valid.", if dropped == 1 { "entry" } else { "entries" }));
+    }
+}
+
 fn skipped(what: &'static str, name: &str, why: String) -> PreviewItem {
     PreviewItem { what, name: name.to_string(), final_name: name.to_string(), conflict: false, skipped: true, notes: vec![why] }
 }
@@ -398,6 +426,7 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
     let existing = db.list_agents()?;
     let mut items = Vec::new();
     let now = now_ms();
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
     let full_access = file.familiars.iter().any(|f| f.access == Access::Full);
     // Familiars first, so everything else can point at them.
@@ -438,6 +467,8 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
             }
             other => other,
         };
+        let (memory, dropped) = memory::imported(doc.memory, &today);
+        memory_note(&mut line, memory.len(), dropped);
         items.push(line);
         imported.entry(name.to_lowercase()).or_insert((id.clone(), final_name.clone()));
         let history = doc.history.into_iter().filter(|m| HISTORY_ROLES.contains(&m.role.as_str())).collect();
@@ -458,6 +489,7 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
             },
             budget: doc.budget,
             history,
+            memory,
         });
     }
     // A familiar this file brings wins over one of yours with the same name.
@@ -468,6 +500,13 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
         }
         existing.iter().find(|a| a.name.to_lowercase() == key).map(|a| (a.id.clone(), a.name.clone(), false))
     };
+    // Entries name the familiar that saved them; one that isn't here counts as the user's.
+    let source = |entries: Vec<Entry>| -> Vec<Entry> {
+        entries.into_iter().map(|e| Entry { source: e.source.as_deref().and_then(&resolve).map(|(id, _, _)| id), ..e }).collect()
+    };
+    for new in &mut familiars {
+        new.memory = source(std::mem::take(&mut new.memory));
+    }
     let where_to = |final_name: &str, is_new: bool| if is_new { format!("the imported {final_name}") } else { format!("your {final_name}") };
 
     let mut taken: Vec<String> = db.list_workflows()?.into_iter().map(|w| w.name).collect();
@@ -590,8 +629,10 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
                 None => line.notes.push(format!("No familiar named {member}, so it's left out.")),
             }
         }
+        let (memory, dropped) = memory::imported(doc.memory, &today);
+        memory_note(&mut line, memory.len(), dropped);
         items.push(line);
-        covens.push((uuid::Uuid::new_v4().to_string(), final_name, members));
+        covens.push((uuid::Uuid::new_v4().to_string(), final_name, members, source(memory)));
     }
 
     let mut taken: Vec<String> = crate::themes::list(db, themes_dir)?.themes.iter().filter_map(|t| t.theme["name"].as_str().map(String::from)).collect();
@@ -652,7 +693,7 @@ fn column<T: Serialize>(value: &T) -> String {
 }
 
 fn write_rows(c: &rusqlite::Connection, plan: &Plan) -> rusqlite::Result<()> {
-    for (id, name, _) in &plan.covens {
+    for (id, name, _, _) in &plan.covens {
         c.execute("INSERT INTO covens (id, name, created_at) VALUES (?1, ?2, ?3)", params![id, name, now_ms()])?;
     }
     for new in &plan.familiars {
@@ -675,7 +716,7 @@ fn write_rows(c: &rusqlite::Connection, plan: &Plan) -> rusqlite::Result<()> {
             crate::chats::touch(c, &chat_id, &m.role, &m.text, m.created_at)?;
         }
     }
-    for (id, _, members) in &plan.covens {
+    for (id, _, members, _) in &plan.covens {
         for member in members {
             c.execute("UPDATE agents SET coven_id = ?2 WHERE id = ?1", params![member, id])?;
         }
@@ -711,8 +752,8 @@ fn write_rows(c: &rusqlite::Connection, plan: &Plan) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Writes a plan: theme files and workspace folders first, then every row in one transaction. If the
-/// transaction fails, the theme files and empty folders it made are removed again.
+/// Writes a plan: theme files, memory files, and workspace folders first, then every row in one
+/// transaction. If the transaction fails, the files and empty folders it made are removed again.
 pub fn apply(db: &Db, themes_dir: &Path, plan: &Plan) -> Result<Imported, String> {
     let mut written: Vec<PathBuf> = Vec::new();
     let mut folders: Vec<PathBuf> = Vec::new();
@@ -724,6 +765,12 @@ pub fn apply(db: &Db, themes_dir: &Path, plan: &Plan) -> Result<Imported, String
         for theme in &plan.themes {
             let saved = crate::themes::save(themes_dir, None, theme, None)?;
             written.push(themes_dir.join(format!("{}.json", saved.id)));
+        }
+        let memories = plan.familiars.iter().map(|f| (Owner { scope: Scope::Familiar, id: &f.agent.id }, &f.memory));
+        for (owner, entries) in memories.chain(plan.covens.iter().map(|(id, _, _, m)| (Owner { scope: Scope::Coven, id }, m))) {
+            if !entries.is_empty() {
+                written.push(memory::write_imported(owner, entries)?);
+            }
         }
         for new in &plan.familiars {
             let path = PathBuf::from(&new.agent.workspace);
@@ -832,7 +879,7 @@ pub(crate) async fn apply_import(app: AppHandle, state: State<'_, crate::AppStat
         state.dock.set_edge(&app, edge.as_deref().and_then(crate::dock::Edge::parse))?;
     }
     state.scheduler.changed();
-    for event in ["agents_changed", "workflows_changed", "covens_changed", "themes_changed", "routines_changed", "budgets_changed"] {
+    for event in ["agents_changed", "workflows_changed", "covens_changed", "themes_changed", "routines_changed", "budgets_changed", "memory_changed"] {
         let _ = app.emit(event, ());
     }
     Ok(done)
@@ -1087,15 +1134,76 @@ mod tests {
             avatar: Avatar::for_seed("ada"),
             budget: None,
             history: vec![],
+            memory: memory::from_markdown("- Likes tea.", "2026-11-23"),
         });
         file.themes.push(json!({ "name": "Ink", "colors": { "canvas": "#000000", "accent": "#ffffff" } }));
+        let memory_dir = memory::test_dir();
         let mut p = plan(&db, &themes, file, &home, false).unwrap();
+        let ada = memory_dir.join(format!("{}.json", p.familiars[0].agent.id));
         p.spells.push(Workflow { id: "dup".into(), name: "A".into(), steps: vec![], created_at: 0, created_by: None });
         p.spells.push(Workflow { id: "dup".into(), name: "B".into(), steps: vec![], created_at: 0, created_by: None });
         assert!(apply(&db, &themes, &p).is_err());
         assert!(db.list_agents().unwrap().is_empty());
         assert_eq!(std::fs::read_dir(&themes).unwrap().count(), 0);
+        assert!(!ada.exists(), "the memory file is removed too");
         assert_eq!(std::fs::read_dir(&home).unwrap().flat_map(|d| std::fs::read_dir(d.unwrap().path()).unwrap()).count(), 0);
+        std::fs::remove_dir_all(themes).unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn memory_survives_a_backup_and_old_markdown_backups_import() {
+        let themes = temp_dir("themes");
+        let home = temp_dir("home");
+        let dir = memory::test_dir();
+        let db = Db::open_in_memory().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        familiar(&db, &id, "Archivist");
+        let coven = crate::covens::save(&db, None, "Archive", std::slice::from_ref(&id)).unwrap();
+        let mine = Owner { scope: Scope::Familiar, id: &id };
+        memory::add(&db, dir, mine, memory::Kind::Rule, None, "Be brief.", Some(&id), "2026-11-01").unwrap();
+        memory::add(&db, dir, mine, memory::Kind::Project, Some("grimoire"), "Uses bun.", None, "2026-11-02").unwrap();
+        memory::add(&db, dir, Owner { scope: Scope::Coven, id: &coven.id }, memory::Kind::Fact, None, "Meets Thursdays.", None, "2026-11-03").unwrap();
+
+        let file = export_backup(&db, &themes, false).unwrap();
+        let doc = file.familiars.iter().find(|f| f.name == "Archivist").unwrap();
+        assert_eq!(doc.memory[0].source.as_deref(), Some("Archivist"), "backups name the familiar, not its id");
+        let text = serde_json::to_string(&file).unwrap();
+        assert!(!text.contains(&format!("\"{id}\"")), "no familiar ids in the backup");
+
+        let backup = plan(&db, &themes, parse(&text).unwrap(), &home, false).unwrap();
+        let line = backup.preview.items.iter().find(|i| i.name == "Archivist").unwrap();
+        assert!(line.notes.contains(&"Brings 2 memory entries.".to_string()), "{:?}", line.notes);
+        apply(&db, &themes, &backup).unwrap();
+        let copy = db.list_agents().unwrap().into_iter().find(|a| a.name == "Archivist (2)").unwrap();
+        let entries = memory::read(&db, dir, Owner { scope: Scope::Familiar, id: &copy.id }).unwrap().entries;
+        let got: Vec<_> = entries.iter().map(|e| (e.kind, e.project.as_deref(), e.text.as_str(), e.learned_on.as_str(), e.source.as_deref())).collect();
+        assert_eq!(
+            got,
+            [
+                (memory::Kind::Rule, None, "Be brief.", "2026-11-01", Some(copy.id.as_str())),
+                (memory::Kind::Project, Some("grimoire"), "Uses bun.", "2026-11-02", None)
+            ]
+        );
+        let new_coven = copy.coven_id.unwrap();
+        let shared = memory::read(&db, dir, Owner { scope: Scope::Coven, id: &new_coven }).unwrap().entries;
+        assert_eq!(shared[0].text, "Meets Thursdays.");
+
+        // A backup from before typed memory holds markdown.
+        let old = json!({
+            "kind": "backup",
+            "version": 1,
+            "familiars": [{ "name": "Old", "provider": "claude", "access": "workspace", "avatar": Avatar::for_seed("old"), "memory": "- 2026-10-01: Uses bun.\n- Likes tea." }],
+            "covens": [{ "name": "Elders", "members": ["Old"], "memory": "Cite sources." }]
+        });
+        let older = plan(&db, &themes, parse(&old.to_string()).unwrap(), &home, false).unwrap();
+        apply(&db, &themes, &older).unwrap();
+        let old = db.list_agents().unwrap().into_iter().find(|a| a.name == "Old").unwrap();
+        let entries = memory::read(&db, dir, Owner { scope: Scope::Familiar, id: &old.id }).unwrap().entries;
+        assert_eq!(entries.iter().map(|e| (e.kind, e.text.as_str())).collect::<Vec<_>>(), [(memory::Kind::Fact, "Uses bun."), (memory::Kind::Fact, "Likes tea.")]);
+        assert_eq!(entries[0].learned_on, "2026-10-01");
+        let elders = memory::read(&db, dir, Owner { scope: Scope::Coven, id: old.coven_id.as_deref().unwrap() }).unwrap().entries;
+        assert_eq!(elders[0].text, "Cite sources.");
         std::fs::remove_dir_all(themes).unwrap();
         std::fs::remove_dir_all(home).unwrap();
     }

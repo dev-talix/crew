@@ -769,7 +769,8 @@ pub fn run() {
             ledger::get_ledger,
             ledger::save_ledger,
             helpers::list_helpers,
-            helpers::stop_helper
+            helpers::stop_helper,
+            memory::add_memory
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {

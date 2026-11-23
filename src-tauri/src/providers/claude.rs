@@ -620,6 +620,6 @@ mod tests {
         std::fs::write(dir.join("memory-claude.md"), "The user's cat is Miso.").unwrap();
         let args = args(&agent, None);
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
-        assert!(args[at + 1].contains("<memory of=\"you\">\nThe user's cat is Miso.\n</memory>"));
+        assert!(args[at + 1].contains("<memory of=\"you\">\nFacts:\n- ") && args[at + 1].contains(": The user's cat is Miso.\n</memory>"));
     }
 }
