@@ -15,13 +15,14 @@ export function Page(props: { title: string; actions?: JSX.Element; children: JS
   );
 }
 
-export function EmptyState(props: { title: string; body: string; action?: JSX.Element; art?: JSX.Element }) {
+export function EmptyState(props: { title: string; body: string; action?: JSX.Element; art?: JSX.Element; children?: JSX.Element }) {
   return (
     <div class="empty-state">
       {props.art}
       <h2>{props.title}</h2>
       <p>{props.body}</p>
       {props.action}
+      {props.children}
     </div>
   );
 }

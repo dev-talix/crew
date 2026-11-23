@@ -18,7 +18,11 @@
         "width": 1100,
         "height": 720,
         "minWidth": 760,
-        "minHeight": 480
+        "minHeight": 480,
+        "trafficLightPosition": {
+          "x": 18,
+          "y": 20
+        }
       }
     ],
     "security": {

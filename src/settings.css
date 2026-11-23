@@ -232,7 +232,7 @@
 
 .settings-close {
   position: absolute;
-  top: 17px;
+  top: calc((var(--bar-height) - 30px) / 2);
   right: 16px;
   z-index: 2;
 }

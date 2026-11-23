@@ -18,6 +18,8 @@
   --overlay: rgb(20 22 26 / 0.32);
   --agent: var(--accent);
   --agent-ink: var(--accent-ink);
+  /* One height for every top bar (sidebar, pages, chat), with the window buttons centered on it. */
+  --bar-height: 52px;
   --radius-control: 7px;
   --radius-bubble: 14px;
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
@@ -179,8 +181,8 @@ button:disabled {
 .sidebar-top {
   display: flex;
   align-items: center;
-  height: 32px;
-  margin: 0 0 10px;
+  height: var(--bar-height);
+  margin: 0 0 6px;
   padding: 0 8px 0 84px;
   flex-shrink: 0;
 }
@@ -598,7 +600,7 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  height: 64px;
+  height: var(--bar-height);
   padding: 0 20px;
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
@@ -1374,4 +1376,105 @@ button:disabled {
 
 .update-notice:hover {
   background: color-mix(in srgb, var(--accent) 16%, var(--sidebar));
+}
+
+.empty-art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  margin-bottom: 6px;
+}
+
+.empty-art-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: color-mix(in srgb, var(--accent) 55%, var(--line));
+  stroke-width: 1.2;
+  stroke-linecap: round;
+}
+
+.empty-art-moon,
+.empty-art-spark {
+  fill: var(--warning);
+  stroke: none;
+  opacity: 0.85;
+}
+
+.ritual-art {
+  width: 124px;
+  height: 124px;
+}
+
+.spell-art {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 210px;
+  height: 64px;
+  padding: 0 4px;
+}
+
+.empty-art-badge {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--bg);
+}
+
+.templates {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(520px, 100%);
+  margin-top: 28px;
+  text-align: left;
+}
+
+.templates-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.empty-state .templates-title {
+  max-width: none;
+}
+
+.template {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  width: 100%;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  text-align: left;
+}
+
+.template:hover {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
+}
+
+.template-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.template-body {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }

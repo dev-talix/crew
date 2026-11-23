@@ -1,0 +1,226 @@
+.home-circle {
+  position: relative;
+  width: min(100%, 540px);
+  aspect-ratio: 1;
+  margin: 4px auto 8px;
+}
+
+.home-circle-art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.home-circle-art * {
+  vector-effect: non-scaling-stroke;
+  fill: none;
+}
+
+.ring-outer {
+  stroke: color-mix(in srgb, var(--accent) 45%, var(--line));
+  stroke-width: 1.5;
+}
+
+.ring-seats {
+  stroke: var(--line);
+  stroke-width: 1;
+  stroke-dasharray: 2 6;
+}
+
+.ring-inner {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.rune {
+  stroke: color-mix(in srgb, var(--accent) 40%, var(--line));
+  stroke-width: 1;
+  stroke-linecap: round;
+}
+
+.sigil {
+  stroke: color-mix(in srgb, var(--accent) 12%, transparent);
+  stroke-width: 1;
+}
+
+.ritual-arc {
+  stroke: var(--warning);
+  stroke-width: 3;
+  stroke-linecap: round;
+  opacity: 0.85;
+  pointer-events: stroke;
+}
+
+.channel {
+  stroke-width: 1.5;
+  stroke-dasharray: 3 5;
+  opacity: 0.7;
+  animation: channel-flow 1.2s linear infinite;
+}
+
+@keyframes channel-flow {
+  to {
+    stroke-dashoffset: -16;
+  }
+}
+
+.spell-line {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  opacity: 0.45;
+  transition: opacity 160ms ease, stroke-width 160ms ease;
+}
+
+.spell-link.lit .spell-line {
+  opacity: 1;
+  stroke-width: 2.5;
+}
+
+.spell-hit {
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.spell-label {
+  position: absolute;
+  z-index: 3;
+  transform: translate(-50%, -50%);
+  padding: 3px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--line));
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.circle-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 30%;
+  text-align: center;
+  pointer-events: none;
+}
+
+.circle-count {
+  font: 500 22px/1.1 var(--font-display);
+}
+
+.circle-status,
+.circle-next {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.circle-next {
+  color: var(--warning);
+}
+
+.circle-familiar {
+  position: absolute;
+  z-index: 2;
+  transform: translate(-50%, -50%);
+  flex-direction: column;
+  gap: 2px;
+  width: 110px;
+  padding: 6px 4px;
+  border-radius: 12px;
+  transition: opacity 160ms ease;
+}
+
+.circle-familiar.dim {
+  opacity: 0.55;
+}
+
+.circle-avatar {
+  display: grid;
+  place-items: center;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--bg);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.circle-familiar:hover .circle-avatar,
+.circle-familiar:focus-visible .circle-avatar {
+  border-color: var(--agent);
+}
+
+.circle-familiar.working .circle-avatar {
+  border-color: var(--agent);
+  animation: familiar-glow 2.4s ease-in-out infinite;
+}
+
+@keyframes familiar-glow {
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--agent) 22%, transparent);
+  }
+}
+
+.circle-name {
+  font-size: 13px;
+  font-weight: 500;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.circle-sub {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.circle-familiar.working .circle-sub {
+  color: var(--text);
+}
+
+.home-circle.small .circle-familiar {
+  width: 88px;
+}
+
+.home-circle-legend {
+  display: flex;
+  justify-content: center;
+  gap: 18px;
+  margin-bottom: 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.home-circle-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-line {
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+.legend-arc {
+  width: 12px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--warning);
+}
+
+.home-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 0 20px;
+}

@@ -1,6 +1,7 @@
 import { createMemo, createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 import BotAvatar from "./BotAvatar";
 import { AgentSelect, EmptyState, Page, Segmented, Sheet, Toggle } from "./ui";
+import { RitualArt, RITUAL_TEMPLATES, type RitualTemplate } from "./EmptyArt";
 import { PlusIcon } from "./icons";
 import { inkFor } from "./avatar";
 import { api, describeSchedule, errorText, onEvent, relativeTime, type Agent, type Routine, type Schedule } from "./api";
@@ -29,7 +30,7 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
   const [routines, setRoutines] = createSignal<Routine[]>([]);
   const [loaded, setLoaded] = createSignal(false);
   const [error, setError] = createSignal("");
-  const [editing, setEditing] = createSignal<Routine | "new" | null>(null);
+  const [editing, setEditing] = createSignal<Routine | "new" | { template: RitualTemplate } | null>(null);
   const [now, setNow] = createSignal(Date.now());
 
   const load = async () => {
@@ -97,14 +98,32 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
 
         <Show when={loaded() && groups().length === 0}>
           <EmptyState
+            art={<RitualArt agents={props.agents} />}
             title="No rituals yet"
             body={
               noAgents()
                 ? "Summon a familiar first. A ritual sends it a message on a schedule."
-                : "A ritual sends a familiar the same message on a schedule, like a morning summary or an hourly check."
+                : "A ritual sends a familiar the same message on a schedule, even while you're away from the window."
             }
             action={newButton(false)}
-          />
+          >
+            <Show when={!noAgents()}>
+              <div class="templates">
+                <p class="templates-title">Or start from one of these</p>
+                <For each={RITUAL_TEMPLATES}>
+                  {(template) => (
+                    <button type="button" class="template" onClick={() => setEditing({ template })}>
+                      <span class="template-head">
+                        <span class="list-title">{template.name}</span>
+                        <span class="list-sub">{template.when}</span>
+                      </span>
+                      <span class="template-body">{template.prompt}</span>
+                    </button>
+                  )}
+                </For>
+              </div>
+            </Show>
+          </EmptyState>
         </Show>
 
         <For each={groups()}>
@@ -135,7 +154,8 @@ export default function RoutinesPage(props: { agents: Agent[]; onOpenAgent: (id:
       <Show when={editing()}>
         {(current) => (
           <RoutineEditor
-            routine={current() === "new" ? undefined : (current() as Routine)}
+            routine={typeof current() === "object" && "id" in (current() as object) ? (current() as Routine) : undefined}
+            template={typeof current() === "object" && "template" in (current() as object) ? (current() as { template: RitualTemplate }).template : undefined}
             agents={props.agents}
             onClose={() => setEditing(null)}
             onSaved={(saved) => {
@@ -209,18 +229,21 @@ function RoutineRow(props: {
 
 function RoutineEditor(props: {
   routine?: Routine;
+  /** Prefills a new ritual. */
+  template?: RitualTemplate;
   agents: Agent[];
   onClose: () => void;
   onSaved: (routine: Routine) => void;
   onDeleted: (id: string) => void;
 }) {
-  const initial = props.routine?.schedule;
+  const seed = props.routine ?? props.template;
+  const initial = seed?.schedule;
   const initialMinutes = initial?.kind === "interval" ? initial.minutes : 180;
   const initialUnit: Unit = initialMinutes % 60 === 0 ? "hours" : "minutes";
 
   const [agentId, setAgentId] = createSignal(props.routine?.agentId ?? props.agents[0]?.id ?? "");
-  const [name, setName] = createSignal(props.routine?.name ?? "");
-  const [prompt, setPrompt] = createSignal(props.routine?.prompt ?? "");
+  const [name, setName] = createSignal(seed?.name ?? "");
+  const [prompt, setPrompt] = createSignal(seed?.prompt ?? "");
   const [repeat, setRepeat] = createSignal<Repeat>(initial?.kind ?? "daily");
   const [amount, setAmount] = createSignal(String(initialUnit === "hours" ? initialMinutes / 60 : initialMinutes));
   const [unit, setUnit] = createSignal<Unit>(initialUnit);

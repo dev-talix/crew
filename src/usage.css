@@ -95,12 +95,10 @@
 
 .usage-activity-head {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
-}
-
-.usage-activity-head .segmented {
-  margin-bottom: 6px;
+  gap: 12px;
+  margin-bottom: 14px;
 }
 
 .usage-activity {
@@ -109,7 +107,6 @@
 
 .usage-total {
   font: 500 26px/1.1 var(--font-display);
-  margin-bottom: 14px;
 }
 
 .usage-total .usage-faint {

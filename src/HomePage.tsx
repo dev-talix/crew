@@ -1,7 +1,8 @@
 import { listen } from "@tauri-apps/api/event";
 import { createMemo, createSignal, createStore, For, onCleanup, Show } from "solid-js";
 import BotAvatar, { type Mood } from "./BotAvatar";
-import { api, describeSchedule, onEvent, onMountAsync, PROVIDER_NAMES, relativeTime, type Agent, type Message, type Routine } from "./api";
+import { api, describeSchedule, onEvent, onMountAsync, PROVIDER_NAMES, relativeTime, type Agent, type Message, type Routine, type Workflow } from "./api";
+import HomeCircle from "./HomeCircle";
 import { PlusIcon } from "./icons";
 import { EmptyState, Page } from "./ui";
 
@@ -18,11 +19,13 @@ function preview(message: Message | undefined): string {
 
 export default function HomePage(props: {
   agents: Agent[];
+  spells: Workflow[];
   busy: Record<string, boolean>;
   mood: (agentId: string) => Mood;
   onOpenAgent: (id: string) => void;
   onNewAgent: () => void;
   onOpenRoutines: () => void;
+  onOpenSpells: () => void;
 }) {
   const [last, setLast] = createStore<Record<string, Message>>({});
   const [routines, setRoutines] = createSignal<Routine[]>([]);
@@ -55,19 +58,12 @@ export default function HomePage(props: {
   onCleanup(() => clearInterval(tick));
 
   const agentById = (id: string) => props.agents.find((a) => a.id === id);
-  const working = () => props.agents.filter((a) => props.busy[a.id]).length;
   const upcoming = createMemo(() =>
     routines()
       .filter((r) => r.enabled && r.nextRunAt && agentById(r.agentId))
       .sort((a, b) => (a.nextRunAt ?? 0) - (b.nextRunAt ?? 0))
       .slice(0, 5),
   );
-  const summary = () => {
-    const count = props.agents.length;
-    const busy = working();
-    const agents = `${count} ${count === 1 ? "familiar" : "familiars"}`;
-    return busy ? `${agents}, ${busy} working now` : `${agents}, all idle`;
-  };
 
   return (
     <Page
@@ -93,8 +89,28 @@ export default function HomePage(props: {
         }
       >
         <div class="home">
-          <h2 class="section-title home-summary">{summary()}</h2>
-          <div class="list">
+          <HomeCircle
+            agents={props.agents}
+            spells={props.spells}
+            routines={routines()}
+            busy={props.busy}
+            mood={props.mood}
+            now={now()}
+            onOpenAgent={props.onOpenAgent}
+            onOpenSpells={props.onOpenSpells}
+          />
+          <p class="home-circle-legend">
+            <span>
+              <i class="legend-line" aria-hidden="true" /> Spells link familiars
+            </span>
+            <span>
+              <i class="legend-arc" aria-hidden="true" /> Gold marks a ritual
+            </span>
+          </p>
+          <div class="home-columns">
+            <section>
+              <h2 class="section-title">Latest replies</h2>
+              <div class="list">
             <For each={props.agents}>
               {(agent) => (
                 <button class="list-row home-agent" style={{ "--agent": agent.avatar.color }} onClick={() => props.onOpenAgent(agent.id)}>
@@ -112,7 +128,9 @@ export default function HomePage(props: {
             </For>
           </div>
 
-          <h2 class="section-title">Coming up</h2>
+            </section>
+            <section>
+              <h2 class="section-title">Coming up</h2>
           <div class="list">
             <Show
               when={upcoming().length}
@@ -145,6 +163,8 @@ export default function HomePage(props: {
                 }}
               </For>
             </Show>
+          </div>
+            </section>
           </div>
         </div>
       </Show>

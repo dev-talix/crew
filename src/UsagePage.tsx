@@ -117,22 +117,24 @@ export default function UsagePage(props: { agents: Agent[] }) {
           />
         </div>
 
-        <div class="usage-activity-head">
-          <h2 class="section-title">Grimoire, last {DAYS} days</h2>
-          <Segmented
-            label="Group usage by"
-            value={view()}
-            options={[
-              { value: "source", label: "By source" },
-              { value: "familiar", label: "By familiar" },
-            ]}
-            onChange={setView}
-          />
-        </div>
+        <h2 class="section-title">Grimoire, last {DAYS} days</h2>
         <div class="list usage-activity">
-          <p class="usage-total">
-            {compact(summary().total)} <span class="usage-faint">tokens</span>
-          </p>
+          <div class="usage-activity-head">
+            <p class="usage-total">
+              {compact(summary().total)} <span class="usage-faint">tokens</span>
+            </p>
+            <Show when={summary().total > 0}>
+              <Segmented
+                label="Group usage by"
+                value={view()}
+                options={[
+                  { value: "source", label: "By source" },
+                  { value: "familiar", label: "By familiar" },
+                ]}
+                onChange={setView}
+              />
+            </Show>
+          </div>
           <Show
             when={summary().total > 0}
             fallback={<p class="settings-detail">No turns yet this week. Usage shows up here after your familiars reply.</p>}

@@ -287,6 +287,8 @@ export default function App() {
             <Match when={true}>
               <HomePage
                 agents={agents()}
+                spells={spells()}
+                onOpenSpells={() => openSpells(null)}
                 busy={busy}
                 mood={moodOf}
                 onOpenAgent={openAgent}

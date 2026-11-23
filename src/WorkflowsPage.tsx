@@ -2,6 +2,7 @@ import { createEffect, createMemo, createSignal, createStore, flush, For, onClea
 import type { JSX } from "@solidjs/web";
 import BotAvatar from "./BotAvatar";
 import { AgentSelect, EmptyState, Page, Sheet } from "./ui";
+import { SpellArt, SPELL_TEMPLATES, type SpellTemplate } from "./EmptyArt";
 import { api, errorText, onEvent, onMountAsync, type Agent, type Workflow, type WorkflowProgress } from "./api";
 import "./workflows.css";
 
@@ -63,7 +64,7 @@ export default function WorkflowsPage(props: {
   const [runs, setRuns] = createStore<Record<string, Run | undefined>>({});
   const [loaded, setLoaded] = createSignal(false);
   const [error, setError] = createSignal("");
-  const [editing, setEditing] = createSignal<Workflow | "new" | null>(null);
+  const [editing, setEditing] = createSignal<Workflow | "new" | { template: SpellTemplate } | null>(null);
   const [starting, setStarting] = createSignal<Workflow | null>(null);
   const agentById = createMemo(() => new Map(props.agents.map((a) => [a.id, a])));
   const noAgents = () => props.agents.length === 0;
@@ -165,10 +166,28 @@ export default function WorkflowsPage(props: {
             when={workflows().length > 0}
             fallback={
               <EmptyState
+                art={<SpellArt agents={props.agents} />}
                 title="No spells yet"
-                body="Chain familiars into steps, like research, then write, then review. Each step gets the previous reply."
+                body="A spell chains familiars into steps, like research, then write, then review. Each step gets the previous reply."
                 action={<div class="wf-empty-action">{newButton()}</div>}
-              />
+              >
+                <Show when={!noAgents()}>
+                  <div class="templates">
+                    <p class="templates-title">Or start from one of these</p>
+                    <For each={SPELL_TEMPLATES}>
+                      {(template) => (
+                        <button type="button" class="template" onClick={() => setEditing({ template })}>
+                          <span class="template-head">
+                            <span class="list-title">{template.name}</span>
+                            <span class="list-sub">{template.about}</span>
+                          </span>
+                          <span class="template-body">{template.steps.join(" Then: ")}</span>
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </Show>
+              </EmptyState>
             }
           >
             <div class="list">
@@ -265,11 +284,13 @@ export default function WorkflowsPage(props: {
 
       <Show when={editing()}>
         {(target) => {
-          const workflow = target() === "new" ? undefined : (target() as Workflow);
+          const workflow = typeof target() === "object" && "id" in (target() as object) ? (target() as Workflow) : undefined;
+          const template = typeof target() === "object" && "template" in (target() as object) ? (target() as { template: SpellTemplate }).template : undefined;
           return (
             <Sheet label={workflow ? "Edit spell" : "New spell"} wide onClose={() => setEditing(null)}>
               <WorkflowEditor
                 workflow={workflow}
+                template={template}
                 agents={props.agents}
                 onSaved={saved}
                 onDeleted={deleted}
@@ -358,6 +379,8 @@ let nextKey = 0;
 
 function WorkflowEditor(props: {
   workflow?: Workflow;
+  /** Prefills a new spell; its steps go to the familiars in turn. */
+  template?: SpellTemplate;
   agents: Agent[];
   onSaved: (workflow: Workflow) => void;
   onDeleted: (id: string) => void;
@@ -367,9 +390,10 @@ function WorkflowEditor(props: {
     const index = props.agents.findIndex((a) => a.id === after);
     return props.agents[(index + 1) % Math.max(props.agents.length, 1)]?.id ?? "";
   };
-  const [name, setName] = createSignal(props.workflow?.name ?? "");
+  const [name, setName] = createSignal(props.workflow?.name ?? props.template?.name ?? "");
+  const fromTemplate = props.template?.steps.map((prompt, i) => ({ agentId: props.agents[i % props.agents.length]?.id ?? "", prompt }));
   const [steps, setSteps] = createStore<DraftStep[]>(
-    (props.workflow?.steps ?? [{ agentId: defaultAgent(), prompt: "" }]).map((s) => ({ ...s, key: nextKey++ })),
+    (props.workflow?.steps ?? fromTemplate ?? [{ agentId: defaultAgent(), prompt: "" }]).map((s) => ({ ...s, key: nextKey++ })),
   );
   const [error, setError] = createSignal("");
   const [saving, setSaving] = createSignal(false);
