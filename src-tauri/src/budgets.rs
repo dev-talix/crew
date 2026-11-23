@@ -333,7 +333,7 @@ pub fn ritual_skip(db: &Db, routine: &Routine, codex: Option<&Value>, now: i64) 
     if let Err(reason) = check_turn(db, &agent.id) {
         return Some(reason);
     }
-    provider_pause(db, &agent.provider, codex, now).map(|reason| format!("Rituals are paused: {reason}"))
+    provider_pause(db, &agent.provider, codex, now).map(|reason| format!("Rituals are paused. {reason}"))
 }
 
 fn log_skip(db: &Db, routine_id: &str, reason: &str) -> Result<(), String> {
@@ -556,7 +556,7 @@ mod tests {
 
         // Claude's stored snapshot pauses Claude familiars only.
         db.set_setting(CLAUDE_LIMITS, &json!({ "info": { "rateLimitType": "five_hour", "utilization": 0.97 }, "at": now }).to_string()).unwrap();
-        assert!(ritual_skip(&db, &routine("a"), None, now).unwrap().starts_with("Rituals are paused: Claude's 5-hour limit is at 97%"));
+        assert!(ritual_skip(&db, &routine("a"), None, now).unwrap().starts_with("Rituals are paused. Claude's 5-hour limit is at 97%"));
         assert_eq!(ritual_skip(&db, &routine("c"), None, now), None);
         assert!(current_pause(&db).is_some());
 

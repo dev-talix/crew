@@ -397,7 +397,7 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path) -> Resu
         if line.conflict {
             line.notes.push(format!("You already have a familiar named {name}, so this one becomes {final_name}."));
         }
-        line.notes.push(format!("New workspace folder: {}.", shortened(&workspace, home)));
+        line.notes.push(format!("Gets a new workspace folder in {}.", shortened(workspace.parent().unwrap_or(home), home)));
         if !doc.history.is_empty() {
             line.notes.push(format!("Brings {} chat messages.", doc.history.len()));
         }
