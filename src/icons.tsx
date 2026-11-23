@@ -110,6 +110,12 @@ export const CardIcon = () => (
   </Icon>
 );
 
+export const ShieldIcon = () => (
+  <Icon>
+    <path d="M8 1.8 13 3.7v4c0 3.1-2.1 5.5-5 6.5-2.9-1-5-3.4-5-6.5v-4z" />
+  </Icon>
+);
+
 export const VaultIcon = () => (
   <Icon>
     <rect x="2" y="2.5" width="12" height="11" rx="1.8" />

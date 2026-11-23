@@ -2,6 +2,7 @@ mod approvals;
 mod db;
 mod dock;
 mod mcp;
+mod permissions;
 mod providers;
 mod routines;
 mod runtime;
@@ -489,6 +490,17 @@ fn revoke_vault_grant(app: AppHandle, state: State<AppState>, id: String, agent_
 }
 
 #[tauri::command]
+fn get_permissions(state: State<AppState>) -> permissions::Permissions {
+    permissions::load(&state.db)
+}
+
+#[tauri::command]
+fn save_permissions(state: State<AppState>, permissions: permissions::Permissions) -> Result<permissions::Permissions, String> {
+    // Codex picks up the mode on its next turn; Claude's hook asks the rules on every command.
+    permissions::save(&state.db, permissions)
+}
+
+#[tauri::command]
 fn answer_approval(state: State<AppState>, id: String, decision: approvals::Decision) -> Result<(), String> {
     state.approvals.answer(&id, decision)
 }
@@ -519,6 +531,7 @@ pub fn run() {
             // Agents get the Grimoire tools only when this socket is up; Grimoire still works without them.
             let themes_dir = themes::dir(&dir);
             let approvals = Arc::new(approvals::Approvals::default());
+            permissions::install(app.handle().clone(), db.clone(), approvals.clone());
             #[cfg(target_os = "macos")]
             let secrets: Arc<dyn vault::SecretStore> = Arc::new(vault::Keychain);
             let tools = tools::Context {
@@ -580,7 +593,9 @@ pub fn run() {
             vault_activity,
             revoke_vault_grant,
             answer_approval,
-            waiting_approvals
+            waiting_approvals,
+            get_permissions,
+            save_permissions
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

@@ -79,10 +79,15 @@ pub struct Codex {
     idle: Arc<IdleTimer>,
 }
 
+/// "untrusted" makes Codex ask before commands it doesn't know are safe, so Grimoire's rules see them.
+fn approval_policy() -> &'static str {
+    if crate::permissions::active() { "untrusted" } else { "never" }
+}
+
 fn thread_params(agent: &Agent) -> Value {
     let mut params = json!({
         "cwd": agent.workspace,
-        "approvalPolicy": "never",
+        "approvalPolicy": approval_policy(),
         "sandbox": match agent.access {
             Access::Workspace => "workspace-write",
             Access::Full => "danger-full-access",
@@ -125,7 +130,7 @@ impl Codex {
             routes.insert(thread_id.clone(), Route { tx: Some(tx), ..Route::default() });
         }
         let input = json!([{ "type": "text", "text": text, "text_elements": [] }]);
-        let mut params = json!({ "threadId": thread_id, "input": input });
+        let mut params = json!({ "threadId": thread_id, "input": input, "approvalPolicy": approval_policy() });
         if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
             params["model"] = json!(model);
         }
@@ -288,9 +293,24 @@ impl Codex {
         match (message.get("id"), method) {
             (Some(id), Some(method)) => {
                 let reply = match method {
-                    "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
-                        json!({ "id": id, "result": { "decision": "decline" } })
+                    "item/commandExecution/requestApproval" => {
+                        // Grimoire's rules decide, which can mean waiting on the person, so answer off the reader.
+                        let params = message.get("params").cloned().unwrap_or(Value::Null);
+                        let thread = params["threadId"].as_str().unwrap_or_default().to_string();
+                        let agent = self.threads.lock().ok().and_then(|t| t.iter().find(|(_, th)| **th == thread).map(|(a, _)| a.clone()));
+                        let command = unwrap_shell(params["command"].as_str().unwrap_or_default()).to_string();
+                        let (id, process) = (id.clone(), process.clone());
+                        tauri::async_runtime::spawn(async move {
+                            let allowed = match agent {
+                                Some(agent) => crate::permissions::check_command(&agent, &command).await,
+                                None => false,
+                            };
+                            let decision = if allowed { "accept" } else { "decline" };
+                            let _ = process.write(&json!({ "id": id, "result": { "decision": decision } })).await;
+                        });
+                        return;
                     }
+                    "item/fileChange/requestApproval" => json!({ "id": id, "result": { "decision": "decline" } }),
                     _ => json!({ "id": id, "error": { "code": -32601, "message": "Grimoire does not support this request." } }),
                 };
                 let _ = process.write(&reply).await;

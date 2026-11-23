@@ -39,7 +39,9 @@ export default function Approvals(props: { agents: Agent[] }) {
                   <Show when={agent()}>{(a) => <BotAvatar avatar={a().avatar} size={28} mood="concerned" />}</Show>
                   <div>
                     <p class="approval-title">{request.title}</p>
-                    <p class="approval-detail">{request.detail}</p>
+                    <Show when={request.kind === "command"} fallback={<p class="approval-detail">{request.detail}</p>}>
+                      <pre class="approval-command">{request.detail}</pre>
+                    </Show>
                   </div>
                 </div>
                 <div class="approval-actions">

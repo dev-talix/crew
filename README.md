@@ -106,6 +106,21 @@ A familiar with shell access could still print what it reads, so Grimoire tells 
 and every request shows in the item's history. An item's page lists the familiars you've always
 allowed, with a button to make them ask again.
 
+## Permissions
+
+Settings, Permissions decides when familiars need your OK before a shell command:
+
+- **Never ask** (the default): familiars act on their own, within the access you gave each one.
+- **Ask when a rule matches**: Grimoire asks when a command matches an "Always ask" rule. It starts
+  with `git push*`, `rm -rf *`, and `sudo *`.
+- **Ask before every command**: Grimoire asks unless an "Allow without asking" rule matches. An
+  "Always ask" rule wins when both match.
+
+In a rule, `*` matches anything. "Always allow" on a prompt adds an allow rule for that exact
+command. Codex asks through its approval requests (Grimoire sets its approval policy to
+`untrusted`, so commands it knows only read run without asking); Claude asks through a `PreToolUse`
+hook on Bash that Grimoire registers, which runs even for commands your own Claude settings allow.
+
 ## Themes
 
 Pick a theme in Settings. The seven built-ins are named for old inks and pigments: Tyrian (the

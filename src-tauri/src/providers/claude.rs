@@ -10,6 +10,7 @@ use tokio::process::{Child, ChildStdin};
 
 const IDLE_EXIT: Duration = Duration::from_secs(5 * 60);
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
+const BASH_HOOK: &str = "grimoire_bash";
 
 struct ClaudeProcess {
     config: String,
@@ -17,6 +18,8 @@ struct ClaudeProcess {
     child: Mutex<Option<Child>>,
     route: Mutex<Option<EventTx>>,
     interrupting: AtomicBool,
+    /// Whether the Bash hook that routes commands through Grimoire's rules is registered.
+    hooked: AtomicBool,
     idle: IdleTimer,
 }
 
@@ -111,7 +114,19 @@ impl Claude {
             *route = Some(tx);
         }
         let message = json!({ "type": "user", "message": { "role": "user", "content": text } });
-        if let Err(e) = process.write_line(&message).await {
+        let hook = json!({
+            "type": "control_request",
+            "request_id": uuid::Uuid::new_v4().to_string(),
+            "request": { "subtype": "initialize", "hooks": { "PreToolUse": [{ "matcher": "Bash", "hookCallbackIds": [BASH_HOOK] }] } },
+        });
+        let sent = match process.hooked.swap(true, Ordering::SeqCst) {
+            true => Ok(()),
+            false => process.write_line(&hook).await,
+        };
+        if let Err(e) = match sent {
+            Ok(()) => process.write_line(&message).await,
+            Err(e) => Err(e),
+        } {
             process.take_route();
             self.forget(&agent.id);
             return Err(format!("Could not send the message to claude: {e}"));
@@ -200,6 +215,7 @@ impl Claude {
             child: Mutex::new(Some(child)),
             route: Mutex::new(None),
             interrupting: AtomicBool::new(false),
+            hooked: AtomicBool::new(false),
             idle: IdleTimer::default(),
         });
         processes.insert(agent.id.clone(), process.clone());
@@ -212,6 +228,21 @@ impl Claude {
             let mut parser = ClaudeParser::default();
             while let Ok(Some(line)) = lines.next_line().await {
                 let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
+                if value["type"] == "control_request" && value["request"]["callback_id"] == BASH_HOOK {
+                    let (agent, process) = (agent_id.clone(), reader.clone());
+                    tauri::async_runtime::spawn(async move {
+                        let command = value["request"]["input"]["tool_input"]["command"].as_str().unwrap_or_default();
+                        let allowed = crate::permissions::check_command(&agent, command).await;
+                        let output = json!({ "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": if allowed { "allow" } else { "deny" },
+                            "permissionDecisionReason": if allowed { "Allowed by Grimoire." } else { "The user didn't allow this command in Grimoire." },
+                        } });
+                        let reply = json!({ "type": "control_response", "response": { "subtype": "success", "request_id": value["request_id"], "response": output } });
+                        let _ = process.write_line(&reply).await;
+                    });
+                    continue;
+                }
                 for mut event in parser.parse(&value) {
                     let finished = matches!(event, ProviderEvent::Done | ProviderEvent::Failed(_));
                     if finished && reader.interrupting.swap(false, Ordering::SeqCst) {

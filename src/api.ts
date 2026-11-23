@@ -197,6 +197,14 @@ export interface ApprovalRequest {
 
 export type ApprovalDecision = "once" | "always" | "deny";
 
+export type PermissionMode = "off" | "rules" | "always";
+export type RuleKind = "ask" | "allow";
+
+export interface Permissions {
+  mode: PermissionMode;
+  rules: { kind: RuleKind; pattern: string }[];
+}
+
 export const api = {
   listAgents: () => invoke<Agent[]>("list_agents"),
   busyAgents: () => invoke<string[]>("busy_agents"),
@@ -241,6 +249,8 @@ export const api = {
   revokeVaultGrant: (id: string, agentId: string) => invoke<void>("revoke_vault_grant", { id, agentId }),
   answerApproval: (id: string, decision: ApprovalDecision) => invoke<void>("answer_approval", { id, decision }),
   waitingApprovals: () => invoke<ApprovalRequest[]>("waiting_approvals"),
+  getPermissions: () => invoke<Permissions>("get_permissions"),
+  savePermissions: (permissions: Permissions) => invoke<Permissions>("save_permissions", { permissions }),
 };
 
 /**

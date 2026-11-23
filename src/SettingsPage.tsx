@@ -7,7 +7,8 @@ import { ThemePicker } from "./ThemeEditor";
 import { appIcon, readMode, setAppIcon, setMode, type AppIconSetting, type ModeSetting } from "./themeStore";
 import nightIcon from "./assets/icon-night.svg";
 import paperIcon from "./assets/icon-paper.svg";
-import { GearIcon, PaletteIcon, VaultIcon } from "./icons";
+import { GearIcon, PaletteIcon, ShieldIcon, VaultIcon } from "./icons";
+import PermissionsPage from "./PermissionsPage";
 import VaultPage from "./VaultPage";
 import "./settings.css";
 
@@ -263,12 +264,13 @@ function AppearanceSettings() {
   );
 }
 
-export type SettingsSection = "general" | "appearance" | "vault";
+export type SettingsSection = "general" | "appearance" | "vault" | "permissions";
 
 const SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element }[] = [
   { id: "general", label: "General", icon: GearIcon },
   { id: "appearance", label: "Appearance", icon: PaletteIcon },
   { id: "vault", label: "Vault", icon: VaultIcon },
+  { id: "permissions", label: "Permissions", icon: ShieldIcon },
 ];
 
 export default function SettingsPage(props: { section?: SettingsSection; agents: Agent[] }) {
@@ -299,6 +301,9 @@ export default function SettingsPage(props: { section?: SettingsSection; agents:
         </Match>
         <Match when={section() === "vault"}>
           <VaultPage agents={props.agents} />
+        </Match>
+        <Match when={section() === "permissions"}>
+          <PermissionsPage onOpenVault={() => setSection("vault")} />
         </Match>
       </Switch>
     </div>

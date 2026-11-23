@@ -55,3 +55,16 @@
   padding: 4px 12px;
   font-size: 13px;
 }
+
+.approval-command {
+  margin: 6px 0 0;
+  max-height: 120px;
+  overflow: auto;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: var(--raised);
+  font: 12px/1.45 var(--mono);
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
