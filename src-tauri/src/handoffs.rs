@@ -238,13 +238,12 @@ pub struct Sent {
     pub target_name: String,
     /// The linked Mac's name, while it stays linked.
     pub mac: Option<String>,
-    pub status: Status,
 }
 
 pub fn sent(db: &Db, id: i64) -> Result<Option<Sent>, String> {
     db.with(|c| {
         c.query_row(
-            "SELECT h.peer_id, h.thread_id, h.asker_id, h.target_name, p.name, h.status
+            "SELECT h.peer_id, h.thread_id, h.asker_id, h.target_name, p.name
              FROM handoffs h LEFT JOIN link_peers p ON p.id = h.peer_id
              WHERE h.id = ?1 AND h.chat_id IS NULL AND h.peer_id IS NOT NULL AND h.asker_id IS NOT NULL",
             params![id],
@@ -255,7 +254,6 @@ pub fn sent(db: &Db, id: i64) -> Result<Option<Sent>, String> {
                     asker_id: r.get(2)?,
                     target_name: r.get::<_, Option<String>>(3)?.unwrap_or_else(|| "A familiar".into()),
                     mac: r.get(4)?,
-                    status: Status::parse(&r.get::<_, String>(5)?),
                 })
             },
         )
@@ -266,6 +264,12 @@ pub fn sent(db: &Db, id: i64) -> Result<Option<Sent>, String> {
 /// Moves one request on to `status`.
 pub fn set(db: &Db, id: i64, status: Status) -> Result<(), String> {
     db.with(|c| c.execute("UPDATE handoffs SET status = ?2 WHERE id = ?1", params![id, status.as_str()]).map(|_| ()))
+}
+
+/// Moves a request still waiting or accepted on to `status`, in one update. Returns whether it did,
+/// so when two paths finish the same request only one goes on.
+pub fn finish(db: &Db, id: i64, status: Status) -> Result<bool, String> {
+    db.with(|c| c.execute("UPDATE handoffs SET status = ?2 WHERE id = ?1 AND status IN ('waiting', 'accepted')", params![id, status.as_str()]).map(|n| n == 1))
 }
 
 /// Fails every request still waiting or accepted. No turn outlives the app, so run once at startup.

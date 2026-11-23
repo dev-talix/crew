@@ -162,21 +162,29 @@ pub struct Limiter {
 }
 
 impl Limiter {
-    /// Records a message from `asker` at `now`, unless it already sent `MAX_MESSAGES` in `WINDOW`.
-    pub fn allow(&self, asker: &str, now: Instant) -> Result<(), String> {
+    /// Records one from `key` at `now`, unless it already had `max` in `WINDOW`.
+    pub fn under(&self, key: &str, max: usize, now: Instant) -> bool {
         let mut sent = self.sent.lock().unwrap_or_else(|e| e.into_inner());
-        let recent = sent.entry(asker.to_string()).or_default();
+        let recent = sent.entry(key.to_string()).or_default();
         while recent.front().is_some_and(|at| now.duration_since(*at) >= WINDOW) {
             recent.pop_front();
         }
-        if recent.len() >= MAX_MESSAGES {
+        if recent.len() >= max {
+            return false;
+        }
+        recent.push_back(now);
+        true
+    }
+
+    /// Records a message from `asker` at `now`, unless it already sent `MAX_MESSAGES` in `WINDOW`.
+    pub fn allow(&self, asker: &str, now: Instant) -> Result<(), String> {
+        if !self.under(asker, MAX_MESSAGES, now) {
             return Err(format!(
                 "You've sent {MAX_MESSAGES} messages to other familiars in the last {} minutes, which is Grimoire's limit. \
                  Wait for their replies before sending more.",
                 WINDOW.as_secs() / 60
             ));
         }
-        recent.push_back(now);
         Ok(())
     }
 }
@@ -519,7 +527,7 @@ pub async fn run(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, 
     let result = match prepare_here_or_away(ctx, caller, arguments) {
         Ok((Prepared::Here(out), _)) => ask_here(&ctx.db, &CHAINS, *out, TIMEOUT, approve, converse).await,
         Ok((Prepared::Away(out), Some(link))) => {
-            let familiars = AppFamiliars { app: ctx.app.clone(), db: ctx.db.clone(), runtime: ctx.runtime.clone() };
+            let familiars = AppFamiliars { app: ctx.app.clone(), db: ctx.db.clone(), runtime: ctx.runtime.clone(), approvals: ctx.approvals.clone() };
             let home = crate::chats::current(&ctx.db, &out.asker.id)?;
             away(&reach(ctx, &link, &familiars), *out, Kind::Ask, lane, home, TIMEOUT, Instant::now(), approve).await
         }
@@ -548,7 +556,7 @@ pub async fn run_message(ctx: &crate::tools::Context, caller: &str, lane: Option
     let result = match prepare_here_or_away(ctx, caller, arguments) {
         Ok((Prepared::Here(out), _)) => message_here(&ctx.db, &LIMITER, *out, Instant::now(), approve, start).await,
         Ok((Prepared::Away(out), Some(link))) => {
-            let familiars = AppFamiliars { app: ctx.app.clone(), db: ctx.db.clone(), runtime: ctx.runtime.clone() };
+            let familiars = AppFamiliars { app: ctx.app.clone(), db: ctx.db.clone(), runtime: ctx.runtime.clone(), approvals: ctx.approvals.clone() };
             let home = crate::chats::current(&ctx.db, &out.asker.id)?;
             away(&reach(ctx, &link, &familiars), *out, Kind::Message, lane, home, TIMEOUT, Instant::now(), approve).await
         }
@@ -579,15 +587,23 @@ pub trait Familiars: Send + Sync {
     fn link_row(&self, lane: Option<&str>, agent_id: &str, label: &str, source: &str) -> Result<(), String>;
     /// Tells windows the handoffs list changed.
     fn changed(&self);
+    /// Asks the person on this Mac; see `Approvals::ask`.
+    fn approve(&self, request: approvals::Request) -> BoxFuture<'static, Decision>;
 }
 
 pub struct AppFamiliars {
     pub app: tauri::AppHandle,
     pub db: Arc<Db>,
     pub runtime: Arc<crate::runtime::Runtime>,
+    pub approvals: Arc<approvals::Approvals>,
 }
 
 impl Familiars for AppFamiliars {
+    fn approve(&self, request: approvals::Request) -> BoxFuture<'static, Decision> {
+        let (app, approvals) = (self.app.clone(), self.approvals.clone());
+        Box::pin(async move { approvals.ask(&app, request).await })
+    }
+
     fn side_turn(&self, chat_id: &str, handoff: i64, asker: &str, message: &str) -> BoxFuture<'static, TurnOutcome> {
         let (runtime, chat, asker, message) = (self.runtime.clone(), chat_id.to_string(), asker.to_string(), message.to_string());
         Box::pin(async move { runtime.side_turn(&chat, handoff, &asker, &message).await })
@@ -632,11 +648,21 @@ impl Waiters {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&id)
     }
 
-    /// Takes the waiters that have waited REPLY_HORIZON by `now`, with the chats they sent from.
-    fn expired(&self, now: Instant) -> Vec<(i64, Option<String>)> {
+    /// The requests whose waiters have waited REPLY_HORIZON by `now`.
+    fn expired(&self, now: Instant) -> Vec<i64> {
+        let waiters = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        waiters.iter().filter(|(_, w)| now.saturating_duration_since(w.since) >= REPLY_HORIZON).map(|(id, _)| *id).collect()
+    }
+
+    /// Finishes request `id` as `status` and takes its waiter, under one lock, so a reply and the
+    /// expiry can't both claim it. None when another path already finished it; the waiter may be
+    /// missing when nobody is waiting here any more.
+    fn claim(&self, db: &Db, id: i64, status: crate::handoffs::Status) -> Result<Option<Option<Waiter>>, String> {
         let mut waiters = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let ids: Vec<i64> = waiters.iter().filter(|(_, w)| now.saturating_duration_since(w.since) >= REPLY_HORIZON).map(|(id, _)| *id).collect();
-        ids.into_iter().filter_map(|id| waiters.remove(&id).map(|w| (id, w.home))).collect()
+        if !crate::handoffs::finish(db, id, status)? {
+            return Ok(None);
+        }
+        Ok(Some(waiters.remove(&id)))
     }
 }
 
@@ -644,13 +670,15 @@ impl Waiters {
 /// failed, and the familiar that sent it hears so. Returns how many failed.
 pub fn expire(db: &Db, waiters: &Waiters, familiars: &dyn Familiars, now: Instant) -> Result<usize, String> {
     let mut failed = 0;
-    for (id, home) in waiters.expired(now) {
-        let Some(sent) = crate::handoffs::sent(db, id)? else { continue };
-        if !matches!(sent.status, crate::handoffs::Status::Waiting | crate::handoffs::Status::Accepted) {
+    for id in waiters.expired(now) {
+        let Some(waiter) = waiters.claim(db, id, crate::handoffs::Status::Failed)? else {
+            // Its reply or a failed send finished it first.
+            waiters.take(id);
             continue;
-        }
-        crate::handoffs::set(db, id, crate::handoffs::Status::Failed)?;
+        };
+        let home = waiter.and_then(|w| w.home);
         failed += 1;
+        let Some(sent) = crate::handoffs::sent(db, id)? else { continue };
         let Some(thread) = sent.thread else { continue };
         let mac = sent.mac.as_deref().unwrap_or("a linked Mac");
         let label = format!("{} on {mac}", sent.target_name);
@@ -769,8 +797,7 @@ where
     let thread = match reach.link.hand_off(target, &body).await {
         Ok(thread) => thread,
         Err(e) => {
-            reach.waiters.take(id);
-            crate::handoffs::set(db, id, crate::handoffs::Status::Failed)?;
+            reach.waiters.claim(db, id, crate::handoffs::Status::Failed)?;
             reach.familiars.changed();
             return Err(e);
         }
@@ -795,16 +822,16 @@ where
 pub fn away_reply(db: &Db, waiters: &Waiters, familiars: &dyn Familiars, peer: &str, thread: &str, id: i64, outcome: TurnOutcome) -> Result<(), String> {
     let sent = crate::handoffs::sent(db, id)?.filter(|s| s.peer == peer && s.thread.as_deref().is_none_or(|t| t == thread));
     let sent = sent.ok_or("That reply isn't for a request this Mac sent you.")?;
-    if !matches!(sent.status, crate::handoffs::Status::Waiting | crate::handoffs::Status::Accepted) {
+    // The expiry may be failing it at the same moment: whichever claims it first goes on.
+    let Some(waiter) = waiters.claim(db, id, crate::handoffs::Status::of(&outcome))? else {
         return Err("That request already has its reply.".into());
-    }
-    crate::handoffs::set(db, id, crate::handoffs::Status::of(&outcome))?;
+    };
     if sent.thread.is_none() {
         crate::handoffs::set_thread(db, id, thread)?;
     }
     familiars.changed();
     let label = format!("{} on {}", sent.target_name, sent.mac.as_deref().unwrap_or("a linked Mac"));
-    let (home, outcome) = match waiters.take(id) {
+    let (home, outcome) = match waiter {
         Some(Waiter { reply: Some(tx), home, .. }) => match tx.send(outcome) {
             Ok(()) => return Ok(()),
             Err(outcome) => (home, outcome),
@@ -848,12 +875,12 @@ pub struct RemoteAsker {
 }
 
 /// Starts the side conversation for a request from a familiar on `peer`, called `mac` here. `here` is
-/// this Mac's install id. It goes through what a request from a familiar here would, apart from the
-/// approval prompt, which the asking Mac shows. The asker stays a familiar on `peer`: it gets no tools,
-/// vault, or anything else here, and the side chat records it as remote. Returns the conversation's
-/// id and its exchange, which holds the chain in `chains` while it runs.
+/// this Mac's install id. It goes through what a request from a familiar here would, and this Mac's
+/// approval prompt runs at the start of the exchange, after the asking Mac's own. The asker stays a
+/// familiar on `peer`: it gets no tools, vault, or anything else here, and the side chat records it as
+/// remote. Returns the conversation's id and its exchange, which holds the chain in `chains` while it runs.
 pub fn incoming(
-    db: &Db,
+    db: &Arc<Db>,
     chains: &'static Chains,
     familiars: Arc<dyn Familiars>,
     here: &str,
@@ -895,6 +922,8 @@ pub fn incoming(
         None => None,
     };
     let hold = match kind {
+        // A loop through three or more Macs isn't caught here, since no Mac sees the whole chain; it
+        // stays bounded by MAX_DEPTH and each ask's 10-minute TIMEOUT.
         Kind::Ask => Some(chains.begin_chain(chain, &target.id, &target.name)?),
         Kind::Message => None,
     };
@@ -905,12 +934,37 @@ pub fn incoming(
     let handoff = crate::handoffs::record(db, &chat, kind.as_str(), &message, crate::handoffs::Status::Waiting)?;
     crate::handoffs::set_remote_request(db, handoff, request.request_id)?;
     familiars.changed();
-    let chat_id = chat.clone();
+    // The person here approves each question when the settings say so, as for a familiar here.
+    let approval = load(db).approve.then(|| approvals::Request {
+        id: uuid::Uuid::new_v4().to_string(),
+        agent_id: target.id.clone(),
+        kind: "familiar",
+        title: format!("{asker} wants to {} {}", kind.as_str(), target.name),
+        detail: preview(&message),
+        can_remember: false,
+    });
+    let (chat_id, db, here_name) = (chat.clone(), db.clone(), target.name.clone());
     let turn = Box::pin(async move {
         let _hold = hold;
+        if let Some(approval) = approval {
+            if familiars.approve(approval).await == Decision::Deny {
+                let _ = deny_incoming(&db, &chat_id, &here_name, handoff, &asker, &message);
+                familiars.changed();
+                return TurnOutcome::Failed(format!("The person didn't let {here_name} take this. Carry on without it."));
+            }
+        }
         familiars.side_turn(&chat_id, handoff, &asker, &message).await
     });
     Ok((chat, turn))
+}
+
+/// Keeps a denied request from a linked Mac in its conversation and the handoffs list, as failed.
+fn deny_incoming(db: &Db, chat: &str, target_name: &str, handoff: i64, asker: &str, message: &str) -> Result<(), String> {
+    crate::handoffs::set(db, handoff, crate::handoffs::Status::Failed)?;
+    let target = side::get(db, chat)?.map(|c| c.target_id).ok_or_else(|| format!("{target_name}'s conversation is gone."))?;
+    db.insert_message_in(chat, &target, "user", message, "done", Some(&format!("From {asker}")))?;
+    db.insert_message_in(chat, &target, "error", "The person didn't allow this.", "done", None)?;
+    Ok(())
 }
 
 /// Closes side conversations that Grimoire quit in the middle of: each gets an error row, so it no
@@ -1273,6 +1327,9 @@ mod tests {
             Ok(())
         }
         fn changed(&self) {}
+        fn approve(&self, _: approvals::Request) -> BoxFuture<'static, Decision> {
+            unreachable!()
+        }
     }
 
     #[test]
@@ -1291,13 +1348,53 @@ mod tests {
 
         assert_eq!(expire(&db, &waiters, &familiars, start + REPLY_HORIZON - Duration::from_secs(1)).unwrap(), 0);
         assert_eq!(expire(&db, &waiters, &familiars, start + REPLY_HORIZON).unwrap(), 1);
-        assert_eq!(crate::handoffs::sent(&db, old).unwrap().unwrap().status, crate::handoffs::Status::Failed);
-        assert_eq!(crate::handoffs::sent(&db, fresh).unwrap().unwrap().status, crate::handoffs::Status::Waiting);
+        assert_eq!(crate::handoffs::list(&db, 10).unwrap().into_iter().find(|h| h.id == old).unwrap().status, crate::handoffs::Status::Failed);
+        assert_eq!(crate::handoffs::list(&db, 10).unwrap().into_iter().find(|h| h.id == fresh).unwrap().status, crate::handoffs::Status::Waiting);
         let delivered = familiars.0.lock().unwrap().clone();
         assert_eq!(delivered.len(), 1);
         assert_eq!((delivered[0].0.as_str(), delivered[0].1.as_deref()), ("a", Some("main")));
         assert!(delivered[0].2.starts_with("Scribe on a linked Mac couldn't reply to your message: its reply never came back"), "{}", delivered[0].2);
         assert!(waiters.take(old).is_none() && waiters.take(fresh).is_some(), "only the expired waiter is gone");
+    }
+
+    #[test]
+    fn a_reply_and_the_expiry_never_both_finish_a_request() {
+        let (db, a, ..) = setup();
+        let away = crate::handoffs::Away { thread: Some("t1"), peer: "mac-b", asker_id: &a.id, target_id: "s1", target_name: "Scribe" };
+        let start = Instant::now();
+        let waiting = |waiters: &Waiters| {
+            let id = crate::handoffs::record_away(&db, &away, "message", "Draft it", crate::handoffs::Status::Waiting).unwrap();
+            waiters.add(id, Waiter { reply: None, home: Some("saved-chat".into()), since: start });
+            id
+        };
+        let homes = |familiars: &Delivered| familiars.0.lock().unwrap().iter().map(|(_, home, _)| home.clone()).collect::<Vec<_>>();
+
+        // The reply first: the expiry finds nothing left to fail, and the reply goes to the saved chat.
+        let (waiters, familiars) = (Waiters::default(), Delivered::default());
+        let id = waiting(&waiters);
+        away_reply(&db, &waiters, &familiars, "mac-b", "t1", id, TurnOutcome::Done("Done.".into())).unwrap();
+        assert_eq!(expire(&db, &waiters, &familiars, start + REPLY_HORIZON).unwrap(), 0);
+        assert_eq!(homes(&familiars), [Some("saved-chat".to_string())]);
+
+        // The expiry first: the late reply is refused and delivers nothing.
+        let (waiters, familiars) = (Waiters::default(), Delivered::default());
+        let id = waiting(&waiters);
+        assert_eq!(expire(&db, &waiters, &familiars, start + REPLY_HORIZON).unwrap(), 1);
+        let late = away_reply(&db, &waiters, &familiars, "mac-b", "t1", id, TurnOutcome::Done("Done.".into()));
+        assert_eq!(late.unwrap_err(), "That request already has its reply.");
+        assert_eq!(homes(&familiars), [Some("saved-chat".to_string())]);
+
+        // At the same moment, many times: exactly one wins each time, and it uses the saved chat.
+        for _ in 0..50 {
+            let (waiters, familiars) = (Waiters::default(), Delivered::default());
+            let id = waiting(&waiters);
+            std::thread::scope(|s| {
+                s.spawn(|| away_reply(&db, &waiters, &familiars, "mac-b", "t1", id, TurnOutcome::Done("Done.".into())));
+                s.spawn(|| expire(&db, &waiters, &familiars, start + REPLY_HORIZON));
+            });
+            assert_eq!(homes(&familiars), [Some("saved-chat".to_string())]);
+            assert!(waiters.take(id).is_none());
+        }
     }
 
     #[test]

@@ -69,6 +69,12 @@ const INSTALL_ID: &str = "link_install_id";
 /// wait between tries: about 25 minutes in all.
 const REPLY_TRIES: usize = 10;
 const REPLY_BACKOFF_MAX: Duration = Duration::from_secs(5 * 60);
+/// The first wait between those tries. Tests don't wait seconds.
+const REPLY_BACKOFF_MIN: Duration = if cfg!(test) { Duration::from_millis(20) } else { BACKOFF_MIN };
+/// The most handoffs one linked Mac sends here in `delegation::WINDOW` (10 minutes).
+const HANDOFFS_PER_PEER: usize = 10;
+/// The most cross-Mac turns one linked Mac has running here at once.
+const HANDOFFS_IN_FLIGHT: usize = 3;
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -246,38 +252,41 @@ impl TailnetView {
     }
 }
 
-/// Where Tailscale's CLI may be, resolved, in the order to try. Only these fixed places, never the
-/// login shell's PATH: whatever answers as Tailscale picks the addresses this Mac sends tokens to.
-fn tailscale_programs() -> Vec<PathBuf> {
-    let app = Path::new(TAILSCALE_APP);
-    let mut programs = Vec::new();
-    for path in ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale"] {
-        if let Some(program) = trusted_program(Path::new(path), app).filter(|p| !programs.contains(p)) {
-            programs.push(program);
-        }
+/// The Tailscale app's own CLI, the only program Grimoire runs as Tailscale.
+const TAILSCALE_CLI: &str = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+
+/// The app's CLI at `cli`, resolved, when it's a file inside the app at `app`. Never the login
+/// shell's PATH: whatever answers as Tailscale picks the addresses this Mac sends tokens to. The
+/// links in /usr/local/bin and /opt/homebrew/bin count only when they resolve to this same file, so
+/// running it directly covers them, and a link anywhere else is never run.
+fn tailscale_program(app: &Path, cli: &Path) -> Option<PathBuf> {
+    let app = std::fs::canonicalize(app).ok()?;
+    std::fs::canonicalize(cli).ok().filter(|real| real.starts_with(&app) && real.is_file())
+}
+
+/// The app's CLI, once `signed` (the codesign check) confirms Tailscale signed the app. Any admin
+/// account can write to /Applications, so where a file sits there proves nothing.
+async fn find_tailscale<Signed, Check>(app: &Path, cli: &Path, signed: Signed) -> Result<PathBuf, NoCli>
+where
+    Signed: FnOnce(PathBuf) -> Check,
+    Check: Future<Output = bool>,
+{
+    let program = tailscale_program(app, cli).ok_or(NoCli)?;
+    if signed(app.to_path_buf()).await {
+        Ok(program)
+    } else {
+        Err(NoCli)
     }
-    programs
 }
 
-/// `path` resolved, when it lands inside the Tailscale app at `app`, or on a file root owns that no
-/// group or other user can change. Homebrew's folders belong to the person, so a link there counts
-/// only when it points into the app.
-fn trusted_program(path: &Path, app: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::MetadataExt;
-    let real = std::fs::canonicalize(path).ok()?;
-    let meta = std::fs::metadata(&real).ok().filter(std::fs::Metadata::is_file)?;
-    (real.starts_with(app) || (meta.uid() == 0 && meta.mode() & 0o022 == 0)).then_some(real)
-}
-
-/// Whether macOS confirms `program` is signed by Tailscale. Any admin account can write to
-/// /Applications, so where a file sits there proves nothing.
-async fn signed_by_tailscale(program: &Path) -> bool {
+/// Whether macOS confirms the app at `app`, its CLI included, is signed by Tailscale's team.
+async fn signed_by_tailscale(app: PathBuf) -> bool {
     let requirement = format!("-R=anchor apple generic and certificate leaf[subject.OU] = \"{TAILSCALE_TEAM}\"");
     let mut command = tokio::process::Command::new("/usr/bin/codesign");
     command
-        .arg("--verify")
+        .args(["--verify", "--strict"])
         .arg(requirement)
-        .arg(program)
+        .arg(app)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -290,30 +299,17 @@ struct TailscaleCli;
 impl Tailnet for TailscaleCli {
     fn status(&self) -> BoxFuture<'_, Result<Option<String>, NoCli>> {
         Box::pin(async {
-            let mut found = false;
-            for program in tailscale_programs() {
-                if program.starts_with(TAILSCALE_APP) && !signed_by_tailscale(&program).await {
-                    continue;
-                }
-                found = true;
-                let mut command = tokio::process::Command::new(&program);
-                command
-                    .args(["status", "--json"])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::null())
-                    .kill_on_drop(true);
-                let Ok(Ok(output)) = tokio::time::timeout(TAILSCALE_TIMEOUT, command.output()).await else { continue };
-                let text = String::from_utf8_lossy(&output.stdout).into_owned();
-                if parse_status(&text).is_some() {
-                    return Ok(Some(text));
-                }
-            }
-            if found {
-                Ok(None)
-            } else {
-                Err(NoCli)
-            }
+            let program = find_tailscale(Path::new(TAILSCALE_APP), Path::new(TAILSCALE_CLI), signed_by_tailscale).await?;
+            let mut command = tokio::process::Command::new(&program);
+            command
+                .args(["status", "--json"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true);
+            let Ok(Ok(output)) = tokio::time::timeout(TAILSCALE_TIMEOUT, command.output()).await else { return Ok(None) };
+            let text = String::from_utf8_lossy(&output.stdout).into_owned();
+            Ok(parse_status(&text).is_some().then_some(text))
         })
     }
 }
@@ -538,7 +534,8 @@ struct Pairing {
 /// A token this Mac takes from a peer.
 struct Expected {
     token: String,
-    made: Instant,
+    /// PAIR_WINDOW after its pairing, when it stops working unless pinned or the only one.
+    expires: Instant,
     /// The peer has used it, so it outlasts PAIR_WINDOW.
     pinned: bool,
 }
@@ -553,15 +550,15 @@ struct Tokens {
     send: String,
     /// When `send` was set, so a pairing that crosses it keeps it.
     paired: Instant,
-    /// What the peer may send to this Mac. The Keychain keeps them space-separated; one token is the
-    /// format from before crossed pairings.
+    /// What the peer may send to this Mac. The Keychain keeps them space-separated, each several with
+    /// its expiry; one token alone is the format from before crossed pairings.
     expect: Vec<Expected>,
 }
 
 impl Tokens {
     fn valid(&self, i: usize, now: Instant) -> bool {
         let e = &self.expect[i];
-        e.pinned || self.expect.len() == 1 || now.duration_since(e.made) < PAIR_WINDOW
+        e.pinned || self.expect.len() == 1 || now < e.expires
     }
 
     /// The peer used token `i`: it becomes the only one.
@@ -571,23 +568,39 @@ impl Tokens {
         self.expect = vec![used];
     }
 
-    /// What the Keychain keeps, space-separated.
+    /// What the Keychain keeps, space-separated. One token is written alone, as before crossed
+    /// pairings. Several are each written `token:expiry`, the expiry in Unix milliseconds, so a
+    /// restart keeps their window rather than starting a new one.
     fn expect_text(&self) -> String {
-        self.expect.iter().map(|e| e.token.as_str()).collect::<Vec<_>>().join(" ")
+        if let [only] = self.expect.as_slice() {
+            return only.token.clone();
+        }
+        let (now, wall) = (Instant::now(), crate::db::now_ms());
+        let at = |e: &Expected| wall + e.expires.saturating_duration_since(now).as_millis() as i64;
+        self.expect.iter().map(|e| format!("{}:{}", e.token, at(e))).collect::<Vec<_>>().join(" ")
     }
 }
 
-/// Tokens read back from the Keychain count as older than the window. One is the pinned token, or the
-/// only one. Several come from a crossed pairing nobody used yet: they get a new window, and the
-/// first one the peer uses wins.
+/// Reads tokens back from the Keychain. One alone is the pinned token, or the only one, and keeps
+/// working. Several come from a crossed pairing nobody used yet: each keeps the expiry saved with
+/// it, and the first one the peer uses wins. A token among several with no expiry is from before
+/// expiries were saved, and counts as expired.
 fn loaded_tokens(send: String, expect: &str) -> Option<Tokens> {
-    let now = Instant::now();
-    let old = now.checked_sub(PAIR_WINDOW).unwrap_or(now);
-    let mut expect: Vec<Expected> = expect.split_whitespace().filter(|t| valid_token(t)).map(|t| Expected { token: t.to_string(), made: now, pinned: false }).collect();
+    let (now, wall) = (Instant::now(), crate::db::now_ms());
+    let parse = |text: &str| {
+        let (token, expires) = match text.split_once(':') {
+            Some((token, at)) => (token, at.parse::<i64>().ok()?),
+            None => (text, wall),
+        };
+        let left = Duration::from_millis(expires.saturating_sub(wall).max(0) as u64).min(PAIR_WINDOW);
+        valid_token(token).then(|| Expected { token: token.to_string(), expires: now + left, pinned: false })
+    };
+    let mut expect: Vec<Expected> = expect.split_whitespace().filter_map(parse).collect();
     if let [only] = expect.as_mut_slice() {
-        (only.made, only.pinned) = (old, true);
+        only.pinned = true;
     }
-    (valid_token(&send) && !expect.is_empty()).then_some(Tokens { send, paired: old, expect })
+    // `paired` only matters inside the window, so a restart counts as long after it.
+    (valid_token(&send) && !expect.is_empty()).then_some(Tokens { send, paired: now.checked_sub(PAIR_WINDOW).unwrap_or(now), expect })
 }
 
 #[derive(Default)]
@@ -691,6 +704,41 @@ pub struct Link {
     pre_auth: Arc<Semaphore>,
     /// How many pre-auth connections each address holds.
     pre_auth_from: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    /// Each linked Mac's recent handoffs here, by its install id.
+    handoffs_from: crate::delegation::Limiter,
+    /// Each linked Mac's handoffs still running here.
+    running_from: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+/// One running handoff from a linked Mac, counted until it's dropped.
+struct Running {
+    peer: String,
+    from: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+impl Running {
+    fn start(from: &Arc<Mutex<HashMap<String, usize>>>, peer: &str) -> Option<Running> {
+        let mut running = from.lock().ok()?;
+        let held = running.entry(peer.to_string()).or_default();
+        if *held >= HANDOFFS_IN_FLIGHT {
+            return None;
+        }
+        *held += 1;
+        Some(Running { peer: peer.to_string(), from: from.clone() })
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Ok(mut running) = self.from.lock() {
+            if let Some(held) = running.get_mut(&self.peer) {
+                *held -= 1;
+                if *held == 0 {
+                    running.remove(&self.peer);
+                }
+            }
+        }
+    }
 }
 
 /// A connection's place in the pre-auth pool, counted against its address too.
@@ -756,6 +804,8 @@ impl Link {
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             pre_auth: Arc::new(Semaphore::new(PRE_AUTH_CONNECTIONS)),
             pre_auth_from: Arc::new(Mutex::new(HashMap::new())),
+            handoffs_from: crate::delegation::Limiter::default(),
+            running_from: Arc::new(Mutex::new(HashMap::new())),
         }))
     }
 
@@ -874,9 +924,9 @@ impl Link {
                     // A crossed pairing: the other Mac may already be using the token sent from here.
                     (tokens.send, tokens.paired) = (old.send, old.paired);
                 }
-                tokens.expect = old.expect.into_iter().filter(|e| now.duration_since(e.made) < PAIR_WINDOW).collect();
+                tokens.expect = old.expect.into_iter().filter(|e| now < e.expires).collect();
             }
-            tokens.expect.push(Expected { token: expect, made: now, pinned: false });
+            tokens.expect.push(Expected { token: expect, expires: now + PAIR_WINDOW, pinned: false });
             self.secrets.set(&send_key(id), &tokens.send)?;
             self.secrets.set(&expect_key(id), &tokens.expect_text())?;
             save_peer(&self.db, id, name, address)?;
@@ -1102,7 +1152,7 @@ impl Link {
                 Err(e) => Err(e),
             },
             ("GET", ["events"]) => Ok(self.events_here(&head.query).await),
-            ("POST", ["handoffs"]) => self.handoff_here(&peer, &request.body),
+            ("POST", ["handoffs"]) => return self.handoff_here(&peer, &request.body, std::time::Instant::now()),
             ("POST", ["handoffs", thread, "reply"]) => self.reply_here(&peer, thread, &request.body),
             _ => return (404, error("Not found.")),
         };
@@ -1151,17 +1201,40 @@ impl Link {
     }
 
     /// A familiar on `peer` asks or messages one here. The exchange runs in the background and its
-    /// reply goes back to `peer` alone, with this Mac's token for it.
-    fn handoff_here(self: &Arc<Self>, peer: &str, body: &[u8]) -> Result<Value, String> {
-        let request: crate::delegation::Incoming = serde_json::from_slice(body).map_err(|e| format!("Bad handoff: {e}"))?;
-        let mac = peer_row(&self.db, peer)?.map_or_else(|| "a linked Mac".into(), |p| p.name);
-        let (thread, turn) = self.local.handoff(&self.install_id, peer, &mac, &request)?;
+    /// reply goes back to `peer` alone, with this Mac's token for it. Each linked Mac gets at most
+    /// HANDOFFS_IN_FLIGHT running here and HANDOFFS_PER_PEER in 10 minutes; past either, 429.
+    fn handoff_here(self: &Arc<Self>, peer: &str, body: &[u8], now: std::time::Instant) -> (u16, Value) {
+        let request: crate::delegation::Incoming = match serde_json::from_slice(body) {
+            Ok(request) => request,
+            Err(e) => return (400, error(&format!("Bad handoff: {e}"))),
+        };
+        let Some(running) = Running::start(&self.running_from, peer) else {
+            let busy = format!("{} is already working on {HANDOFFS_IN_FLIGHT} requests from your Mac. Wait for a reply, then try again.", self.name);
+            return (429, error(&busy));
+        };
+        if !self.handoffs_from.under(peer, HANDOFFS_PER_PEER, now) {
+            let many = format!(
+                "Your Mac sent {} {HANDOFFS_PER_PEER} requests in the last {} minutes, which is Grimoire's limit. Wait a few minutes, then try again.",
+                self.name,
+                crate::delegation::WINDOW.as_secs() / 60
+            );
+            return (429, error(&many));
+        }
+        let started = peer_row(&self.db, peer).and_then(|row| {
+            let mac = row.map_or_else(|| "a linked Mac".into(), |p| p.name);
+            self.local.handoff(&self.install_id, peer, &mac, &request)
+        });
+        let (thread, turn) = match started {
+            Ok(started) => started,
+            Err(e) => return (400, error(&e)),
+        };
         let (link, peer, reply_to) = (self.clone(), peer.to_string(), thread.clone());
         tokio::spawn(async move {
             let outcome = turn.await;
+            drop(running);
             link.send_reply(&peer, &reply_to, request.request_id, outcome).await;
         });
-        Ok(json!({ "threadId": thread }))
+        (200, json!({ "threadId": thread }))
     }
 
     /// `peer` brings back the reply to a handoff a familiar here sent it.
@@ -1186,8 +1259,9 @@ impl Link {
         self.local.handoff_reply(peer, thread, reply.request_id, outcome).map(|_| json!({}))
     }
 
-    /// Takes a handoff's reply back to the Mac that asked, trying again while it's offline. A Mac that
-    /// refuses it, or unlinked this one, won't take it later either.
+    /// Takes a handoff's reply back to the Mac that asked, trying again while it's offline or busy
+    /// (503). A Mac that refuses it otherwise, or unlinked this one (401, 403, 404), won't take it
+    /// later either.
     async fn send_reply(&self, peer: &str, thread: &str, request: i64, outcome: TurnOutcome) {
         let (status, text) = match outcome {
             TurnOutcome::Done(text) => ("done", text),
@@ -1196,11 +1270,11 @@ impl Link {
         };
         let body = json!({ "requestId": request, "status": status, "text": text });
         let target = format!("/v1/handoffs/{thread}/reply");
-        let mut wait = BACKOFF_MIN;
+        let mut wait = REPLY_BACKOFF_MIN;
         for _ in 0..REPLY_TRIES {
             match self.peer_call(peer, "POST", &target, Some(&body), CALL_TIMEOUT).await {
                 Ok(_) => return,
-                Err(CallError::Refused(_, why)) => return eprintln!("A linked Mac refused a handoff's reply: {why}"),
+                Err(CallError::Refused(status, why)) if status != 503 => return eprintln!("A linked Mac refused a handoff's reply: {why}"),
                 Err(_) => {
                     tokio::time::sleep(wait).await;
                     wait = (wait * 2).min(REPLY_BACKOFF_MAX);
@@ -1656,6 +1730,7 @@ fn status_line(status: u16) -> &'static str {
         403 => "403 Forbidden",
         404 => "404 Not Found",
         429 => "429 Too Many Requests",
+        503 => "503 Service Unavailable",
         _ => "500 Internal Server Error",
     }
 }
@@ -1678,6 +1753,7 @@ struct AppLocal {
     app: tauri::AppHandle,
     db: Arc<Db>,
     runtime: Arc<crate::runtime::Runtime>,
+    approvals: Arc<crate::approvals::Approvals>,
 }
 
 impl Local for AppLocal {
@@ -1713,7 +1789,7 @@ impl Local for AppLocal {
 
 impl AppLocal {
     fn familiars(&self) -> crate::delegation::AppFamiliars {
-        crate::delegation::AppFamiliars { app: self.app.clone(), db: self.db.clone(), runtime: self.runtime.clone() }
+        crate::delegation::AppFamiliars { app: self.app.clone(), db: self.db.clone(), runtime: self.runtime.clone(), approvals: self.approvals.clone() }
     }
 }
 
@@ -1724,10 +1800,11 @@ pub fn install(
     db: Arc<Db>,
     secrets: Arc<dyn SecretStore>,
     runtime: Arc<crate::runtime::Runtime>,
+    approvals: Arc<crate::approvals::Approvals>,
     cut_off: Vec<crate::handoffs::CutOff>,
 ) -> Result<(), String> {
     use tauri::Listener;
-    let local = Arc::new(AppLocal { app: app.clone(), db: db.clone(), runtime });
+    let local = Arc::new(AppLocal { app: app.clone(), db: db.clone(), runtime, approvals });
     let link = Link::new(db.clone(), secrets, local.clone(), Arc::new(app.clone()), Arc::new(TailscaleCli), mac_name())?;
     if LINK.set(link.clone()).is_err() {
         return Ok(());
@@ -1856,12 +1933,26 @@ mod tests {
         db: Arc<Db>,
         delivered: Mutex<Vec<(String, String, String)>>,
         rows: Mutex<Vec<(String, String, String)>>,
+        /// What the person here was asked, and how they answer.
+        asked: Mutex<Vec<crate::approvals::Request>>,
+        answer: Mutex<crate::approvals::Decision>,
+        /// Holds each turn until it's let go, when set.
+        hold: Mutex<Option<Arc<tokio::sync::Notify>>>,
     }
 
     impl Familiars for FakeFamiliars {
+        fn approve(&self, request: crate::approvals::Request) -> BoxFuture<'static, crate::approvals::Decision> {
+            self.asked.lock().unwrap().push(request);
+            let answer = *self.answer.lock().unwrap();
+            Box::pin(async move { answer })
+        }
         fn side_turn(&self, chat_id: &str, handoff: i64, asker: &str, message: &str) -> BoxFuture<'static, TurnOutcome> {
             let (db, chat, reply) = (self.db.clone(), chat_id.to_string(), format!("{asker} asked: {message}"));
+            let hold = self.hold.lock().unwrap().clone();
             Box::pin(async move {
+                if let Some(hold) = hold {
+                    hold.notified().await;
+                }
                 db.insert_message_in(&chat, &crate::side::get(&db, &chat).unwrap().unwrap().target_id, "assistant", &reply, "done", None).unwrap();
                 crate::handoffs::set(&db, handoff, crate::handoffs::Status::Done).unwrap();
                 TurnOutcome::Done(reply)
@@ -1951,7 +2042,14 @@ mod tests {
     }
 
     fn mac_with(name: &str, db: Arc<Db>, secrets: Arc<MemoryStore>, tailnet: Arc<FakeTailnet>) -> Mac {
-        let familiars = Arc::new(FakeFamiliars { db: db.clone(), delivered: Mutex::new(Vec::new()), rows: Mutex::new(Vec::new()) });
+        let familiars = Arc::new(FakeFamiliars {
+            db: db.clone(),
+            delivered: Mutex::new(Vec::new()),
+            rows: Mutex::new(Vec::new()),
+            asked: Mutex::new(Vec::new()),
+            answer: Mutex::new(crate::approvals::Decision::Once),
+            hold: Mutex::new(None),
+        });
         let local = Arc::new(FakeLocal {
             db: db.clone(),
             sent: Mutex::new(Vec::new()),
@@ -1978,12 +2076,12 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), wait).await.unwrap_or_else(|_| panic!("timed out waiting for {what}"));
     }
 
-    fn expected(token: &str, made: Instant) -> Expected {
-        Expected { token: token.into(), made, pinned: false }
+    fn expected(token: &str, expires: Instant) -> Expected {
+        Expected { token: token.into(), expires, pinned: false }
     }
 
     fn tokens(send: &str, expect: &[&str]) -> Tokens {
-        Tokens { send: send.into(), paired: Instant::now(), expect: expect.iter().map(|t| expected(t, Instant::now())).collect() }
+        Tokens { send: send.into(), paired: Instant::now(), expect: expect.iter().map(|t| expected(t, Instant::now() + PAIR_WINDOW)).collect() }
     }
 
     /// A stand-in for a linked Mac that answers each path, and how many times it was asked, as
@@ -2180,24 +2278,34 @@ mod tests {
         assert!(!a.link.trusts("100.104.85.100".parse().unwrap()).await, "a tailnet address alone isn't enough");
     }
 
-    #[test]
-    fn finds_tailscales_cli_only_in_its_app_or_in_a_file_only_root_can_change() {
+    #[tokio::test]
+    async fn runs_only_the_tailscale_apps_own_cli_once_codesign_vouches_for_the_app() {
         let dir = std::env::temp_dir().join(format!("grimoire-cli-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(dir.join("Tailscale.app/Contents/MacOS")).unwrap();
         let app = std::fs::canonicalize(dir.join("Tailscale.app")).unwrap();
         let cli = app.join("Contents/MacOS/Tailscale");
         std::fs::write(&cli, "").unwrap();
-        let into_app = dir.join("tailscale");
-        std::os::unix::fs::symlink(&cli, &into_app).unwrap();
-        assert_eq!(trusted_program(&into_app, &app), Some(cli.clone()), "a link into the app runs the app's CLI");
+        let checked = Mutex::new(Vec::new());
+        let signed = |ok: bool| {
+            let checked = &checked;
+            move |path: PathBuf| {
+                checked.lock().unwrap().push(path);
+                std::future::ready(ok)
+            }
+        };
+        assert_eq!(find_tailscale(&app, &cli, signed(true)).await, Ok(cli.clone()));
+        assert_eq!(*checked.lock().unwrap(), vec![app.clone()], "codesign checks the app itself");
+        assert_eq!(find_tailscale(&app, &cli, signed(false)).await, Err(NoCli), "an app Tailscale didn't sign is never run");
+
+        // A link out of the app, or a file root owns elsewhere, is never the CLI.
         let impostor = dir.join("impostor");
         std::fs::write(&impostor, "").unwrap();
-        let to_impostor = dir.join("tailscale-elsewhere");
-        std::os::unix::fs::symlink(&impostor, &to_impostor).unwrap();
-        assert_eq!(trusted_program(&impostor, &app), None, "a file the person owns could be anything");
-        assert_eq!(trusted_program(&to_impostor, &app), None);
-        assert_eq!(trusted_program(Path::new("/bin/ls"), &app), Some(PathBuf::from("/bin/ls")), "root's, and nobody else can write it");
-        assert_eq!(trusted_program(&dir.join("missing"), &app), None);
+        let link_out = app.join("Contents/MacOS/Linked");
+        std::os::unix::fs::symlink(&impostor, &link_out).unwrap();
+        assert_eq!(tailscale_program(&app, &link_out), None);
+        assert_eq!(tailscale_program(&app, Path::new("/bin/ls")), None);
+        assert_eq!(tailscale_program(&app, &app.join("Contents/MacOS/missing")), None);
+        assert_eq!(find_tailscale(&app, &impostor, signed(true)).await, Err(NoCli), "even with a good signature on the app");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2448,13 +2556,35 @@ mod tests {
     fn several_tokens_saved_by_a_crossed_pairing_load_and_the_first_used_wins() {
         let a = mac("Studio");
         let (one, two) = (new_token(), new_token());
-        let mut loaded = loaded_tokens(new_token(), &format!("{one} {two}")).unwrap();
+        let saved = tokens("s", &[&one, &two]).expect_text();
+        assert!(saved.starts_with(&format!("{one}:")) && saved.contains(&format!(" {two}:")), "{saved}");
+        let loaded = loaded_tokens(new_token(), &saved).unwrap();
         assert!(loaded.expect.iter().all(|e| !e.pinned));
-        loaded.expect.iter_mut().for_each(|e| e.made = Instant::now());
         a.link.tokens.lock().unwrap().insert("b".into(), loaded);
         assert!(authorized(&a.link, &two));
         assert!(!authorized(&a.link, &one));
-        assert_eq!(a.secrets.get(&expect_key("b")).unwrap(), Some(two));
+        assert_eq!(a.secrets.get(&expect_key("b")).unwrap(), Some(two), "the pinned token is saved alone, as before");
+    }
+
+    #[test]
+    fn a_restart_keeps_unused_tokens_original_expiry() {
+        let a = mac("Studio");
+        let (live, lapsed, legacy, only) = (new_token(), new_token(), new_token(), new_token());
+        let wall = crate::db::now_ms();
+        // Saved before a restart: one still inside its window, one whose window passed while Grimoire was closed.
+        let saved = format!("{live}:{} {lapsed}:{}", wall + 60_000, wall - 1);
+        let loaded = loaded_tokens(new_token(), &saved).unwrap();
+        let left = loaded.expect[0].expires.saturating_duration_since(Instant::now());
+        assert!(left > Duration::from_secs(50) && left <= Duration::from_secs(60), "{left:?}");
+        a.link.tokens.lock().unwrap().insert("b".into(), loaded);
+        assert!(!authorized(&a.link, &lapsed), "no fresh window after a restart");
+        assert!(authorized(&a.link, &live));
+        // Several tokens saved before expiries were: none gets a fresh window.
+        a.link.tokens.lock().unwrap().insert("c".into(), loaded_tokens(new_token(), &format!("{legacy} {}", new_token())).unwrap());
+        assert!(!authorized(&a.link, &legacy));
+        // One token alone, the format every link used before, keeps working.
+        a.link.tokens.lock().unwrap().insert("d".into(), loaded_tokens(new_token(), &only).unwrap());
+        assert!(authorized(&a.link, &only));
     }
 
     #[tokio::test]
@@ -2660,7 +2790,7 @@ mod tests {
         a.link.reply_cut_off(cut_off);
         let heard = || b.local.familiars.delivered.lock().unwrap().iter().any(|(asker, text, _)| asker == "ada" && text.contains("Grimoire on Studio closed before it finished"));
         eventually("Ada to hear no reply is coming", heard).await;
-        assert_eq!(crate::handoffs::sent(&b.db, request).unwrap().unwrap().status, crate::handoffs::Status::Failed);
+        assert_eq!(crate::handoffs::list(&b.db, 10).unwrap().into_iter().find(|h| h.id == request).unwrap().status, crate::handoffs::Status::Failed);
     }
 
     // ----- Familiars asking familiars on another Mac -----
@@ -2850,4 +2980,96 @@ mod tests {
     }
 
     const MAX_BODY_TEST: usize = 200_001;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_home_mac_asks_its_person_first_when_set_and_a_no_fails_the_ask() {
+        let (a, b, _) = linked_with_ada().await;
+        crate::delegation::save(&a.db, crate::delegation::Settings { scope: crate::delegation::Scope::Anyone, approve: true }).unwrap();
+        *a.local.familiars.answer.lock().unwrap() = crate::approvals::Decision::Deny;
+        let err = hand(&b, Kind::Ask, "Check the draft", None).await.unwrap_err();
+        assert!(err.starts_with("Scribe on Studio couldn't reply: The person didn't let Scribe take this."), "{err}");
+        let asked = a.local.familiars.asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1);
+        let shown = (asked[0].agent_id.as_str(), asked[0].kind, asked[0].title.as_str(), asked[0].detail.as_str(), asked[0].can_remember);
+        assert_eq!(shown, ("f1", "familiar", "Ada on Laptop wants to ask Scribe", "Check the draft", false));
+        // Scribe never ran it, and both Macs list it as failed.
+        let home = crate::handoffs::list(&a.db, 10).unwrap();
+        assert_eq!(home[0].status, crate::handoffs::Status::Failed);
+        let rows: Vec<(String, String)> = crate::side::messages(&a.db, &home[0].chat_id).unwrap().into_iter().map(|m| (m.role, m.text)).collect();
+        assert_eq!(rows, [("user".into(), "Check the draft".into()), ("error".into(), "The person didn't allow this.".into())]);
+        assert_eq!(crate::handoffs::list(&b.db, 10).unwrap()[0].status, crate::handoffs::Status::Failed);
+
+        // A yes lets it through.
+        *a.local.familiars.answer.lock().unwrap() = crate::approvals::Decision::Once;
+        assert!(hand(&b, Kind::Ask, "Again", None).await.unwrap().starts_with("Ada on Laptop asked: Again"));
+        assert_eq!(a.local.familiars.asked.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_linked_mac_gets_three_handoffs_running_and_ten_in_ten_minutes() {
+        let (a, b, peer) = linked_with_ada().await;
+        let body = json!({ "targetId": "f1", "asker": { "id": "ada", "name": "Ada", "mac": "Laptop" }, "message": "hi", "kind": "message",
+                           "depth": 1, "chainIds": [format!("{}:ada", b.link.install_id)], "requestId": 1 });
+        let post = || b.link.peer_call(&peer, "POST", "/v1/handoffs", Some(&body), CALL_TIMEOUT);
+        let idle = || a.link.running_from.lock().unwrap().is_empty();
+        // Scribe's turns wait, so three stay running.
+        let hold = Arc::new(tokio::sync::Notify::new());
+        *a.local.familiars.hold.lock().unwrap() = Some(hold.clone());
+        for _ in 0..HANDOFFS_IN_FLIGHT {
+            assert!(post().await.is_ok());
+        }
+        match post().await {
+            Err(CallError::Refused(429, why)) => assert_eq!(why, "Studio is already working on 3 requests from your Mac. Wait for a reply, then try again."),
+            other => panic!("{other:?}"),
+        }
+        *a.local.familiars.hold.lock().unwrap() = None;
+        eventually("the held turns to end", || {
+            hold.notify_waiters();
+            idle()
+        })
+        .await;
+        // The refused one didn't count; seven more make ten.
+        for _ in HANDOFFS_IN_FLIGHT..HANDOFFS_PER_PEER {
+            assert!(post().await.is_ok());
+            eventually("the turn to end", idle).await;
+        }
+        match post().await {
+            Err(CallError::Refused(429, why)) => assert!(why.starts_with("Your Mac sent Studio 10 requests in the last 10 minutes"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(crate::handoffs::list(&a.db, 20).unwrap().len(), HANDOFFS_PER_PEER, "nothing over the limit ran");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reply_retries_a_busy_mac_and_stops_at_one_that_refuses_it() {
+        let tries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = tries.clone();
+        let busy_then_ok = fake_peer(move |_, times| {
+            counted.store(times, std::sync::atomic::Ordering::SeqCst);
+            if times <= 2 {
+                (503, error("This Mac is busy. Try again in a moment."))
+            } else {
+                (200, json!({}))
+            }
+        })
+        .await;
+        let b = mac("Laptop");
+        save_peer(&b.db, "mac-a", "Studio", &busy_then_ok).unwrap();
+        b.link.tokens.lock().unwrap().insert("mac-a".into(), tokens(&new_token(), &[&new_token()]));
+        tokio::time::timeout(Duration::from_secs(5), b.link.send_reply("mac-a", "t1", 1, TurnOutcome::Done("ok".into()))).await.unwrap();
+        assert_eq!(tries.load(std::sync::atomic::Ordering::SeqCst), 3, "two 503s, then delivered");
+
+        for status in [401, 403, 404] {
+            let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = refused.clone();
+            let gone = fake_peer(move |_, times| {
+                counted.store(times, std::sync::atomic::Ordering::SeqCst);
+                (status, error("No."))
+            })
+            .await;
+            save_peer(&b.db, "mac-a", "Studio", &gone).unwrap();
+            b.link.send_reply("mac-a", "t1", 1, TurnOutcome::Done("ok".into())).await;
+            assert_eq!(refused.load(std::sync::atomic::Ordering::SeqCst), 1, "{status} ends it");
+        }
+    }
 }

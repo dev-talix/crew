@@ -777,7 +777,7 @@ pub fn run() {
             if let Err(e) = tools::serve(Arc::new(tools), &dir.join("grimoire.sock")) {
                 eprintln!("Grimoire tools are off: {e}");
             }
-            if let Err(e) = link::install(app.handle(), db.clone(), secrets.clone(), runtime.clone(), cut_off) {
+            if let Err(e) = link::install(app.handle(), db.clone(), secrets.clone(), runtime.clone(), approvals.clone(), cut_off) {
                 eprintln!("Linked Macs are off: {e}");
             }
             // Rituals can fire as soon as the scheduler starts, so the approval gate and the tool socket
