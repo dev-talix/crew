@@ -4,7 +4,7 @@
 //! In code a familiar is an agent and a spell is a workflow; the tools use the names people see.
 
 use crate::approvals::{self, Approvals, Decision};
-use crate::db::{Agent, Db, WorkflowStep};
+use crate::db::{Agent, CheckWhen, Db, StepCheck, WorkflowStep};
 use crate::vault::{self, Kind, SecretStore};
 use crate::{themes, workflows};
 use serde::Deserialize;
@@ -46,7 +46,7 @@ pub fn definitions() -> Value {
         },
         {
             "name": "create_spell",
-            "description": "Save a new Grimoire spell. Each step sends its prompt to one familiar and waits for the reply before the next step. In a prompt, {{input}} is the text the spell is cast with and {{previous}} is the previous step's reply; the previous reply is appended automatically when a step does not use {{previous}}. The user casts spells from Grimoire's Spells page.",
+            "description": "Save a new Grimoire spell. Each step sends its prompt to one familiar and waits for the reply before the next step. In a prompt, {{input}} is the text the spell is cast with and {{previous}} is the previous step's reply; the previous reply is appended automatically when a step does not use {{previous}}. A step with parallel: true starts together with the step before it, and the next step gets all their replies, labeled by familiar. A step's check sends the spell to another step when its reply contains (or lacks) a phrase, like a reviewer sending a draft back to the writer; each check does this at most 3 times, then the spell stops. The user casts spells from Grimoire's Spells page.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -58,7 +58,18 @@ pub fn definitions() -> Value {
                             "type": "object",
                             "properties": {
                                 "familiar": { "type": "string", "description": "Familiar id or exact name, from list_familiars." },
-                                "prompt": { "type": "string", "description": "Instructions sent to that familiar." }
+                                "prompt": { "type": "string", "description": "Instructions sent to that familiar." },
+                                "parallel": { "type": "boolean", "description": "Run alongside the previous step instead of after it. Not allowed on the first step." },
+                                "check": {
+                                    "type": "object",
+                                    "description": "Optional. After this step, go to another step when the reply contains, or lacks, a phrase (case doesn't matter). Otherwise the spell continues.",
+                                    "properties": {
+                                        "when": { "type": "string", "enum": ["contains", "lacks"] },
+                                        "phrase": { "type": "string" },
+                                        "goToStep": { "type": "integer", "minimum": 1, "description": "The step to go to, counting from 1. It can't be a parallel step." }
+                                    },
+                                    "required": ["when", "phrase", "goToStep"]
+                                }
                             },
                             "required": ["familiar", "prompt"]
                         }
@@ -146,9 +157,23 @@ struct NewSpell {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct NewStep {
     familiar: String,
     prompt: String,
+    #[serde(default)]
+    parallel: bool,
+    #[serde(default)]
+    check: Option<NewCheck>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NewCheck {
+    when: CheckWhen,
+    phrase: String,
+    /// Counts from 1, like the steps people see.
+    go_to_step: usize,
 }
 
 #[derive(Deserialize)]
@@ -196,7 +221,16 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
                         "id": w.id,
                         "name": w.name,
                         "createdBy": w.created_by.as_deref().map(&name_of),
-                        "steps": w.steps.iter().map(|s| json!({ "familiar": name_of(&s.agent_id), "prompt": s.prompt })).collect::<Vec<_>>(),
+                        "steps": w.steps.iter().map(|s| {
+                            let mut step = json!({ "familiar": name_of(&s.agent_id), "prompt": s.prompt });
+                            if s.parallel {
+                                step["parallel"] = json!(true);
+                            }
+                            if let Some(c) = &s.check {
+                                step["check"] = json!({ "when": c.when, "phrase": c.phrase, "goToStep": c.go_to + 1 });
+                            }
+                            step
+                        }).collect::<Vec<_>>(),
                     })
                 })
                 .collect();
@@ -210,7 +244,15 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
                 .enumerate()
                 .map(|(index, step)| {
                     let agent = resolve_agent(&agents, &step.familiar).map_err(|e| format!("Step {}: {e}", index + 1))?;
-                    Ok(WorkflowStep { agent_id: agent.id.clone(), prompt: step.prompt })
+                    let check = match step.check {
+                        Some(c) => Some(StepCheck {
+                            when: c.when,
+                            phrase: c.phrase,
+                            go_to: c.go_to_step.checked_sub(1).ok_or(format!("Step {}: goToStep counts from 1.", index + 1))?,
+                        }),
+                        None => None,
+                    };
+                    Ok(WorkflowStep { agent_id: agent.id.clone(), prompt: step.prompt, parallel: step.parallel, check })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             let saved = workflows::save(db, None, &input.name, steps, creator)?;
@@ -479,12 +521,38 @@ mod tests {
         let saved = &db.list_workflows().unwrap()[0];
         assert_eq!(saved.name, "Brief");
         assert_eq!(saved.created_by.as_deref(), Some("r1"));
-        assert_eq!(saved.steps[0], WorkflowStep { agent_id: "r1".into(), prompt: "Research {{input}}".into() });
+        assert_eq!(saved.steps[0], WorkflowStep { agent_id: "r1".into(), prompt: "Research {{input}}".into(), ..Default::default() });
         assert_eq!(saved.steps[1].agent_id, "w1");
 
         // Editing it from the Spells page keeps the creator.
         workflows::save(&db, Some(&saved.id), "Brief v2", saved.steps.clone(), None).unwrap();
         assert_eq!(db.list_workflows().unwrap()[0].created_by.as_deref(), Some("r1"));
+    }
+
+    #[test]
+    fn creates_a_spell_with_parallel_steps_and_a_check() {
+        let (db, dir) = setup();
+        let args = json!({ "name": "Post", "steps": [
+            { "familiar": "Writer", "prompt": "Draft {{input}}" },
+            { "familiar": "Researcher", "prompt": "Find sources", "parallel": true },
+            { "familiar": "Researcher", "prompt": "Review", "check": { "when": "lacks", "phrase": " APPROVED ", "goToStep": 1 } }
+        ]});
+        call(&db, &dir, "r1", "create_spell", args).unwrap();
+        let saved = &db.list_workflows().unwrap()[0];
+        assert!(!saved.steps[0].parallel && saved.steps[1].parallel);
+        assert_eq!(saved.steps[2].check, Some(StepCheck { when: CheckWhen::Lacks, phrase: "APPROVED".into(), go_to: 0 }));
+        let listed: Vec<Value> = serde_json::from_str(&call(&db, &dir, "r1", "list_spells", json!({})).unwrap().text).unwrap();
+        assert_eq!(listed[0]["steps"][1]["parallel"], true);
+        assert_eq!(listed[0]["steps"][2]["check"]["goToStep"], 1);
+        assert!(listed[0]["steps"][0].get("check").is_none());
+
+        let bad = |step: Value| call(&db, &dir, "r1", "create_spell", json!({ "name": "X", "steps": [{ "familiar": "Writer", "prompt": "Go" }, step] }));
+        let check = |go: i64| json!({ "familiar": "Writer", "prompt": "Go", "check": { "when": "contains", "phrase": "x", "goToStep": go } });
+        assert_eq!(bad(check(0)).unwrap_err(), "Step 2: goToStep counts from 1.");
+        assert!(bad(check(9)).unwrap_err().contains("doesn't exist"));
+        let first_parallel = json!({ "name": "X", "steps": [{ "familiar": "Writer", "prompt": "Go", "parallel": true }] });
+        assert!(call(&db, &dir, "r1", "create_spell", first_parallel).unwrap_err().contains("Step 1 can't run alongside"));
+        assert_eq!(db.list_workflows().unwrap().len(), 1);
     }
 
     #[test]
