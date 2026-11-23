@@ -45,6 +45,46 @@ struct Job {
     reply: Option<Reply>,
 }
 
+/// Saves `text` as a message from `source` in `chat`, or in the familiar's current chat, for the
+/// person to see, and queues it for the familiar's next main-chat turn, since a stored message never
+/// reaches the CLI on its own. For results that come back while the familiar can't take a turn.
+pub fn hold(db: &Db, agent_id: &str, chat: Option<&str>, text: &str, source: &str) -> Result<Message, String> {
+    let row = match chat {
+        Some(chat) => db.insert_message_in(chat, agent_id, "user", text, "done", Some(source))?,
+        None => db.insert_message_from(agent_id, "user", text, "done", Some(source))?,
+    };
+    db.with(|c| {
+        c.execute(
+            "INSERT INTO pending_notes (agent_id, source, text, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![agent_id, source, text, crate::db::now_ms()],
+        )
+    })?;
+    Ok(row)
+}
+
+/// What goes before the familiar's next main-chat turn: the person's ledger edits, then the held
+/// messages it hasn't seen. Also returns the last held note's id, to clear once the turn starts.
+fn turn_notes(db: &Db, agent: &Agent) -> (Vec<String>, Option<i64>) {
+    // A resumed chat keeps its old system prompt, so pass on the person's ledger edits here.
+    let mut notes: Vec<String> = crate::ledger::turn_note(db, agent).into_iter().collect();
+    let held: Vec<(i64, String, String)> = db
+        .with(|c| {
+            let mut stmt = c.prepare_cached("SELECT id, source, text FROM pending_notes WHERE agent_id = ?1 ORDER BY id")?;
+            let rows = stmt.query_map(rusqlite::params![agent.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect()
+        })
+        .unwrap_or_default();
+    let last = held.last().map(|(id, ..)| *id);
+    notes.extend(held.into_iter().map(|(_, source, text)| {
+        format!("(Grimoire: this message, {source}, came in while you couldn't take a turn.)\n{text}")
+    }));
+    (notes, last)
+}
+
+fn clear_notes(db: &Db, agent_id: &str, through: i64) {
+    let _ = db.with(|c| c.execute("DELETE FROM pending_notes WHERE agent_id = ?1 AND id <= ?2", rusqlite::params![agent_id, through]));
+}
+
 pub const RITUAL_SOURCE: &str = "Ritual: ";
 pub const SPELL_SOURCE: &str = "Spell: ";
 
@@ -314,6 +354,21 @@ impl Runtime {
         }
     }
 
+    /// Brings a result back to a familiar as a message that starts its next turn, when the person is
+    /// still in the chat it came from (`home`). Otherwise, or when the turn can't start, it waits in
+    /// `home` and reaches the familiar with its next turn.
+    pub fn deliver(self: &Arc<Self>, agent_id: &str, home: Option<String>, text: String, source: &str) {
+        let still_home = crate::chats::current(&self.db, agent_id).is_ok_and(|now| now == home);
+        if still_home && self.send(agent_id, text.clone(), Some(source)).is_ok() {
+            return;
+        }
+        if let Ok(row) = hold(&self.db, agent_id, home.as_deref(), &text, source) {
+            if still_home {
+                self.app.message(&row);
+            }
+        }
+    }
+
     /// Runs one exchange in a side conversation: `asker`'s message goes to the familiar whose hidden
     /// chat it is, on that chat's own session, alongside whatever it's doing in its main chat.
     pub async fn side_turn(self: &Arc<Self>, chat_id: &str, asker: &str, message: &str) -> TurnOutcome {
@@ -357,7 +412,7 @@ impl Runtime {
 
     /// Runs a background helper's one turn in its hidden chat (see `helpers`): `task` is shown in the
     /// transcript and `prompt` goes to the CLI, on a fresh session in the familiar's own settings.
-    pub async fn helper_turn(self: &Arc<Self>, chat_id: &str, task: &str, prompt: &str) -> TurnOutcome {
+    pub async fn helper_turn(self: &Arc<Self>, chat_id: &str, task: &str, prompt: &str, startup: &crate::helpers::Startup) -> TurnOutcome {
         let Ok(Some(chat)) = crate::side::get(&self.db, chat_id) else {
             return TurnOutcome::Failed("The helper's chat was deleted.".into());
         };
@@ -375,11 +430,15 @@ impl Runtime {
             return writer.fail(&reason);
         }
         let lane = Lane { key: crate::side::lane_key(&agent.id, &chat.id), session: LaneSession::Fresh };
+        if !startup.begin() {
+            return TurnOutcome::Stopped;
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         let started = match agent.provider {
             Provider::Codex => self.codex.start_turn_in(&agent, Some(&lane), prompt, &[], tx).await,
             Provider::Claude => self.claude.start_turn_in(&agent, Some(&lane), prompt, &[], tx).await,
         };
+        startup.started();
         match started {
             Ok(()) => stream_turn(&mut writer, rx).await,
             Err(e) => writer.fail(&e),
@@ -409,9 +468,9 @@ impl Runtime {
             Ok(input) => input,
             Err(e) => return writer.fail(&e),
         };
-        // A resumed chat keeps its old system prompt, so pass on the person's ledger edits here.
-        if let Some(note) = crate::ledger::turn_note(&self.db, &agent) {
-            input.text = format!("{note}\n\n{}", input.text);
+        let (notes, held) = turn_notes(&self.db, &agent);
+        if !notes.is_empty() {
+            input.text = format!("{}\n\n{}", notes.join("\n\n"), input.text);
         }
         let (tx, rx) = mpsc::unbounded_channel();
         let started = match agent.provider {
@@ -419,7 +478,12 @@ impl Runtime {
             Provider::Claude => self.claude.start_turn(&agent, &input.text, &input.images, tx).await,
         };
         match started {
-            Ok(()) => stream_turn(&mut writer, rx).await,
+            Ok(()) => {
+                if let Some(held) = held {
+                    clear_notes(&self.db, &agent.id, held);
+                }
+                stream_turn(&mut writer, rx).await
+            }
             Err(e) => writer.fail(&e),
         }
     }
@@ -749,6 +813,23 @@ mod tests {
         assert_eq!(main, ["Main chat"], "the main chat is untouched");
         assert_eq!(db.get_agent("a").unwrap().unwrap().session_id.as_deref(), Some("main-session"));
         assert_eq!(crate::side::get(&db, &side.id).unwrap().unwrap().session_id.as_deref(), Some("side-session"));
+    }
+
+    #[test]
+    fn held_messages_reach_the_next_turn_once() {
+        let (db, agent) = setup();
+        assert_eq!(turn_notes(&db, &agent), (vec![], None));
+        let row = hold(&db, "a", None, "Scribe replied to your message:\n\nDone.", "Reply from Scribe").unwrap();
+        assert_eq!((row.role.as_str(), row.source.as_deref()), ("user", Some("Reply from Scribe")), "the person sees it");
+        hold(&db, "a", None, "Helper tests finished.", "Helper tests").unwrap();
+        let (notes, held) = turn_notes(&db, &agent);
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("Reply from Scribe") && notes[0].ends_with("Done."), "{}", notes[0]);
+        assert!(notes[1].ends_with("Helper tests finished."), "{}", notes[1]);
+        // A turn that fails to start leaves them for the next one; one that starts clears them.
+        assert_eq!(turn_notes(&db, &agent).0, notes);
+        clear_notes(&db, "a", held.unwrap());
+        assert_eq!(turn_notes(&db, &agent), (vec![], None));
     }
 
     #[test]

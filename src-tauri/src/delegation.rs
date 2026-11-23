@@ -322,18 +322,9 @@ fn open(ctx: &crate::tools::Context, lane: Option<&str>, out: &Outgoing, verb: &
     Ok(chat)
 }
 
-/// Brings a reply back to the familiar who sent it, as a new message that starts its next turn in the
-/// chat it sent from (`home`). If the person has since switched chats, or the turn can't start, the
-/// reply waits in `home` instead of being lost.
-fn deliver(runtime: &std::sync::Arc<crate::runtime::Runtime>, db: &Db, asker_id: &str, home: Option<String>, name: &str, chat: &str, outcome: TurnOutcome) {
-    let (text, source) = (reply_text(name, chat, outcome), format!("{REPLY_SOURCE}{name}"));
-    let still_home = crate::chats::current(db, asker_id).is_ok_and(|now| now == home);
-    if still_home && runtime.send(asker_id, text.clone(), Some(&source)).is_ok() {
-        return;
-    }
-    if let Some(home) = home {
-        let _ = db.insert_message_in(&home, asker_id, "user", &text, "done", Some(&source));
-    }
+/// Brings a reply back to the familiar who sent it, in the chat it sent from (`home`); see `Runtime::deliver`.
+fn deliver(runtime: &std::sync::Arc<crate::runtime::Runtime>, asker_id: &str, home: Option<String>, name: &str, chat: &str, outcome: TurnOutcome) {
+    runtime.deliver(asker_id, home, reply_text(name, chat, outcome), &format!("{REPLY_SOURCE}{name}"));
 }
 
 /// Runs `ask_familiar` for real: through the approval prompt and a side conversation.
@@ -344,12 +335,12 @@ pub async fn run(ctx: &crate::tools::Context, caller: &str, lane: Option<&str>, 
         let home = crate::chats::current(&ctx.db, &out.asker.id)?;
         // The exchange runs as its own task, so a reply that outlasts the wait still finishes and is
         // saved. When nobody is waiting for it any more, it comes back like a message_familiar reply.
-        let (runtime, db, chat_id) = (ctx.runtime.clone(), ctx.db.clone(), chat.clone());
+        let (runtime, chat_id) = (ctx.runtime.clone(), chat.clone());
         let (tx, rx) = tokio::sync::oneshot::channel();
         tauri::async_runtime::spawn(async move {
             let outcome = runtime.side_turn(&chat_id, &out.asker.name, &out.message).await;
             if let Err(outcome) = tx.send(outcome) {
-                deliver(&runtime, &db, &out.asker.id, home, &out.target.name, &chat_id, outcome);
+                deliver(&runtime, &out.asker.id, home, &out.target.name, &chat_id, outcome);
             }
         });
         let outcome = rx.await.unwrap_or_else(|_| TurnOutcome::Failed("The conversation ended unexpectedly.".into()));
@@ -365,10 +356,10 @@ pub async fn run_message(ctx: &crate::tools::Context, caller: &str, lane: Option
     let start = |out: Outgoing| {
         let chat = open(ctx, lane, &out, "Messaged")?;
         let home = crate::chats::current(&ctx.db, &out.asker.id)?;
-        let (runtime, db, chat_id) = (ctx.runtime.clone(), ctx.db.clone(), chat.clone());
+        let (runtime, chat_id) = (ctx.runtime.clone(), chat.clone());
         tauri::async_runtime::spawn(async move {
             let outcome = runtime.side_turn(&chat_id, &out.asker.name, &out.message).await;
-            deliver(&runtime, &db, &out.asker.id, home, &out.target.name, &chat_id, outcome);
+            deliver(&runtime, &out.asker.id, home, &out.target.name, &chat_id, outcome);
         });
         Ok(chat)
     };
@@ -377,14 +368,15 @@ pub async fn run_message(ctx: &crate::tools::Context, caller: &str, lane: Option
 
 /// Closes side conversations that Grimoire quit in the middle of: each gets an error row, so it no
 /// longer shows as working, and the familiar who started it hears that no reply is coming. The note
-/// waits in its current chat rather than starting a turn as the app opens. Run once at startup.
+/// waits in its current chat and comes with its next turn, rather than starting a turn as the app
+/// opens. Helpers' chats are left to `helpers::interrupt_leftovers`. Run once at startup.
 pub fn recover(db: &Db) -> Result<usize, String> {
     let unfinished = side::unfinished(db)?;
     for chat in &unfinished {
         let name = db.get_agent(&chat.target_id)?.map_or_else(|| "The other familiar".to_string(), |a| a.name);
         db.insert_message_in(&chat.id, &chat.target_id, "error", "Grimoire closed before this reply finished.", "done", None)?;
         let text = reply_text(&name, &chat.id, TurnOutcome::Failed("Grimoire closed before it finished. Ask again if you still need it.".into()));
-        db.insert_message_from(&chat.asker_id, "user", &text, "done", Some(&format!("{REPLY_SOURCE}{name}")))?;
+        crate::runtime::hold(db, &chat.asker_id, None, &text, &format!("{REPLY_SOURCE}{name}"))?;
     }
     Ok(unfinished.len())
 }
@@ -611,6 +603,9 @@ mod tests {
         db.insert_message_in(&cut.id, &b.id, "assistant", "Half a dra", "interrupted", None).unwrap();
         let finished = side::create(&db, &a.id, &b.id, "hi").unwrap();
         db.insert_message_in(&finished.id, &b.id, "assistant", "hello", "done", None).unwrap();
+        // A helper cut off by the restart isn't a reply anyone waits for.
+        let (_, helper) = crate::helpers::create(&db, &a.id, None, &json!({ "task": "x" })).unwrap();
+        db.insert_message_in(&helper.chat_id, &a.id, "assistant", "Half", "interrupted", None).unwrap();
 
         assert_eq!(recover(&db).unwrap(), 1);
         let last = side::messages(&db, &cut.id).unwrap().pop().unwrap();
@@ -621,6 +616,11 @@ mod tests {
         assert!(note.text.starts_with("Scribe couldn't reply to your message: Grimoire closed"), "{}", note.text);
         assert!(note.text.contains(&format!("thread set to {}", cut.id)));
         assert_eq!(side::messages(&db, &finished.id).unwrap().len(), 1);
+        // The sender's CLI hears it with its next turn too.
+        let held: Vec<String> = db
+            .with(|c| c.prepare("SELECT text FROM pending_notes WHERE agent_id = 'a'")?.query_map([], |r| r.get(0))?.collect())
+            .unwrap();
+        assert_eq!(held, vec![note.text]);
         assert_eq!(recover(&db).unwrap(), 0, "each conversation closes once");
     }
 

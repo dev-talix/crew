@@ -250,7 +250,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 20;
+const SCHEMA_VERSION: i64 = 21;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -497,6 +497,22 @@ impl Db {
                 "BEGIN;
                  ALTER TABLE agents ADD COLUMN host TEXT;
                  PRAGMA user_version = 20;
+                 COMMIT;",
+            )?;
+        }
+        if version < 21 {
+            // Messages that came back while a familiar couldn't take a turn, for its next one (see runtime::hold).
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE pending_notes (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                   source TEXT NOT NULL,
+                   text TEXT NOT NULL,
+                   created_at INTEGER NOT NULL
+                 );
+                 CREATE INDEX pending_notes_by_agent ON pending_notes(agent_id, id);
+                 PRAGMA user_version = 21;
                  COMMIT;",
             )?;
         }

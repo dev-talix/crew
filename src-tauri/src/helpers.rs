@@ -242,9 +242,63 @@ impl Ending {
     }
 }
 
-/// Runs `turn` until it ends, `stop` fires, or `limit` passes. Then `halt` interrupts the CLI and the
-/// turn gets `GRACE` to wind down and save what it wrote.
-pub async fn supervise<Turn, Halt, Halted>(turn: Turn, stop: &Notify, limit: Duration, halt: Halt) -> Ending
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Phase {
+    Waiting,
+    Starting,
+    Started,
+    Cancelled,
+}
+
+/// Where a helper's turn is in starting its CLI turn, so a stop can cancel a turn that hasn't started
+/// and interrupt one that has, but never interrupt too early and let the turn start afterwards.
+pub struct Startup {
+    phase: Mutex<Phase>,
+    started: Notify,
+}
+
+impl Default for Startup {
+    fn default() -> Self {
+        Startup { phase: Mutex::new(Phase::Waiting), started: Notify::new() }
+    }
+}
+
+impl Startup {
+    fn phase(&self) -> std::sync::MutexGuard<'_, Phase> {
+        self.phase.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Called by the turn right before it starts the CLI turn. False when the helper already ended.
+    pub fn begin(&self) -> bool {
+        let mut phase = self.phase();
+        if *phase == Phase::Cancelled {
+            return false;
+        }
+        *phase = Phase::Starting;
+        true
+    }
+
+    /// Called once the CLI turn has started, or failed to.
+    pub fn started(&self) {
+        *self.phase() = Phase::Started;
+        self.started.notify_one();
+    }
+
+    /// Stops a turn that hasn't begun from ever starting. Returns the phase it was in.
+    fn cancel(&self) -> Phase {
+        let mut phase = self.phase();
+        let was = *phase;
+        if was == Phase::Waiting {
+            *phase = Phase::Cancelled;
+        }
+        was
+    }
+}
+
+/// Runs `turn` until it ends, `stop` fires, or `limit` passes. A turn that hasn't started its CLI turn
+/// is dropped and never starts. Otherwise `halt` interrupts the CLI, once the turn has finished
+/// starting, and the turn gets `GRACE` to wind down and save what it wrote.
+pub async fn supervise<Turn, Halt, Halted>(turn: Turn, stop: &Notify, limit: Duration, startup: &Startup, halt: Halt) -> Ending
 where
     Turn: Future<Output = TurnOutcome>,
     Halt: FnOnce() -> Halted,
@@ -252,14 +306,32 @@ where
 {
     tokio::pin!(turn);
     let ending = tokio::select! {
+        // A stop sent before the turn was first polled wins, so the turn never starts.
+        biased;
+        _ = stop.notified() => Ending::Stopped,
+        _ = tokio::time::sleep(limit) => Ending::TimedOut,
         outcome = &mut turn => return match outcome {
             TurnOutcome::Done(text) => Ending::Done(text),
             TurnOutcome::Failed(reason) => Ending::Failed(reason),
             TurnOutcome::Stopped => Ending::Stopped,
         },
-        _ = tokio::time::sleep(limit) => Ending::TimedOut,
-        _ = stop.notified() => Ending::Stopped,
     };
+    match startup.cancel() {
+        Phase::Waiting | Phase::Cancelled => return ending,
+        // An interrupt sent mid-start finds no turn to stop, so let the start finish first.
+        Phase::Starting => {
+            let started = async {
+                tokio::select! {
+                    _ = &mut turn => false,
+                    _ = startup.started.notified() => true,
+                }
+            };
+            if !tokio::time::timeout(GRACE, started).await.unwrap_or(false) {
+                return ending;
+            }
+        }
+        Phase::Started => {}
+    }
     halt().await;
     let _ = tokio::time::timeout(GRACE, &mut turn).await;
     ending
@@ -332,36 +404,25 @@ pub fn stop_for(db: &Db, agent_id: &str) {
     }
 }
 
-/// Sends a helper's result to its familiar. Like a `message_familiar` reply, it starts the familiar's
-/// next turn in the chat the helper started from, or waits in that chat if the person has moved on.
-fn deliver(runtime: &Arc<Runtime>, db: &Db, agent_id: &str, home: Option<String>, text: String, source: &str) {
-    match (crate::chats::current(db, agent_id), home) {
-        (Ok(now), home) if now == home => {
-            let _ = runtime.send(agent_id, text, Some(source));
-        }
-        (_, Some(home)) => {
-            let _ = db.insert_message_in(&home, agent_id, "user", &text, "done", Some(source));
-        }
-        _ => {}
-    }
-}
-
 /// Runs a saved helper in the background and reports back when it ends.
 fn launch(app: AppHandle, db: Arc<Db>, runtime: Arc<Runtime>, agent: Agent, helper: Helper) {
     let stop = Arc::new(Notify::new());
+    let startup = Startup::default();
     running().insert(helper.id.clone(), stop.clone());
     let home = crate::chats::current(&db, &agent.id).ok().flatten();
     tauri::async_runtime::spawn(async move {
         let key = side::lane_key(&agent.id, &helper.chat_id);
         let prompt = framed(&agent.name, &helper.task);
-        let turn = runtime.helper_turn(&helper.chat_id, &helper.task, &prompt);
-        let ending = supervise(turn, &stop, TIMEOUT, || runtime.stop_lane(&key)).await;
+        let turn = runtime.helper_turn(&helper.chat_id, &helper.task, &prompt, &startup);
+        let ending = supervise(turn, &stop, TIMEOUT, &startup, || runtime.stop_lane(&key)).await;
         runtime.forget_lane(&key);
         running().remove(&helper.id);
         let settled = settle(&db, &helper.id, ending.status(), ending.result());
         let _ = app.emit(EVENT, ());
         if settled == Ok(true) {
-            deliver(&runtime, &db, &agent.id, home, result_text(&helper, &ending), &format!("{SOURCE}{}", helper.label));
+            // Like a `message_familiar` reply: it starts the familiar's next turn in the chat the helper
+            // started from, or waits there and comes with its next turn.
+            runtime.deliver(&agent.id, home, result_text(&helper, &ending), &format!("{SOURCE}{}", helper.label));
         }
     });
 }
@@ -573,31 +634,73 @@ mod tests {
         assert!(signal_stop(&db, &mine).unwrap_err().contains("already ended"));
     }
 
+    /// A helper turn that takes `starting` to start its CLI turn, then `working` to finish it.
+    async fn helper_turn(startup: &Startup, starting: Duration, working: Duration) -> TurnOutcome {
+        if !startup.begin() {
+            return TurnOutcome::Stopped;
+        }
+        tokio::time::sleep(starting).await;
+        startup.started();
+        tokio::time::sleep(working).await;
+        TurnOutcome::Done("result".into())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn supervises_turns_with_a_timeout_and_a_stop() {
-        let halted = std::sync::atomic::AtomicUsize::new(0);
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let halted = AtomicUsize::new(0);
         let halt = || async {
-            halted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            halted.fetch_add(1, SeqCst);
         };
         let stop = Notify::new();
+        let startup = Startup::default();
         let done = std::future::ready(TurnOutcome::Done("result".into()));
-        assert_eq!(supervise(done, &stop, TIMEOUT, halt).await, Ending::Done("result".into()));
+        assert_eq!(supervise(done, &stop, TIMEOUT, &startup, halt).await, Ending::Done("result".into()));
         let failed = std::future::ready(TurnOutcome::Failed("boom".into()));
-        assert_eq!(supervise(failed, &stop, TIMEOUT, halt).await, Ending::Failed("boom".into()));
-        assert_eq!(halted.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(supervise(failed, &stop, TIMEOUT, &startup, halt).await, Ending::Failed("boom".into()));
+        assert_eq!(halted.load(SeqCst), 0);
 
-        let forever = std::future::pending::<TurnOutcome>();
-        assert_eq!(supervise(forever, &stop, TIMEOUT, halt).await, Ending::TimedOut);
-        assert_eq!(halted.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // A started turn that runs too long is interrupted and gets to wind down.
+        let startup = Startup::default();
+        let slow = helper_turn(&startup, Duration::ZERO, TIMEOUT * 2);
+        assert_eq!(supervise(slow, &stop, TIMEOUT, &startup, halt).await, Ending::TimedOut);
+        assert_eq!(halted.load(SeqCst), 1);
+    }
 
-        // A stop before the turn even waits still counts, and the turn gets to wind down.
-        stop.notify_one();
-        let winds_down = async {
-            tokio::time::sleep(Duration::from_secs(3600)).await;
-            TurnOutcome::Done("late".into())
+    #[tokio::test(start_paused = true)]
+    async fn a_helper_stopped_before_it_starts_never_starts() {
+        let stop = Notify::new();
+        let startup = Startup::default();
+        let began = std::sync::atomic::AtomicBool::new(false);
+        let turn = async {
+            began.store(true, std::sync::atomic::Ordering::SeqCst);
+            helper_turn(&startup, Duration::ZERO, Duration::from_secs(5)).await
         };
-        assert_eq!(supervise(winds_down, &stop, TIMEOUT, halt).await, Ending::Stopped);
-        assert_eq!(halted.load(std::sync::atomic::Ordering::SeqCst), 2);
+        stop.notify_one();
+        let ending = supervise(turn, &stop, TIMEOUT, &startup, || async { panic!("nothing to interrupt") }).await;
+        assert_eq!(ending, Ending::Stopped);
+        assert!(!began.load(std::sync::atomic::Ordering::SeqCst), "the turn was never polled");
+        assert!(!startup.begin(), "and can't start later");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_mid_start_interrupts_once_the_turn_has_started() {
+        let stop = Notify::new();
+        let startup = Startup::default();
+        let began = tokio::time::Instant::now();
+        let halted_at = Mutex::new(None);
+        let turn = helper_turn(&startup, Duration::from_secs(10), Duration::from_secs(3600));
+        let supervised = supervise(turn, &stop, TIMEOUT, &startup, || async {
+            *halted_at.lock().unwrap() = Some((began.elapsed(), *startup.phase()));
+        });
+        let stopper = async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            stop.notify_one();
+        };
+        let (ending, ()) = tokio::join!(supervised, stopper);
+        assert_eq!(ending, Ending::Stopped);
+        let (at, phase) = halted_at.into_inner().unwrap().expect("the started turn is interrupted");
+        assert_eq!((at, phase), (Duration::from_secs(10), Phase::Started), "not before it started");
     }
 
     #[test]

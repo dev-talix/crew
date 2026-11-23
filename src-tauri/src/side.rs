@@ -105,12 +105,13 @@ pub fn follow_up(db: &Db, thread: &str, asker: &Agent, target: &Agent) -> Result
 }
 
 /// Side conversations whose last exchange never finished: no messages yet, or a last message that
-/// isn't a finished reply or an error. Only meaningful at startup, before any side turn runs.
+/// isn't a finished reply or an error. Helpers' chats don't count: nobody waits on them for a reply.
+/// Only meaningful at startup, before any side turn runs.
 pub fn unfinished(db: &Db) -> Result<Vec<SideChat>, String> {
     db.with(|c| {
         let mut stmt = c.prepare(
             "SELECT id, agent_id, side_of, title, session_id, created_at, updated_at FROM chats c
-             WHERE side_of IS NOT NULL AND NOT EXISTS (
+             WHERE side_of IS NOT NULL AND id NOT IN (SELECT chat_id FROM helpers) AND NOT EXISTS (
                  SELECT 1 FROM messages m WHERE m.id = (SELECT MAX(id) FROM messages WHERE chat_id = c.id)
                  AND (m.role = 'error' OR (m.role = 'assistant' AND m.status IN ('done', 'stopped')))
              )",
@@ -311,6 +312,9 @@ mod tests {
         chat(&[("user", "done"), ("assistant", "done")]);
         chat(&[("user", "done"), ("assistant", "stopped")]);
         chat(&[("user", "done"), ("error", "done")]);
+        // A helper cut off mid-turn is the helpers list's to show, not a reply to deliver.
+        let (_, helper) = crate::helpers::create(&db, &a.id, None, &serde_json::json!({ "task": "x" })).unwrap();
+        db.insert_message_in(&helper.chat_id, &a.id, "assistant", "x", "interrupted", None).unwrap();
         let mut found: Vec<String> = unfinished(&db).unwrap().into_iter().map(|s| s.id).collect();
         let mut want = vec![empty, asked, mid_tool, cut_off];
         found.sort();

@@ -15,6 +15,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 type Pending = Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>;
 
+/// Numbers each app server Grimoire starts. JSON-RPC ids restart in every process, and several can
+/// run at once (one per remote workspace) or one after another, so approval keys carry this too.
+static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Default)]
 pub struct Route {
     tx: Option<EventTx>,
@@ -26,6 +30,7 @@ pub struct Route {
 }
 
 struct CodexProcess {
+    serial: u64,
     stdin: tokio::sync::Mutex<ChildStdin>,
     child: Mutex<Option<Child>>,
     next_id: AtomicU64,
@@ -325,6 +330,7 @@ impl Codex {
             stderr.collect(err);
         }
         let process = Arc::new(CodexProcess {
+            serial: NEXT_SERIAL.fetch_add(1, Ordering::Relaxed),
             stdin: tokio::sync::Mutex::new(stdin),
             child: Mutex::new(Some(child)),
             next_id: AtomicU64::new(1),
@@ -379,7 +385,7 @@ impl Codex {
                         let (id, process) = (id.clone(), process.clone());
                         tauri::async_runtime::spawn(async move {
                             let allowed = match agent {
-                                Some(key) => crate::permissions::check_command(crate::side::split(&key).0, &command, codex_request_key(&id)).await,
+                                Some(key) => crate::permissions::check_command(crate::side::split(&key).0, &command, codex_request_key(process.serial, &id)).await,
                                 None => false,
                             };
                             let decision = if allowed { "accept" } else { "decline" };
@@ -404,7 +410,7 @@ impl Codex {
             }
             (None, Some("serverRequest/resolved")) => {
                 // Codex settled a request on its own; take its card down.
-                crate::permissions::withdraw(&codex_request_key(&message["params"]["requestId"]));
+                crate::permissions::withdraw(&codex_request_key(process.serial, &message["params"]["requestId"]));
             }
             (None, Some(method)) => {
                 let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -432,9 +438,10 @@ impl Codex {
     }
 }
 
-/// The approval id for a Codex server request, so a later `serverRequest/resolved` can find it.
-fn codex_request_key(id: &Value) -> String {
-    format!("codex-{id}")
+/// The approval id for request `id` from app server `serial`, so a later `serverRequest/resolved`
+/// from the same server can find it.
+fn codex_request_key(serial: u64, id: &Value) -> String {
+    format!("codex-{serial}-{id}")
 }
 
 fn unwrap_shell(command: &str) -> &str {
@@ -611,6 +618,14 @@ mod tests {
                 ProviderEvent::Done,
             ]
         );
+    }
+
+    #[test]
+    fn approval_keys_tell_app_servers_apart() {
+        let (one, two) = (NEXT_SERIAL.fetch_add(1, Ordering::Relaxed), NEXT_SERIAL.fetch_add(1, Ordering::Relaxed));
+        assert_ne!(codex_request_key(one, &json!(0)), codex_request_key(two, &json!(0)), "both servers start counting at 0");
+        assert_eq!(codex_request_key(one, &json!(0)), codex_request_key(one, &json!(0)));
+        assert_ne!(codex_request_key(one, &json!(0)), codex_request_key(one, &json!("0")));
     }
 
     #[test]

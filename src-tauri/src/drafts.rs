@@ -415,8 +415,14 @@ pub fn close_draft(app: AppHandle, state: State<AppState>, id: String, sent: boo
     let outcome = if sent { DraftState::Sent } else { DraftState::Discarded };
     let (draft, text) = close(&state.db, &id, outcome, edits)?;
     let _ = app.emit(CHANGED, ());
-    // The familiar may be gone or busy; the draft is closed either way, and a busy familiar gets it next.
-    let _ = state.runtime.send(&draft.agent_id, text, Some(source(outcome)));
+    // The draft is closed either way. A busy familiar gets the outcome next; one that can't take a turn,
+    // say over its budget, gets it with its next turn. A deleted familiar gets nothing.
+    if state.runtime.send(&draft.agent_id, text.clone(), Some(source(outcome))).is_err() {
+        use crate::runtime::Sink;
+        if let Ok(row) = crate::runtime::hold(&state.db, &draft.agent_id, None, &text, source(outcome)) {
+            app.message(&row);
+        }
+    }
     Ok(draft)
 }
 
