@@ -337,19 +337,27 @@ fn open_workspace(app: AppHandle, state: State<AppState>, agent_id: String) -> R
     app.opener().open_path(&agent.workspace, None::<&str>).map_err(|e| e.to_string())
 }
 
+/// Deletes a familiar. One on a linked Mac is deleted there, so that Mac must be online.
 #[tauri::command]
 async fn delete_agent(app: AppHandle, state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
-    link::local_only(&agent_id)?;
-    helpers::stop_for(&state.db, &agent_id);
-    app.state::<Arc<rooms::AppRooms>>().forget_familiar(&agent_id).await;
-    state.runtime.remove_agent(&agent_id).await?;
-    if let Ok(dir) = app.path().app_data_dir() {
-        attachments::remove_for_agent(&state.db, &attachments::root(&dir), &agent_id);
+    if link::is_remote(&agent_id) {
+        return link::delete(&agent_id).await;
     }
-    state.db.delete_agent(&agent_id)?;
+    remove_agent(&app, &state.db, &state.runtime, &agent_id).await
+}
+
+/// Deletes one of this Mac's familiars and everything kept for it, for the window or for a linked Mac.
+async fn remove_agent(app: &AppHandle, db: &Db, runtime: &Arc<Runtime>, agent_id: &str) -> Result<(), String> {
+    helpers::stop_for(db, agent_id);
+    app.state::<Arc<rooms::AppRooms>>().forget_familiar(agent_id).await;
+    runtime.remove_agent(agent_id).await?;
+    if let Ok(dir) = app.path().app_data_dir() {
+        attachments::remove_for_agent(db, &attachments::root(&dir), agent_id);
+    }
+    db.delete_agent(agent_id)?;
     // After the row is gone, so a browser_open racing the delete finds no familiar to start for.
-    browser::forget(&agent_id).await;
-    memory::forget(&state.db, memory::Owner { scope: memory::Scope::Familiar, id: &agent_id })?;
+    browser::forget(agent_id).await;
+    memory::forget(db, memory::Owner { scope: memory::Scope::Familiar, id: agent_id })?;
     let _ = app.emit("agents_changed", ());
     Ok(())
 }
