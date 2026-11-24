@@ -14,6 +14,8 @@ pub struct Head {
     pub length: Option<usize>,
     pub chunked: bool,
     pub authorization: Option<String>,
+    pub host: Option<String>,
+    pub content_type: Option<String>,
 }
 
 pub fn parse_head(head: &str) -> Option<Head> {
@@ -31,6 +33,8 @@ pub fn parse_head(head: &str) -> Option<Head> {
         length: None,
         chunked: false,
         authorization: None,
+        host: None,
+        content_type: None,
     };
     for line in lines.filter(|l| !l.is_empty()) {
         let (name, value) = line.split_once(':')?;
@@ -41,6 +45,10 @@ pub fn parse_head(head: &str) -> Option<Head> {
             head.chunked = !value.eq_ignore_ascii_case("identity");
         } else if name.eq_ignore_ascii_case("authorization") {
             head.authorization = Some(value.into());
+        } else if name.eq_ignore_ascii_case("host") {
+            head.host = Some(value.into());
+        } else if name.eq_ignore_ascii_case("content-type") {
+            head.content_type = Some(value.into());
         }
     }
     Some(head)
@@ -109,7 +117,13 @@ pub async fn read_request<S: AsyncRead + Unpin>(
 
 /// Writes a whole response and closes the connection.
 pub async fn reply<S: AsyncWrite + Unpin>(stream: &mut S, status: &str, content_type: &str, body: &[u8]) {
-    let head = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+    reply_with(stream, status, content_type, &[], body).await
+}
+
+/// `reply` with more headers, each a name and a value.
+pub async fn reply_with<S: AsyncWrite + Unpin>(stream: &mut S, status: &str, content_type: &str, headers: &[(&str, &str)], body: &[u8]) {
+    let extra: String = headers.iter().map(|(name, value)| format!("{name}: {value}\r\n")).collect();
+    let head = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n", body.len());
     let _ = stream.write_all(head.as_bytes()).await;
     let _ = stream.write_all(body).await;
     let _ = stream.shutdown().await;
@@ -131,6 +145,8 @@ mod tests {
                 length: Some(12),
                 chunked: false,
                 authorization: Some("Bearer t".into()),
+                host: Some("127.0.0.1".into()),
+                content_type: None,
             }
         );
         assert!(parse_head("POST /hooks/abc HTTP/1.1\r\nTransfer-Encoding: chunked").unwrap().chunked);

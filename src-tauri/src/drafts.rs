@@ -4,10 +4,12 @@
 //! gets a short message saying so, with any edits they made.
 
 use crate::db::{now_ms, Agent, Db};
+use crate::runtime::Runtime;
 use crate::AppState;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_opener::OpenerExt;
 
@@ -410,20 +412,25 @@ pub fn list_drafts(state: State<AppState>) -> Result<Vec<Draft>, String> {
     list(&state.db)
 }
 
-#[tauri::command]
-pub fn close_draft(app: AppHandle, state: State<AppState>, id: String, sent: bool, edits: Option<Edits>) -> Result<Draft, String> {
+/// Closes a draft and tells the familiar that wrote it, which the draft itself names.
+pub(crate) fn finish(app: &AppHandle, db: &Db, runtime: &Arc<Runtime>, id: &str, sent: bool, edits: Option<Edits>) -> Result<Draft, String> {
     let outcome = if sent { DraftState::Sent } else { DraftState::Discarded };
-    let (draft, text) = close(&state.db, &id, outcome, edits)?;
+    let (draft, text) = close(db, id, outcome, edits)?;
     let _ = app.emit(CHANGED, ());
     // The draft is closed either way. A busy familiar gets the outcome next; one that can't take a turn,
     // say over its budget, gets it with its next turn. A deleted familiar gets nothing.
-    if state.runtime.send(&draft.agent_id, text.clone(), Some(source(outcome))).is_err() {
+    if runtime.send(&draft.agent_id, text.clone(), Some(source(outcome))).is_err() {
         use crate::runtime::Sink;
-        if let Ok(row) = crate::runtime::hold(&state.db, &draft.agent_id, None, &text, source(outcome)) {
+        if let Ok(row) = crate::runtime::hold(db, &draft.agent_id, None, &text, source(outcome)) {
             app.message(&row);
         }
     }
     Ok(draft)
+}
+
+#[tauri::command]
+pub fn close_draft(app: AppHandle, state: State<AppState>, id: String, sent: bool, edits: Option<Edits>) -> Result<Draft, String> {
+    finish(&app, &state.db, &state.runtime, &id, sent, edits)
 }
 
 /// Opens a waiting draft's mailto: link, built by the window with the person's edits, or the Slack app.

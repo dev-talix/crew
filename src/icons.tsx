@@ -248,6 +248,13 @@ export const TrashIcon = () => (
 );
 
 /** Two laptops joined by a line: Macs linked to each other. */
+export const PhoneIcon = () => (
+  <Icon>
+    <rect x="4" y="1.5" width="8" height="13" rx="1.6" />
+    <path d="M7 12.2h2" />
+  </Icon>
+);
+
 export const LinkIcon = () => (
   <Icon>
     <rect x="1.5" y="3" width="5" height="4" rx="0.8" />

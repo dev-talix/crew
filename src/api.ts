@@ -79,6 +79,31 @@ export interface PairingCode {
   addresses: string[];
 }
 
+/** A phone paired with this Mac's phone companion. */
+export interface PairedPhone {
+  id: string;
+  name: string;
+  createdAt: number;
+  lastSeen: number | null;
+}
+
+/** The phone companion's server on the tailnet, and the phones paired with it. */
+export interface CompanionStatus {
+  listening: boolean;
+  /** Addresses a phone opens, like http://100.101.102.103:47621. */
+  urls: string[];
+  error: string | null;
+  phones: PairedPhone[];
+}
+
+/** A one-time code a phone enters to pair. */
+export interface PhonePairingCode {
+  code: string;
+  expiresAt: number;
+  urls: string[];
+  error: string | null;
+}
+
 /** What the host badge says about a remote familiar's Mac, or null when there's nothing to flag. */
 export function hostState(agent: Pick<Agent, "setupPending" | "offline" | "home">): "Setup pending" | "Offline" | null {
   if (agent.home) return agent.home.online ? null : "Offline";
@@ -672,6 +697,9 @@ export const api = {
   /** Marks a draft sent, with the person's edits, or discarded. The familiar hears which. */
   closeDraft: (id: string, sent: boolean, edits: DraftEdits | null) => invoke<Draft>("close_draft", { id, sent, edits }),
   openDraftLink: (id: string, url: string) => invoke<void>("open_draft_link", { id, url }),
+  companionStatus: () => invoke<CompanionStatus>("companion_status"),
+  companionStartPairing: () => invoke<PhonePairingCode>("companion_start_pairing"),
+  companionRemove: (phoneId: string) => invoke<void>("companion_remove", { phoneId }),
   linkStatus: () => invoke<LinkStatus>("link_status"),
   linkStartPairing: () => invoke<PairingCode>("link_start_pairing"),
   linkPair: (address: string, code: string) => invoke<Peer>("link_pair", { address, code }),
@@ -748,7 +776,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload" | "browser_changed" | "browser_frame",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload" | "companion_changed" | "browser_changed" | "browser_frame",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

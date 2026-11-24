@@ -34,7 +34,7 @@ pub const REMOTE_PREFIX: &str = "peer:";
 const BODY_LIMIT: usize = 1024 * 1024;
 const RESPONSE_LIMIT: u64 = 32 * 1024 * 1024;
 const RING: usize = 1000;
-const LONG_POLL: Duration = Duration::from_secs(25);
+pub(crate) const LONG_POLL: Duration = Duration::from_secs(25);
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a connection without a token yet may take to send its request.
 const PRE_AUTH_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -43,12 +43,12 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 const BIND_RETRY: Duration = Duration::from_secs(60);
 const BACKOFF_MIN: Duration = Duration::from_secs(5);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
-const CODE_TTL: Duration = Duration::from_secs(10 * 60);
-const CODE_TRIES: u8 = 5;
+pub(crate) const CODE_TTL: Duration = Duration::from_secs(10 * 60);
+pub(crate) const CODE_TRIES: u8 = 5;
 const CODE_LEN: usize = 8;
 /// No 0, O, 1, or I, so a code read aloud can't be misheard.
 const CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const PAIR_PER_MINUTE: usize = 20;
+pub(crate) const PAIR_PER_MINUTE: usize = 20;
 /// Connections from linked Macs, once their token checks out.
 const MAX_CONNECTIONS: usize = 64;
 /// Connections that haven't shown a token yet, pairing included.
@@ -337,18 +337,18 @@ fn valid_token(token: &str) -> bool {
 }
 
 /// 244 random bits from the system's generator.
-fn new_token() -> String {
+pub(crate) fn new_token() -> String {
     format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
 }
 
-fn new_code() -> String {
+pub(crate) fn new_code() -> String {
     let bytes = *uuid::Uuid::new_v4().as_bytes();
     // Bytes 6 and 8 carry the uuid's version and variant; the rest are random.
     [0, 1, 2, 3, 4, 5, 10, 11].iter().map(|&i| CODE_ALPHABET[(bytes[i] % 32) as usize] as char).collect()
 }
 
 /// A code as typed, without spaces or dashes and in capitals.
-fn normalize_code(code: &str) -> String {
+pub(crate) fn normalize_code(code: &str) -> String {
     code.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
 }
 
@@ -457,25 +457,25 @@ fn install_id(db: &Db) -> Result<String, String> {
 // ---------- Event log ----------
 
 /// Recent events about this Mac's familiars, numbered, for linked Macs to long-poll.
-struct EventLog {
-    epoch: String,
+pub(crate) struct EventLog {
+    pub(crate) epoch: String,
     ring: Mutex<(u64, VecDeque<(u64, Value)>)>,
     notify: Notify,
 }
 
-struct Batch {
-    seq: u64,
-    events: Vec<Value>,
+pub(crate) struct Batch {
+    pub(crate) seq: u64,
+    pub(crate) events: Vec<Value>,
     /// The caller missed events, or asked about a sequence this log never had.
-    reset: bool,
+    pub(crate) reset: bool,
 }
 
 impl EventLog {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         EventLog { epoch: uuid::Uuid::new_v4().simple().to_string(), ring: Mutex::new((0, VecDeque::new())), notify: Notify::new() }
     }
 
-    fn push(&self, kind: &str, payload: Value) {
+    pub(crate) fn push(&self, kind: &str, payload: Value) {
         if let Ok(mut ring) = self.ring.lock() {
             ring.0 += 1;
             let seq = ring.0;
@@ -487,7 +487,7 @@ impl EventLog {
         self.notify.notify_waiters();
     }
 
-    fn head(&self) -> u64 {
+    pub(crate) fn head(&self) -> u64 {
         self.ring.lock().map(|r| r.0).unwrap_or(0)
     }
 
@@ -507,7 +507,7 @@ impl EventLog {
     }
 
     /// Waits up to `wait` for events after `after`.
-    async fn wait(&self, after: u64, wait: Duration) -> Batch {
+    pub(crate) async fn wait(&self, after: u64, wait: Duration) -> Batch {
         let deadline = Instant::now() + wait;
         loop {
             let notified = self.notify.notified();
@@ -810,7 +810,7 @@ impl Link {
     }
 
     /// Asks Tailscale again for this Mac's addresses and its peers. None when its CLI isn't found.
-    async fn check_tailnet(&self) -> Option<Vec<IpAddr>> {
+    pub(crate) async fn check_tailnet(&self) -> Option<Vec<IpAddr>> {
         let status = self.tailnet.status().await;
         let view = TailnetView::new(status.as_ref().map(Option::as_deref).map_err(|e| *e));
         let own = view.cli.then(|| view.own.clone());
@@ -822,7 +822,7 @@ impl Link {
 
     /// Whether `ip` is a peer on the tailnet. An address Tailscale didn't list sends this Mac back to
     /// ask it again, at most every TAILNET_RECHECK, in case the device just joined.
-    async fn trusts(&self, ip: IpAddr) -> bool {
+    pub(crate) async fn trusts(&self, ip: IpAddr) -> bool {
         let recheck = match self.view.lock() {
             Ok(mut slot) => {
                 if slot.0.trusts(ip) {
