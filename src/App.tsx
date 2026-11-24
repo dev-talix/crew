@@ -20,7 +20,7 @@ import { groupByHome, homeOffline, isRemote, reloadsOpenChat } from "./linked";
 import { runningModelName } from "./models";
 import { createMoods } from "./moods";
 import { ClockIcon, GearIcon, HomeIcon, PlusIcon, TalkIcon } from "./icons";
-import { Sheet } from "./ui";
+import { SidePanel } from "./ui";
 import { shownIcon } from "./themeStore";
 import { startUpdateChecks, updateCheck } from "./updateStore";
 import type { SettingsSection } from "./SettingsPage";
@@ -52,7 +52,11 @@ export default function App() {
     setSummonCount((n) => n + 1);
     setView("new");
   };
-  const [editing, setEditing] = createSignal(false);
+  // Counts familiar settings openings, 0 when closed, so a slow save closes only the opening it came from.
+  const [editing, setEditing] = createSignal(0);
+  // The gear that opened familiar settings. WebKit doesn't focus a clicked button, so it's kept here to hand focus back.
+  let settingsOpener: HTMLElement | undefined;
+  let openings = 0;
   const [memoryOpen, setMemoryOpen] = createSignal(false);
   const [loaded, setLoaded] = createSignal(false);
   const [loadError, setLoadError] = createSignal("");
@@ -108,7 +112,7 @@ export default function App() {
     setUnread((u) => {
       u[id] = false;
     });
-    setEditing(false);
+    setEditing(0);
     setMemoryOpen(false);
     setView({ agent: id });
   };
@@ -211,15 +215,17 @@ export default function App() {
 
   const replaceAgent = (agent: Agent) => setAgents((list) => list.map((a) => (a.id === agent.id ? agent : a)));
 
-  const updated = (agent: Agent) => {
+  // A save or delete can finish after the user moved to another familiar; only the open one's view changes.
+  const updated = (agent: Agent, opening: number) => {
     replaceAgent(agent);
-    setEditing(false);
+    if (agent.id === selected() && editing() === opening) setEditing(0);
   };
 
   const deleted = (id: string) => {
     const rest = agents().filter((a) => a.id !== id);
     setAgents(rest);
-    setEditing(false);
+    if (id !== selected()) return;
+    setEditing(0);
     setView(rest.length ? "home" : "new");
   };
 
@@ -358,16 +364,27 @@ export default function App() {
                     busy={!!busy[agent().id]}
                     mood={moodOf(agent().id)}
                     store={chat}
-                    onEdit={() => setEditing(true)}
+                    onEdit={(opener) => {
+                      settingsOpener = opener;
+                      if (!editing()) setEditing(++openings);
+                    }}
                     onMemory={() => setMemoryOpen(true)}
                     onAgentUpdated={replaceAgent}
                     intent={chatIntent()}
                     onIntentDone={() => setChatIntent(null)}
                   />
-                  <Show when={editing()}>
-                    <Sheet label="Familiar settings" wide onClose={() => setEditing(false)}>
-                      <AgentForm agent={agent()} covens={covens()} onSaved={updated} onCancel={() => setEditing(false)} onDeleted={deleted} />
-                    </Sheet>
+                  <Show when={editing()} keyed>
+                    {(opening) => (
+                      <SidePanel label="Familiar settings" opener={settingsOpener} onClose={() => setEditing(0)}>
+                        <AgentForm
+                          agent={agent()}
+                          covens={covens()}
+                          onSaved={(saved) => updated(saved, opening)}
+                          onCancel={() => setEditing(0)}
+                          onDeleted={deleted}
+                        />
+                      </SidePanel>
+                    )}
                   </Show>
                   <Show when={memoryOpen()}>
                     <MemorySheet agent={agent()} agents={agents()} covens={covens()} onClose={() => setMemoryOpen(false)} />
