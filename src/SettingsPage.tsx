@@ -318,7 +318,7 @@ function GeneralSettings(props: { agents: Agent[] }) {
                 Grimoire keeps its data on this Mac in <code>~/Library/Application Support/dev.talix.grimoire</code>.
               </p>
             </div>
-            <span class="settings-value">Version {appVersion() ?? "0.4.0"}</span>
+            <span class="settings-value">Version {appVersion() ?? "0.5.0"}</span>
           </div>
         </div>
       </div>
@@ -454,7 +454,7 @@ export default function SettingsPage(props: { section?: SettingsSection; agents:
           <UsagePage agents={props.agents} />
         </Match>
         <Match when={section() === "updates"}>
-          <UpdatesPage version={appVersion() ?? "0.4.0"} />
+          <UpdatesPage version={appVersion() ?? "0.5.0"} />
         </Match>
       </Switch>
     </div>
