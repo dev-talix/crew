@@ -203,6 +203,12 @@ export default function App() {
     if (agent.setupPending) void api.listAgents().then(setAgents, () => {});
   };
 
+  const imported = (id: string) =>
+    void api.listAgents().then((list) => {
+      setAgents(list);
+      openAgent(id);
+    }, () => {});
+
   const replaceAgent = (agent: Agent) => setAgents((list) => list.map((a) => (a.id === agent.id ? agent : a)));
 
   const updated = (agent: Agent) => {
@@ -372,7 +378,7 @@ export default function App() {
             <Match when={is("new")}>
               <div class="form-page" data-tauri-drag-region>
                 <Show when={summonCount()} keyed>
-                  {(_count) => <AgentForm covens={covens()} onSaved={created} onCancel={agents().length ? () => setView("home") : undefined} />}
+                  {(_count) => <AgentForm covens={covens()} onSaved={created} onImported={imported} onCancel={agents().length ? () => setView("home") : undefined} />}
                 </Show>
               </div>
             </Match>

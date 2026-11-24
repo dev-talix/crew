@@ -52,7 +52,7 @@ pub struct GrimoireFile {
 }
 
 impl GrimoireFile {
-    fn new(kind: Kind) -> Self {
+    pub fn new(kind: Kind) -> Self {
         GrimoireFile {
             kind,
             version: VERSION,

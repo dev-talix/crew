@@ -6,6 +6,7 @@ import type { ThemeFile } from "./theme";
 import type { Memory, MemoryDraft, MemoryKind, MemoryScope } from "./memory";
 import type * as Budgets from "./budgets";
 import type * as Transfer from "./transfer";
+import type * as Templates from "./templates";
 import type { Ledger } from "./ledgers";
 
 export type Provider = "codex" | "claude";
@@ -369,6 +370,11 @@ export type DockEdge = "off" | "left" | "right";
 export interface Settings {
   claudeBilling: "subscription" | "api";
   dockEdge: DockEdge;
+  quickAskEnabled: boolean;
+  /** Like "CommandOrControl+Shift+Space". */
+  quickAskShortcut: string;
+  /** Why the shortcut didn't register at launch. */
+  quickAskError?: string | null;
 }
 
 export interface NotificationPrefs {
@@ -548,6 +554,9 @@ export const api = {
   dockHidden: () => invoke<string[]>("dock_hidden"),
   setDockHidden: (ids: string[]) => invoke<string[]>("set_dock_hidden", { ids }),
   showMain: (agentId?: string) => invoke<void>("show_main", { agentId: agentId ?? null }),
+  quickHide: () => invoke<void>("quick_hide"),
+  quickAgent: () => invoke<string | null>("quick_agent"),
+  setQuickAgent: (agentId: string) => invoke<void>("set_quick_agent", { agentId }),
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
   providerStatus: () => invoke<ProviderStatus[]>("provider_status"),
@@ -631,6 +640,10 @@ export const api = {
   linkStartPairing: () => invoke<PairingCode>("link_start_pairing"),
   linkPair: (address: string, code: string) => invoke<Peer>("link_pair", { address, code }),
   linkUnlink: (peerId: string) => invoke<void>("link_unlink", { peerId }),
+  marketplaceCatalog: () => invoke<Templates.MarketTemplate[]>("marketplace_catalog"),
+  marketplaceTemplate: (link: string) => invoke<Templates.MarketTemplate>("marketplace_template", { link }),
+  /** Creates a familiar from a reviewed template and returns its id. */
+  importTemplate: (draft: Templates.TemplateDraft) => invoke<string>("import_template", { draft }),
 };
 
 export interface InboxOption {

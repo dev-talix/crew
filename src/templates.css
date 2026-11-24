@@ -1,0 +1,149 @@
+/* Importing a Grok Bot marketplace template: pick one, then review it. */
+
+.template-pick,
+.template-review {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.template-link {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.template-link .field {
+  flex: 1;
+}
+
+.template-search {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.template-list {
+  max-height: 46vh;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.template-card {
+  width: 100%;
+  align-items: flex-start;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.template-card:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.template-card .list-sub {
+  white-space: normal;
+}
+
+.template-review a {
+  color: var(--accent);
+}
+
+.template-by {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.template-asks ul:first-of-type {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.template-usage {
+  margin-left: 6px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.template-usage.over,
+.template-warn {
+  color: var(--danger);
+}
+
+.template-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.list-row.template-row {
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.template-row > input[type="checkbox"] {
+  margin-top: 4px;
+  accent-color: var(--accent);
+}
+
+.template-row.off .list-main {
+  opacity: 0.55;
+}
+
+.template-row .list-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.template-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.template-row select,
+.template-row textarea,
+.template-ritual-name {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.template-row textarea {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.template-ritual-name {
+  padding: 5px 8px;
+  font-weight: 600;
+}
+
+.template-row .list-sub {
+  white-space: normal;
+}
+
+.agent-form .template-entry {
+  align-self: center;
+  margin-top: -6px;
+}
