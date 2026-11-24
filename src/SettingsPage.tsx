@@ -9,8 +9,9 @@ import { BackupSection } from "./ImportExport";
 import { appIcon, readMode, setAppIcon, setMode, type AppIconSetting, type ModeSetting } from "./themeStore";
 import nightIcon from "./assets/icon-night.svg";
 import paperIcon from "./assets/icon-paper.svg";
-import { BarsIcon, BellIcon, CloseIcon, DownloadIcon, GearIcon, LinkIcon, PaletteIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
+import { BarsIcon, BellIcon, CloseIcon, DownloadIcon, GearIcon, LinkIcon, PaletteIcon, PhoneIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
 import LinkedMacsPage from "./LinkedMacsPage";
+import PhonePage from "./PhonePage";
 import { shortcutFromKey, shortcutLabel } from "./quick";
 import NotificationsPage from "./NotificationsPage";
 import UpdatesPage from "./UpdatesPage";
@@ -380,7 +381,7 @@ function AppearanceSettings() {
   );
 }
 
-export type SettingsSection = "general" | "appearance" | "notifications" | "vault" | "permissions" | "links" | "usage" | "updates";
+export type SettingsSection = "general" | "appearance" | "notifications" | "vault" | "permissions" | "links" | "phone" | "usage" | "updates";
 
 /** The sections, with words the ⌘K palette also finds them by. */
 export const SETTINGS_SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element; keywords: string }[] = [
@@ -390,6 +391,7 @@ export const SETTINGS_SECTIONS: { id: SettingsSection; label: string; icon: () =
   { id: "vault", label: "Vault", icon: VaultIcon, keywords: "keychain passwords logins api keys cards secrets" },
   { id: "permissions", label: "Permissions", icon: ShieldIcon, keywords: "approvals rules commands ask allow" },
   { id: "links", label: "Linked Macs", icon: LinkIcon, keywords: "link pair tailscale tailnet other mac devices" },
+  { id: "phone", label: "Phone", icon: PhoneIcon, keywords: "phone iphone android mobile companion pair tailscale" },
   { id: "usage", label: "Usage", icon: BarsIcon, keywords: "tokens plan limits rate" },
   { id: "updates", label: "Updates", icon: DownloadIcon, keywords: "version release download" },
 ];
@@ -439,6 +441,9 @@ export default function SettingsPage(props: { section?: SettingsSection; agents:
         </Match>
         <Match when={section() === "links"}>
           <LinkedMacsPage />
+        </Match>
+        <Match when={section() === "phone"}>
+          <PhonePage />
         </Match>
         <Match when={section() === "usage"}>
           <UsagePage agents={props.agents} />
