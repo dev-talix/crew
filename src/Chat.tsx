@@ -8,6 +8,7 @@ import { AttachButton, createComposerFiles, DropOverlay, MessageAttachments, Pen
 import type { ChatStore } from "./chatStore";
 import Ledger from "./Ledger";
 import Helpers from "./Helpers";
+import BrowserPanel from "./BrowserPanel";
 import ModelPicker from "./ModelPicker";
 import { HostBadge } from "./ui";
 import { homeOffline, isRemote, offlineNotice, remoteSideLabel } from "./linked";
@@ -531,6 +532,9 @@ export default function Chat(props: {
         <div class="bar-actions">
           <Show when={!remote()}>
             <Helpers agent={props.agent} />
+          </Show>
+          <Show when={!remote() && !props.agent.host}>
+            <BrowserPanel agent={props.agent} />
           </Show>
           <Show when={props.compact}>
             {(compact) => (

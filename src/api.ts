@@ -519,6 +519,33 @@ export interface Helper {
   finishedAt: number | null;
 }
 
+/** A familiar's own headless browser. */
+export interface BrowserStatus {
+  agentId: string;
+  running: boolean;
+  /** Who drives it. The familiar waits while the person has control. */
+  control: "familiar" | "person";
+  url: string | null;
+  title: string | null;
+  /** Like "Google Chrome for Testing". */
+  browser: string | null;
+}
+
+/** Input the person sends while they have control. Points are page CSS pixels; modifiers are Alt=1, Ctrl=2, Meta=4, Shift=8. */
+export type BrowserInput =
+  | { kind: "click"; x: number; y: number }
+  | { kind: "scroll"; x: number; y: number; deltaY: number }
+  | { kind: "text"; text: string }
+  | { kind: "key"; key: string; modifiers: number };
+
+/** A screencast frame: a base64 JPEG of the page's viewport, sized in CSS pixels. */
+export interface BrowserFrame {
+  agentId: string;
+  data: string;
+  width: number;
+  height: number;
+}
+
 export const api = {
   listAgents: () => invoke<Agent[]>("list_agents"),
   busyAgents: () => invoke<string[]>("busy_agents"),
@@ -644,6 +671,15 @@ export const api = {
   marketplaceTemplate: (link: string) => invoke<Templates.MarketTemplate>("marketplace_template", { link }),
   /** Creates a familiar from a reviewed template and returns its id. */
   importTemplate: (draft: Templates.TemplateDraft) => invoke<string>("import_template", { draft }),
+  browserStatus: (agentId: string) => invoke<BrowserStatus>("browser_status", { agentId }),
+  browserStart: (agentId: string) => invoke<BrowserStatus>("browser_start", { agentId }),
+  browserStop: (agentId: string) => invoke<void>("browser_stop", { agentId }),
+  /** The newest live view frame, for a panel that opens after the page stopped changing. */
+  browserFrame: (agentId: string) => invoke<BrowserFrame | null>("browser_frame", { agentId }),
+  /** True takes over from the familiar, false hands it back. */
+  browserControl: (agentId: string, person: boolean) => invoke<BrowserStatus>("browser_control", { agentId, person }),
+  browserNavigate: (agentId: string, url: string) => invoke<void>("browser_navigate", { agentId, url }),
+  browserInput: (agentId: string, input: BrowserInput) => invoke<void>("browser_input", { agentId, input }),
 };
 
 export interface InboxOption {
@@ -703,7 +739,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload" | "browser_changed" | "browser_frame",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));
