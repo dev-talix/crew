@@ -196,6 +196,68 @@ export interface Handoff {
   status: HandoffStatus;
 }
 
+export interface RoomMember {
+  agentId: string;
+  name: string;
+}
+
+/** A shared thread where the person and several familiars talk, one familiar at a time. */
+export interface Room {
+  id: string;
+  title: string;
+  members: RoomMember[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface RoomMessage {
+  id: number;
+  roomId: string;
+  /** The familiar who wrote it; null for the person, or once that familiar is deleted. */
+  agentId: string | null;
+  /** The familiar's name when it wrote. */
+  name: string | null;
+  /** "pass" is a familiar handing the floor to `targetId`; "note" is from Grimoire, like a pause. */
+  kind: "user" | "reply" | "tool" | "pass" | "note" | "error";
+  text: string;
+  status: "done" | "streaming" | "stopped" | "interrupted";
+  targetId: string | null;
+  targetName: string | null;
+  /** Whether `roomPrompt` can show what the familiar was sent for this reply. */
+  hasPrompt: boolean;
+  createdAt: number;
+}
+
+export interface RoomPage {
+  messages: RoomMessage[];
+  /** Whether earlier messages are left to load. */
+  hasOlder: boolean;
+}
+
+export interface RoomThread extends RoomPage {
+  room: Room;
+  /** The familiar replying now, and who waits for the floor after it. */
+  speaking: string | null;
+  queue: string[];
+}
+
+export interface RoomMessageEvent {
+  roomId: string;
+  message: RoomMessage;
+}
+
+export interface RoomDeltaEvent {
+  roomId: string;
+  messageId: number;
+  chunk: string;
+}
+
+export interface RoomFloorEvent {
+  roomId: string;
+  speaking: string | null;
+  queue: string[];
+}
+
 export interface SideMessageEvent {
   chatId: string;
   message: Message;
@@ -600,6 +662,14 @@ export const api = {
   sideThread: (chatId: string) => invoke<SideThread>("side_thread", { chatId }),
   /** The latest familiar to familiar handoffs, newest first. */
   listHandoffs: () => invoke<Handoff[]>("list_handoffs"),
+  listRooms: () => invoke<Room[]>("list_rooms"),
+  createRoom: (title: string, agentIds: string[]) => invoke<Room>("create_room", { title, agentIds }),
+  roomThread: (roomId: string) => invoke<RoomThread>("room_thread", { roomId }),
+  roomHistory: (roomId: string, beforeId: number) => invoke<RoomPage>("room_history", { roomId, beforeId }),
+  roomSend: (roomId: string, text: string) => invoke<RoomMessage>("room_send", { roomId, text }),
+  roomStop: (roomId: string) => invoke<void>("room_stop", { roomId }),
+  deleteRoom: (roomId: string) => invoke<void>("delete_room", { roomId }),
+  roomPrompt: (messageId: number) => invoke<string>("room_prompt", { messageId }),
   lastMessages: () => invoke<Message[]>("last_messages"),
   listModels: (provider: Provider) => invoke<ModelOption[]>("list_models", { provider }),
   dockEdge: () => invoke<"left" | "right" | null>("dock_edge"),
@@ -785,7 +855,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload" | "companion_changed" | "browser_changed" | "browser_frame" | "connectors_changed",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload" | "companion_changed" | "browser_changed" | "browser_frame" | "connectors_changed" | "rooms_changed" | "room_message" | "room_delta" | "room_floor",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

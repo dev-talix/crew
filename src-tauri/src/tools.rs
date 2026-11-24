@@ -660,7 +660,8 @@ async fn handle_connection(stream: UnixStream, ctx: Arc<Context>) {
                 // A familiar answering in a side conversation calls as "familiar~chat".
                 let (caller, lane) = crate::side::split(&request.agent);
                 let caller = caller.to_string();
-                let result = if let Err(e) = crate::helpers::check_lane(&ctx.db, lane, &request.tool) {
+                let checked = crate::helpers::check_lane(&ctx.db, lane, &request.tool).and_then(|()| crate::rooms::check_lane(lane, &request.tool));
+                let result = if let Err(e) = checked {
                     Err(e)
                 } else if crate::helpers::TOOL_NAMES.contains(&request.tool.as_str()) {
                     crate::helpers::call_tool(&ctx, &caller, lane, &request.tool, request.arguments)

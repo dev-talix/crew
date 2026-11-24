@@ -491,15 +491,30 @@ impl Runtime {
         }
     }
 
+    /// Starts `agent`'s turn under `lane` for a caller that keeps its own rows, like a room. Checks the
+    /// familiar's Mac first when it runs on another one.
+    pub async fn start_lane(&self, agent: &Agent, lane: &Lane, prompt: &str, tx: mpsc::UnboundedSender<ProviderEvent>) -> Result<(), String> {
+        crate::remote::ready(&self.db, agent, crate::remote::quick_setup, crate::remote::probe).await?;
+        match agent.provider {
+            Provider::Codex => self.codex_for(agent).start_turn_in(agent, Some(lane), prompt, &[], tx).await,
+            Provider::Claude => self.claude.start_turn_in(agent, Some(lane), prompt, &[], tx).await,
+        }
+    }
+
     /// Interrupts whatever turn runs under a lane key, on either provider.
+    /// Covers every Codex app server, since a familiar on another Mac runs its lanes on that Mac's.
     pub async fn stop_lane(&self, key: &str) {
-        let _ = self.codex.stop(key).await;
+        for codex in self.all_codex() {
+            let _ = codex.stop(key).await;
+        }
         self.claude.stop(key).await;
     }
 
     /// Lets go of a lane's CLI process or thread once nothing will run in it again.
     pub fn forget_lane(&self, key: &str) {
-        self.codex.forget(key);
+        for codex in self.all_codex() {
+            codex.forget(key);
+        }
         self.claude.forget(key);
     }
 

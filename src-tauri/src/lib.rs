@@ -27,6 +27,7 @@ mod permissions;
 mod providers;
 mod quick;
 mod remote;
+mod rooms;
 mod routines;
 mod runtime;
 mod side;
@@ -340,6 +341,7 @@ fn open_workspace(app: AppHandle, state: State<AppState>, agent_id: String) -> R
 async fn delete_agent(app: AppHandle, state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
     link::local_only(&agent_id)?;
     helpers::stop_for(&state.db, &agent_id);
+    app.state::<Arc<rooms::AppRooms>>().forget_familiar(&agent_id).await;
     state.runtime.remove_agent(&agent_id).await?;
     if let Ok(dir) = app.path().app_data_dir() {
         attachments::remove_for_agent(&state.db, &attachments::root(&dir), &agent_id);
@@ -777,6 +779,9 @@ pub fn run() {
             if let Err(e) = delegation::recover(&db) {
                 eprintln!("Couldn't close side conversations left unfinished: {e}");
             }
+            if let Err(e) = rooms::recover(&db) {
+                eprintln!("Couldn't close room replies left unfinished: {e}");
+            }
             remote::install(app.handle().clone(), db.clone());
             let runtime = Runtime::new(db.clone(), app.handle().clone());
             let workflows = WorkflowRunner::new(db.clone(), runtime.clone(), app.handle().clone());
@@ -816,6 +821,7 @@ pub fn run() {
             let quick = quick::Quick::default();
             quick.install(app.handle(), &db);
             app.manage(quick);
+            app.manage(rooms::Rooms::new(db.clone(), runtime.clone(), rooms::emitter(app.handle().clone())));
             app.manage(AppState { db, runtime, scheduler, workflows, dock: dock::Dock::default(), themes_dir, approvals, secrets });
             if edge.is_some() {
                 let state = app.state::<AppState>();
@@ -843,6 +849,14 @@ pub fn run() {
             chats::search_messages,
             side::side_thread,
             handoffs::list_handoffs,
+            rooms::list_rooms,
+            rooms::create_room,
+            rooms::room_thread,
+            rooms::room_history,
+            rooms::room_send,
+            rooms::room_stop,
+            rooms::delete_room,
+            rooms::room_prompt,
             get_settings,
             list_models,
             dock_edge,
