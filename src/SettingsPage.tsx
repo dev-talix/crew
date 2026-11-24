@@ -9,7 +9,8 @@ import { BackupSection } from "./ImportExport";
 import { appIcon, readMode, setAppIcon, setMode, type AppIconSetting, type ModeSetting } from "./themeStore";
 import nightIcon from "./assets/icon-night.svg";
 import paperIcon from "./assets/icon-paper.svg";
-import { BarsIcon, BellIcon, CloseIcon, DownloadIcon, GearIcon, LinkIcon, PaletteIcon, PhoneIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
+import { BarsIcon, BellIcon, CloseIcon, DownloadIcon, GearIcon, LinkIcon, PaletteIcon, PhoneIcon, PlugIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
+import ConnectorsPage from "./ConnectorsPage";
 import LinkedMacsPage from "./LinkedMacsPage";
 import PhonePage from "./PhonePage";
 import { shortcutFromKey, shortcutLabel } from "./quick";
@@ -381,7 +382,7 @@ function AppearanceSettings() {
   );
 }
 
-export type SettingsSection = "general" | "appearance" | "notifications" | "vault" | "permissions" | "links" | "phone" | "usage" | "updates";
+export type SettingsSection = "general" | "appearance" | "notifications" | "vault" | "connectors" | "permissions" | "links" | "phone" | "usage" | "updates";
 
 /** The sections, with words the ⌘K palette also finds them by. */
 export const SETTINGS_SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element; keywords: string }[] = [
@@ -389,6 +390,7 @@ export const SETTINGS_SECTIONS: { id: SettingsSection; label: string; icon: () =
   { id: "appearance", label: "Appearance", icon: PaletteIcon, keywords: "theme dark light mode app icon colors" },
   { id: "notifications", label: "Notifications", icon: BellIcon, keywords: "alerts banners finished approvals rituals" },
   { id: "vault", label: "Vault", icon: VaultIcon, keywords: "keychain passwords logins api keys cards secrets" },
+  { id: "connectors", label: "Connectors", icon: PlugIcon, keywords: "mcp servers linear notion github sentry jira oauth sign in apps integrations" },
   { id: "permissions", label: "Permissions", icon: ShieldIcon, keywords: "approvals rules commands ask allow" },
   { id: "links", label: "Linked Macs", icon: LinkIcon, keywords: "link pair tailscale tailnet other mac devices" },
   { id: "phone", label: "Phone", icon: PhoneIcon, keywords: "phone iphone android mobile companion pair tailscale" },
@@ -435,6 +437,9 @@ export default function SettingsPage(props: { section?: SettingsSection; agents:
         </Match>
         <Match when={section() === "vault"}>
           <VaultPage agents={props.agents} />
+        </Match>
+        <Match when={section() === "connectors"}>
+          <ConnectorsPage agents={props.agents} />
         </Match>
         <Match when={section() === "permissions"}>
           <PermissionsPage onOpenVault={() => setSection("vault")} />

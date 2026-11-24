@@ -7,6 +7,7 @@ import type { Memory, MemoryDraft, MemoryKind, MemoryScope } from "./memory";
 import type * as Budgets from "./budgets";
 import type * as Transfer from "./transfer";
 import type * as Templates from "./templates";
+import type * as Connectors from "./connectors";
 import type { Ledger } from "./ledgers";
 
 export type Provider = "codex" | "claude";
@@ -642,6 +643,14 @@ export const api = {
   saveMemory: (scope: MemoryScope, id: string, entries: MemoryDraft[], removed: string[]) => invoke<Memory>("save_memory", { scope, id, entries, removed }),
   addMemory: (scope: MemoryScope, id: string, kind: MemoryKind, project: string | null, text: string) =>
     invoke<Memory>("add_memory", { scope, id, kind, project, text }),
+  connectorCatalog: () => invoke<Connectors.CatalogEntry[]>("connector_catalog"),
+  listConnectors: () => invoke<Connectors.Connector[]>("list_connectors"),
+  addConnector: (input: Connectors.NewConnector) => invoke<Connectors.Connector>("add_connector", { input }),
+  removeConnector: (id: string) => invoke<void>("remove_connector", { id }),
+  connectorSignIn: (id: string) => invoke<Connectors.Connector>("connector_sign_in", { id }),
+  connectorSetToken: (id: string, token: string) => invoke<Connectors.Connector>("connector_set_token", { id, token }),
+  connectorSignOut: (id: string) => invoke<Connectors.Connector>("connector_sign_out", { id }),
+  setAgentConnectors: (agentId: string, ids: string[]) => invoke<void>("set_agent_connectors", { agentId, ids }),
   listVault: () => invoke<VaultItem[]>("list_vault"),
   vaultSecret: (id: string) => invoke<Record<string, string>>("vault_secret", { id }),
   saveVaultItem: (input: VaultItemInput) => invoke<VaultItem>("save_vault_item", { input }),
@@ -776,7 +785,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload" | "companion_changed" | "browser_changed" | "browser_frame",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload" | "companion_changed" | "browser_changed" | "browser_frame" | "connectors_changed",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

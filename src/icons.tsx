@@ -247,6 +247,13 @@ export const TrashIcon = () => (
   </Icon>
 );
 
+/** A plug: hosted servers a familiar connects to. */
+export const PlugIcon = () => (
+  <Icon>
+    <path d="M6 1.8v3M10 1.8v3M4.2 4.8h7.6v2.4a3.8 3.8 0 0 1-7.6 0zM8 11v3.2" />
+  </Icon>
+);
+
 /** Two laptops joined by a line: Macs linked to each other. */
 export const PhoneIcon = () => (
   <Icon>

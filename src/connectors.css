@@ -1,0 +1,64 @@
+.connectors > .settings-detail {
+  margin: 0 0 4px;
+}
+
+.connector-tile {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+  font: 500 15px/1 var(--font-display);
+  color: var(--muted);
+}
+
+.connector-tile.on {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--line));
+  color: var(--text);
+}
+
+.connector-row .list-actions {
+  gap: 6px;
+}
+
+.primary.small {
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+.connector-url .list-row {
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.connector-url .field {
+  flex: 1 1 260px;
+}
+
+.connector-url .connector-name {
+  flex: 0 1 160px;
+}
+
+.connector-token {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Settings and the template review list a familiar's connectors with a toggle each. */
+.connector-toggles .list-row {
+  min-height: 48px;
+  padding: 8px 14px;
+}
+
+/* In a narrow window the buttons drop under the name instead of pushing past the edge. */
+.connector-row {
+  flex-wrap: wrap;
+}
+
+.connector-row .list-main {
+  flex-basis: 160px;
+}

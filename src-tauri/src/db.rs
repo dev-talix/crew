@@ -250,7 +250,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 27;
+const SCHEMA_VERSION: i64 = 28;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -554,6 +554,9 @@ impl Db {
         }
         if version < 27 {
             crate::handoffs::migrate_remote_request(&conn)?;
+        }
+        if version < 28 {
+            crate::connectors::migrate(&conn)?;
         }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
@@ -1089,7 +1092,8 @@ mod tests {
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
-                "ALTER TABLE agents DROP COLUMN setup_pending; ALTER TABLE chats DROP COLUMN handoff; DROP TABLE handoffs; DROP TABLE link_peers;
+                "DROP TABLE agent_connectors; DROP TABLE connectors;
+                 ALTER TABLE agents DROP COLUMN setup_pending; ALTER TABLE chats DROP COLUMN handoff; DROP TABLE handoffs; DROP TABLE link_peers;
                  ALTER TABLE chats DROP COLUMN remote_peer; ALTER TABLE chats DROP COLUMN remote_asker; ALTER TABLE chats DROP COLUMN remote_name;
                  PRAGMA user_version = 21;",
             )
@@ -1124,7 +1128,8 @@ mod tests {
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
-                "ALTER TABLE chats DROP COLUMN remote_peer; ALTER TABLE chats DROP COLUMN remote_asker; ALTER TABLE chats DROP COLUMN remote_name;
+                "DROP TABLE agent_connectors; DROP TABLE connectors;
+                 ALTER TABLE chats DROP COLUMN remote_peer; ALTER TABLE chats DROP COLUMN remote_asker; ALTER TABLE chats DROP COLUMN remote_name;
                  CREATE TABLE old (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
                    kind TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL);
                  INSERT INTO old SELECT id, chat_id, kind, text, status, created_at FROM handoffs;

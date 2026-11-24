@@ -159,6 +159,13 @@ pub fn secret(store: &dyn SecretStore, id: &str) -> Result<Map<String, Value>, S
     serde_json::from_str(&text).map_err(|_| "This item's secret could not be read.".into())
 }
 
+/// An item's secret fields for the vault page. The Keychain store also holds connector sign-ins and
+/// linked-Mac tokens, so only ids of vault items are read.
+pub fn item_secret(db: &Db, store: &dyn SecretStore, id: &str) -> Result<Map<String, Value>, String> {
+    get(db, id)?.ok_or("That vault item no longer exists.")?;
+    secret(store, id)
+}
+
 pub fn save(db: &Db, store: &dyn SecretStore, input: ItemInput) -> Result<VaultItem, String> {
     let name = input.name.trim().to_string();
     if name.is_empty() || name.chars().count() > 80 {
@@ -236,6 +243,8 @@ pub fn save(db: &Db, store: &dyn SecretStore, input: ItemInput) -> Result<VaultI
 /// Removes the item and its grants, then its secret. A failed database write leaves the secret in
 /// place, so the item stays usable; a leftover secret is reported but the item is gone.
 pub fn delete(db: &Db, store: &dyn SecretStore, id: &str) -> Result<(), String> {
+    // Only a vault item's own secret; the store holds other Keychain entries too.
+    get(db, id)?.ok_or("That vault item no longer exists.")?;
     db.with(|c| {
         let tx = c.unchecked_transaction()?;
         tx.execute("DELETE FROM vault_items WHERE id = ?1", params![id])?;
@@ -429,6 +438,17 @@ mod tests {
         assert!(error.contains("still in the Keychain (Keychain: locked)"), "{error}");
         assert!(list(&db).unwrap().is_empty(), "the item is gone from the list");
         assert!(!db.has_grant("a", &scope(&item.id)).unwrap());
+    }
+
+    #[test]
+    fn reads_and_deletes_only_vault_items() {
+        let (db, store) = (Db::open_in_memory().unwrap(), MemoryStore::new());
+        store.set("connector:c1", r#"{"accessToken":"t"}"#).unwrap();
+        assert!(item_secret(&db, &store, "connector:c1").is_err(), "a connector sign-in isn't a vault item");
+        assert!(delete(&db, &store, "connector:c1").is_err());
+        assert!(store.get("connector:c1").unwrap().is_some());
+        let login = save(&db, &store, input(Kind::Login, "GitHub", json!({ "password": "x" }))).unwrap();
+        assert_eq!(item_secret(&db, &store, &login.id).unwrap()["password"], "x");
     }
 
     #[test]

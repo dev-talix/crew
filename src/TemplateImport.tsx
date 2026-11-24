@@ -1,6 +1,7 @@
 import { createSignal, For, Show } from "solid-js";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api, describeSchedule, errorText, type Access, type Provider } from "./api";
+import { api, createFetch, describeSchedule, errorText, type Access, type Provider } from "./api";
+import { addedFor, suggestConnectors, type CatalogEntry } from "./connectors";
 import { randomAvatar } from "./avatar";
 import { MEMORY_LIMIT, memoryUsage } from "./memory";
 import { Segmented, Sheet, Toggle } from "./ui";
@@ -136,6 +137,15 @@ function TemplateReview(props: { template: MarketTemplate; onBack: () => void; o
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const avatar = randomAvatar();
+  const catalog = createFetch(() => null, api.connectorCatalog);
+  // Catalog connectors for the apps the template names; the person can untick any.
+  const suggested = () => suggestConnectors(props.template.integrations.map((i) => i.name), catalog() ?? []);
+  const [skipped, setSkipped] = createSignal<string[]>([]);
+  // The template's app names that a checked connector covers.
+  const connectable = () =>
+    props.template.integrations
+      .map((i) => i.name)
+      .filter((app) => suggestConnectors([app], suggested()).some((e) => !skipped().includes(e.id)));
 
   const editMemory = (id: string, change: Partial<MemoryRow>) => setMemory((rows) => rows.map((r) => (r.id === id ? { ...r, ...change } : r)));
   const editRitual = (id: string, change: Partial<RitualRow>) => setRituals((rows) => rows.map((r) => (r.id === id ? { ...r, ...change } : r)));
@@ -161,12 +171,24 @@ function TemplateReview(props: { template: MarketTemplate; onBack: () => void; o
           .filter((r) => r.include)
           .map((r) => ({ name: r.name, prompt: r.prompt, schedule: r.schedule })),
       });
+      // The familiar exists now, so a connector that fails to add can't block opening it; it can be
+      // turned on later in its settings. Retrying the import would make a second familiar.
+      await connect(id, suggested().filter((e) => !skipped().includes(e.id))).catch(() => undefined);
       props.onCreated(id);
     } catch (err) {
       setError(errorText(err));
     } finally {
       setBusy(false);
     }
+  };
+
+  /** Adds each chosen connector that isn't added yet and turns them on for the new familiar. */
+  const connect = async (agentId: string, chosen: CatalogEntry[]) => {
+    if (!chosen.length) return;
+    const existing = await api.listConnectors();
+    const ids: string[] = [];
+    for (const entry of chosen) ids.push((addedFor(entry, existing) ?? (await api.addConnector({ catalogId: entry.id }))).id);
+    await api.setAgentConnectors(agentId, ids);
   };
 
   return (
@@ -202,7 +224,7 @@ function TemplateReview(props: { template: MarketTemplate; onBack: () => void; o
       <section class="template-asks">
         <h2 class="section-title">What it asks for</h2>
         <ul>
-          <For each={permissionLines(props.template, access(), provider())}>{(line) => <li>{line}</li>}</For>
+          <For each={permissionLines(props.template, access(), provider(), connectable())}>{(line) => <li>{line}</li>}</For>
         </ul>
         <div class="list">
           <div class="list-row">
@@ -216,6 +238,31 @@ function TemplateReview(props: { template: MarketTemplate; onBack: () => void; o
           </div>
         </div>
       </section>
+
+      <Show when={suggested().length}>
+        <section>
+          <h2 class="section-title">Connectors</h2>
+          <p class="hint">Grimoire can connect some of the apps this template names. Checked ones are added and turned on for this familiar. Sign in to each in Settings, under Connectors.</p>
+          <ul class="list template-rows">
+            <For each={suggested()}>
+              {(entry) => (
+                <li class={["list-row template-row", { off: skipped().includes(entry.id) }]}>
+                  <input
+                    type="checkbox"
+                    checked={!skipped().includes(entry.id)}
+                    aria-label={`Connect ${entry.name}`}
+                    onChange={(e) => setSkipped((ids) => (e.currentTarget.checked ? ids.filter((x) => x !== entry.id) : [...ids, entry.id]))}
+                  />
+                  <div class="list-main">
+                    <span class="list-title">{entry.name}</span>
+                    <span class="list-sub">{entry.description}</span>
+                  </div>
+                </li>
+              )}
+            </For>
+          </ul>
+        </section>
+      </Show>
 
       <section>
         <h2 class="section-title">

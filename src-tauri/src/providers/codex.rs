@@ -123,7 +123,20 @@ fn thread_params(agent: &Agent, tools_key: &str) -> Value {
             "default_tools_approval_mode": "approve",
             "tool_timeout_sec": crate::tools::CALL_TIMEOUT_SECS,
         });
-        params["config"] = json!({ "mcp_servers": { (crate::tools::SERVER_NAME): server } });
+        let mut servers = serde_json::Map::from_iter([(crate::tools::SERVER_NAME.to_string(), server)]);
+        // Each connector the familiar has on runs through its own relay; the person turned it on, so its tools are pre-approved too.
+        for (name, id) in crate::connectors::servers_for(agent) {
+            if let Some(relay) = crate::tools::connector_command(tools_key, &id) {
+                servers.insert(name, json!({
+                    "command": relay.command,
+                    "args": relay.args,
+                    "env": { (crate::tools::TOKEN_ENV): relay.token },
+                    "default_tools_approval_mode": "approve",
+                    "tool_timeout_sec": crate::tools::CALL_TIMEOUT_SECS,
+                }));
+            }
+        }
+        params["config"] = json!({ "mcp_servers": servers });
     }
     if let Some(memory) = crate::briefing::session_prompt(agent) {
         params["developerInstructions"] = json!(memory);
