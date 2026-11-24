@@ -12,6 +12,7 @@ import Onboarding from "./Onboarding";
 import HandoffsPage from "./Handoffs";
 import InboxPage, { InboxLink } from "./Inbox";
 import { MemorySheet } from "./MemoryEditor";
+import RoomsPage from "./Rooms";
 import RoutinesPage from "./RoutinesPage";
 import { SettingsDialog } from "./SettingsPage";
 import WorkflowsPage, { type SpellIntent } from "./WorkflowsPage";
@@ -20,13 +21,13 @@ import { inkFor } from "./avatar";
 import { groupByHome, homeOffline, isRemote, reloadsOpenChat } from "./linked";
 import { runningModelName } from "./models";
 import { createMoods } from "./moods";
-import { ClockIcon, GearIcon, HomeIcon, PlusIcon, TalkIcon } from "./icons";
+import { ClockIcon, GearIcon, HomeIcon, PlusIcon, RoomIcon, TalkIcon } from "./icons";
 import { SidePanel } from "./ui";
 import { shownIcon } from "./themeStore";
 import { restartToUpdate, startUpdateChecks, updateCheck, updateInstalled } from "./updateStore";
 import type { SettingsSection } from "./SettingsPage";
 
-type View = "home" | "inbox" | "handoffs" | "routines" | "workflows" | "new" | "welcome" | { agent: string };
+type View = "home" | "inbox" | "handoffs" | "rooms" | "routines" | "workflows" | "new" | "welcome" | { agent: string };
 
 function NavItem(props: { label: string; icon: JSX.Element; active: boolean; onClick: () => void; shortcut?: string }) {
   return (
@@ -275,6 +276,7 @@ export default function App() {
           <NavItem label="Home" icon={<HomeIcon />} active={is("home")} onClick={() => setView("home")} />
           <InboxLink active={is("inbox")} onClick={() => setView("inbox")} />
           <NavItem label="Handoffs" icon={<TalkIcon />} active={is("handoffs")} onClick={() => setView("handoffs")} />
+          <NavItem label="Rooms" icon={<RoomIcon />} active={is("rooms")} onClick={() => setView("rooms")} />
           <NavItem label="Rituals" icon={<ClockIcon />} active={is("routines")} onClick={() => setView("routines")} />
         </nav>
         <div class="sidebar-caption">
@@ -423,6 +425,9 @@ export default function App() {
             </Match>
             <Match when={is("handoffs")}>
               <HandoffsPage agents={agents()} onOpenAgent={openAgent} />
+            </Match>
+            <Match when={is("rooms")}>
+              <RoomsPage agents={localAgents()} onOpenAgent={openAgent} />
             </Match>
             <Match when={is("routines")}>
               <RoutinesPage agents={localAgents()} onOpenAgent={openAgent} />

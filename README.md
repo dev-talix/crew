@@ -26,6 +26,11 @@
 - **The inbox** gathers every familiar's open questions and approvals in one list. A familiar asks
   with a few short options and the one it recommends, then keeps working; your tap goes back to it
   as a new message.
+- **Rooms** put you and 2 to 8 familiars in one thread. Mention a familiar as `@Name` to ask it, or
+  write without a mention and whoever replied last answers. One familiar replies at a time. A familiar
+  hands off by mentioning another in its reply, and the room shows the handoff. After 6 replies in a
+  row the room pauses until you write again. Each familiar answers on its own session for the room,
+  reads what was said since its last turn, and every reply can show exactly what it was sent.
 - **Memory** carries rules, facts, and project notes from one chat to the next, for each familiar and each coven.
 - **Ledgers** keep each familiar's goal, status, and what it's waiting on. A familiar gets its ledger
   when a chat starts and updates it with `update_ledger`; you edit it in the strip under the chat bar.

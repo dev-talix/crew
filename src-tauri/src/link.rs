@@ -2114,7 +2114,11 @@ mod tests {
     }
 
     /// Starts `mac`'s server on a loopback port and returns its address.
+    /// Serves `mac` on loopback the way the listen loop does once Tailscale answers: it asks
+    /// Tailscale first, so the Mac knows its peers before anything connects. Without that, two
+    /// strangers at once race for the first check and the loser is refused.
     async fn listen(mac: &Mac) -> String {
+        mac.link.check_tailnet().await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
         tokio::spawn(mac.link.clone().serve(listener));
