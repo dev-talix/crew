@@ -490,6 +490,8 @@ export interface UpdateCheck {
   current: string;
   latest: { version: string; url: string; publishedAt: string | null } | null;
   newer: boolean;
+  /** Whether this build installs updates itself; otherwise the release page opens. */
+  canInstall: boolean;
 }
 
 export type PermissionMode = "off" | "rules" | "always";
@@ -600,6 +602,13 @@ export const api = {
   usageSince: (since: number) => invoke<import("./usage").UsageRow[]>("usage_since", { since }),
   planLimits: () => invoke<PlanLimits>("plan_limits"),
   checkForUpdates: () => invoke<UpdateCheck>("check_for_updates"),
+  /** Downloads and installs the newest signed release; resolves to its version, or null if none. */
+  installUpdate: () => invoke<string | null>("install_update"),
+  restartApp: () => invoke<void>("restart_app"),
+  onboardingNeeded: () => invoke<boolean>("onboarding_needed"),
+  finishOnboarding: () => invoke<void>("finish_onboarding"),
+  installProvider: (provider: Provider) => invoke<void>("install_provider", { provider }),
+  openSignIn: (provider: Provider) => invoke<void>("open_sign_in", { provider }),
   savePermissions: (permissions: Permissions) => invoke<Permissions>("save_permissions", { permissions }),
   getDelegation: () => invoke<Delegation>("get_delegation"),
   saveDelegation: (settings: Delegation) => invoke<Delegation>("save_delegation", { settings }),

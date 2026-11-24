@@ -28,13 +28,13 @@ const APP_ICONS: { value: AppIconSetting; label: string; art: string[] }[] = [
   { value: "night", label: "Night", art: [nightIcon] },
 ];
 
-function accountState(status: ProviderStatus | undefined): "loading" | "ok" | "unknown" | "off" {
+export function accountState(status: ProviderStatus | undefined): "loading" | "ok" | "unknown" | "off" {
   if (!status) return "loading";
   if (!status.installed || status.signedIn === false) return "off";
   return status.signedIn ? "ok" : "unknown";
 }
 
-function accountSummary(status: ProviderStatus | undefined): string {
+export function accountSummary(status: ProviderStatus | undefined): string {
   if (!status) return "Checking…";
   if (!status.installed) return "Not installed";
   if (status.signedIn === false) return "Not signed in";
@@ -43,7 +43,7 @@ function accountSummary(status: ProviderStatus | undefined): string {
 }
 
 // Renders `backticked` spans as inline code.
-function WithCode(props: { text: string }) {
+export function WithCode(props: { text: string }) {
   return <For each={props.text.split("`")}>{(part, i) => (i() % 2 ? <code>{part}</code> : part)}</For>;
 }
 

@@ -26,6 +26,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tauri-plugin-updater = "2.14.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "macros", "rt-multi-thread", "test-util"] }

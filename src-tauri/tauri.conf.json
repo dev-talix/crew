@@ -47,5 +47,13 @@
       "signingIdentity": "Developer ID Application: Nikhil Kapadia (2TG5HP8NSV)",
       "entitlements": "./Entitlements.plist"
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": [
+        "https://github.com/dev-talix/grimoire/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

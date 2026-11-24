@@ -80,7 +80,30 @@
   </tr>
 </table>
 
-## Run it
+## Install
+
+Download the `.dmg` from the [latest release](https://github.com/dev-talix/grimoire/releases/latest),
+open it, and drag Grimoire to Applications. The app is signed and notarized, so it opens without a
+warning. You don't need Bun or Rust.
+
+On first launch, a setup wizard checks for the Codex and Claude command-line tools. It can install
+either one: Claude with Anthropic's installer, and Codex with Homebrew, or npm when Homebrew isn't
+there. "Sign in" opens Terminal to run `codex login` or `claude auth login`. Once one of them is
+signed in, pick a starter familiar (Researcher, Writer, Code helper, or Planner) and Grimoire
+summons it with workspace-only access. "Skip setup" goes straight to the summon form.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/onboarding-tools.png" alt="The setup wizard checking for Codex and Claude, with Sign in and Install buttons"></td>
+    <td width="50%"><img src="docs/screenshots/onboarding-starter.png" alt="Picking a starter familiar: Researcher, Writer, Code helper, or Planner"></td>
+  </tr>
+</table>
+
+Grimoire checks for a new version once a day. Release builds download it, check its signature
+against the key built into the app, and install it; the sidebar then offers "Restart to use" the new
+version. Turn this off in Settings, Updates.
+
+## Build from source
 
 You need [Bun](https://bun.sh), Rust, and `codex` or `claude` installed and signed in. Grimoire reads
 `PATH` from your login shell, so it finds them when you open it from Finder too.
@@ -92,8 +115,9 @@ bunx tauri build --bundles app    # src-tauri/target/release/bundle/macos/Grimoi
 ```
 
 `tauri build` signs the app with the Developer ID certificate named in `src-tauri/tauri.conf.json`,
-which has to be in your keychain. To notarize a build for other Macs, save an App Store Connect API
-key once as a keychain profile, then submit and staple:
+which has to be in your keychain. Local builds have no updater key, so their Updates page opens the
+release page instead of installing. To notarize a build for other Macs by hand, save an App Store
+Connect API key once as a keychain profile, then submit and staple:
 
 ```sh
 xcrun notarytool store-credentials grimoire-notary --key AuthKey_<id>.p8 --key-id <id> --issuer <issuer-id>
@@ -103,6 +127,31 @@ ditto -c -k --keepParent Grimoire.app /tmp/Grimoire.zip
 xcrun notarytool submit /tmp/Grimoire.zip --keychain-profile grimoire-notary --wait
 xcrun stapler staple Grimoire.app
 ```
+
+### Releasing
+
+Bump the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, merge,
+then push a tag such as `v0.5.0`. The Release workflow (`.github/workflows/release.yml`) builds a
+universal app, signs and notarizes it, signs the update, and saves a draft release with the `.dmg`,
+the update archive, and `latest.json`. Publish the draft to ship it: installed copies only see
+published releases.
+
+The workflow needs these repository secrets:
+
+| Secret | What it holds |
+|---|---|
+| `APPLE_CERTIFICATE` | The Developer ID Application certificate and private key, exported as `.p12` and base64-encoded |
+| `APPLE_CERTIFICATE_PASSWORD` | The password set when exporting the `.p12` |
+| `APPLE_SIGNING_IDENTITY` | The certificate's name, like `Developer ID Application: Name (TEAMID)` |
+| `APPLE_API_ISSUER` | The App Store Connect API issuer ID, for notarization |
+| `APPLE_API_KEY` | The App Store Connect API key ID |
+| `APPLE_API_PRIVATE_KEY` | The contents of that key's `AuthKey_<id>.p8` file |
+| `TAURI_SIGNING_PRIVATE_KEY` | The updater private key from `bunx tauri signer generate` |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Its password, if it has one |
+
+It also needs the repository variable `TAURI_UPDATER_PUBKEY`, the public key that `tauri signer
+generate` prints. It isn't secret. Keep the private key safe: losing it means installed copies can't
+update to builds signed with a new one.
 
 Shortcuts: ⌘K opens the command palette, ⌘N summons a familiar, ⌘, opens Settings, and ⌘1 to ⌘9 open
 a familiar.

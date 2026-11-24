@@ -6,9 +6,12 @@ const LAST_KEY = "grimoire-update-last";
 const DAY = 86_400_000;
 
 const [result, setResult] = createSignal<UpdateCheck | null>(null);
+const [installing, setInstalling] = createSignal(false);
+// The version installed this launch, which runs after a restart.
+const [installed, setInstalled] = createSignal<string | null>(null);
 
 /** The latest check, from this launch. */
-export { result as updateCheck };
+export { result as updateCheck, installing as updateInstalling, installed as updateInstalled };
 
 function read(key: string): string | null {
   try {
@@ -41,10 +44,35 @@ export async function checkForUpdates(): Promise<UpdateCheck> {
   return check;
 }
 
-/** Runs the daily check at launch when it's on. Failures stay quiet; Settings shows them on demand. */
+/** Whether to install a found update without asking: automatic updates are on and this build can. */
+export function shouldInstall(check: UpdateCheck | null, auto: boolean): boolean {
+  return auto && !!check?.newer && check.canInstall;
+}
+
+/** Downloads, verifies, and installs the newest release. It runs after the next restart. */
+export async function installUpdate(): Promise<string | null> {
+  if (installing()) return null;
+  setInstalling(true);
+  try {
+    const version = await api.installUpdate();
+    if (version) setInstalled(version);
+    return version;
+  } finally {
+    setInstalling(false);
+  }
+}
+
+export const restartToUpdate = () => api.restartApp();
+
+/**
+ * Runs the daily check at launch when it's on, and installs what it finds when the build can.
+ * Failures stay quiet; Settings shows them on demand.
+ */
 export function startUpdateChecks() {
   const last = read(LAST_KEY);
   if (autoCheck() && isDue(last === null ? null : Number(last), Date.now())) {
-    checkForUpdates().catch(() => {});
+    checkForUpdates()
+      .then((check) => (shouldInstall(check, autoCheck()) ? installUpdate() : null))
+      .catch(() => {});
   }
 }
