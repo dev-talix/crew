@@ -15,11 +15,13 @@ mod http;
 mod inbox;
 mod ledger;
 mod link;
+mod marketplace;
 mod mcp;
 mod memory;
 mod notify;
 mod permissions;
 mod providers;
+mod quick;
 mod remote;
 mod routines;
 mod runtime;
@@ -393,6 +395,11 @@ async fn stop_turn(state: State<'_, AppState>, agent_id: String) -> Result<(), S
 struct Settings {
     claude_billing: String,
     dock_edge: String,
+    quick_ask_enabled: bool,
+    quick_ask_shortcut: String,
+    /// Why the shortcut didn't register at launch. Read-only.
+    #[serde(default, skip_deserializing)]
+    quick_ask_error: Option<String>,
 }
 
 #[tauri::command]
@@ -416,21 +423,30 @@ async fn list_models(state: State<'_, AppState>, provider: Provider) -> Result<V
 }
 
 #[tauri::command]
-fn get_settings(state: State<AppState>) -> Result<Settings, String> {
+fn get_settings(state: State<AppState>, quick: State<quick::Quick>) -> Result<Settings, String> {
     Ok(Settings {
         claude_billing: state.db.setting(CLAUDE_BILLING)?.unwrap_or_else(|| "subscription".into()),
         dock_edge: state.db.setting(DOCK_EDGE)?.unwrap_or_else(|| "off".into()),
+        quick_ask_enabled: quick::enabled(&state.db),
+        quick_ask_shortcut: quick::shortcut_text(&state.db),
+        quick_ask_error: quick.error(),
     })
 }
 
 #[tauri::command]
-async fn save_settings(app: AppHandle, state: State<'_, AppState>, settings: Settings) -> Result<Settings, String> {
+async fn save_settings(app: AppHandle, state: State<'_, AppState>, quick: State<'_, quick::Quick>, mut settings: Settings) -> Result<Settings, String> {
     if !matches!(settings.claude_billing.as_str(), "subscription" | "api") {
         return Err("Claude billing must be subscription or api.".into());
     }
     if !matches!(settings.dock_edge.as_str(), "off" | "left" | "right") {
         return Err("The dock goes on the left, the right, or off.".into());
     }
+    // First, so a shortcut another app holds fails the save before anything else changes. Only when
+    // it changed, so a shortcut that failed at launch doesn't block saving the dock or billing.
+    if settings.quick_ask_enabled != quick::enabled(&state.db) || settings.quick_ask_shortcut.trim() != quick::shortcut_text(&state.db) {
+        quick.apply(&app, &state.db, settings.quick_ask_enabled, &settings.quick_ask_shortcut)?;
+    }
+    settings.quick_ask_shortcut = settings.quick_ask_shortcut.trim().into();
     let previous_billing = state.db.setting(CLAUDE_BILLING)?.unwrap_or_else(|| "subscription".into());
     state.db.set_setting(CLAUDE_BILLING, &settings.claude_billing)?;
     state.db.set_setting(DOCK_EDGE, &settings.dock_edge)?;
@@ -733,6 +749,7 @@ pub fn run() {
             attachments::protocol(ctx.app_handle(), request, responder)
         })
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -783,6 +800,9 @@ pub fn run() {
             // Rituals can fire as soon as the scheduler starts, so the approval gate and the tool socket
             // have to be up first.
             let scheduler = Scheduler::start(db.clone(), &runtime, &workflows, app.handle().clone());
+            let quick = quick::Quick::default();
+            quick.install(app.handle(), &db);
+            app.manage(quick);
             app.manage(AppState { db, runtime, scheduler, workflows, dock: dock::Dock::default(), themes_dir, approvals, secrets });
             if edge.is_some() {
                 let state = app.state::<AppState>();
@@ -818,6 +838,9 @@ pub fn run() {
             dock::set_dock_hidden,
             dock::dock_hide,
             show_main,
+            quick::quick_hide,
+            quick::quick_agent,
+            quick::set_quick_agent,
             save_settings,
             provider_status,
             last_messages,
@@ -874,6 +897,9 @@ pub fn run() {
             exports::export_backup_file,
             exports::pick_import,
             exports::apply_import,
+            marketplace::marketplace_catalog,
+            marketplace::marketplace_template,
+            marketplace::import_template,
             triggers::trigger_status,
             inbox::inbox,
             inbox::answer_question,

@@ -435,6 +435,8 @@ export default function Chat(props: {
     const text = draft().trim();
     if (!canSend()) return;
     const attached = remote() ? [] : files.take();
+    // Staging takes a moment; the message still goes to the familiar it was written to.
+    const agentId = props.agent.id;
     setDraft("");
     resize();
     stickToBottom = true;
@@ -442,7 +444,7 @@ export default function Chat(props: {
       try {
         const staged = [];
         for (const item of attached) staged.push((await api.stageAttachment(item.file)).token);
-        await api.sendMessage(props.agent.id, text, staged);
+        await api.sendMessage(agentId, text, staged);
         files.release(attached);
       } catch (e) {
         setDraft(text);

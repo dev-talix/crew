@@ -11,6 +11,7 @@ import nightIcon from "./assets/icon-night.svg";
 import paperIcon from "./assets/icon-paper.svg";
 import { BarsIcon, BellIcon, CloseIcon, DownloadIcon, GearIcon, LinkIcon, PaletteIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
 import LinkedMacsPage from "./LinkedMacsPage";
+import { shortcutFromKey, shortcutLabel } from "./quick";
 import NotificationsPage from "./NotificationsPage";
 import UpdatesPage from "./UpdatesPage";
 import UsagePage from "./UsagePage";
@@ -66,7 +67,12 @@ function GeneralSettings(props: { agents: Agent[] }) {
   };
   onSettled(() => void checkAccounts());
 
-  const [settings, setSettings] = createSignal<Settings>({ claudeBilling: "subscription", dockEdge: "off" });
+  const [settings, setSettings] = createSignal<Settings>({
+    claudeBilling: "subscription",
+    dockEdge: "off",
+    quickAskEnabled: true,
+    quickAskShortcut: "CommandOrControl+Shift+Space",
+  });
   const [billingError, setBillingError] = createSignal("");
   const [dockError, setDockError] = createSignal("");
   // Familiars left out of the dock; every other one shows, including new ones.
@@ -85,17 +91,22 @@ function GeneralSettings(props: { agents: Agent[] }) {
   api.getSettings().then(setSettings, (e) => setBillingError(errorText(e)));
   const billing = () => settings().claudeBilling;
 
-  const saveSetting = async (patch: Partial<Settings>, setError: (message: string) => void) => {
-    const previous = settings();
-    const next = { ...previous, ...patch };
-    setSettings(next);
+  // Saves run one at a time, each on what the last one left, so a refused shortcut can't ride along
+  // with the next change. A refused save shows what Grimoire actually kept.
+  let saving = Promise.resolve();
+  const saveSetting = (patch: Partial<Settings>, setError: (message: string) => void) => {
+    setSettings((current) => ({ ...current, ...patch }));
     setError("");
-    try {
-      setSettings(await api.saveSettings(next));
-    } catch (e) {
-      setSettings(previous);
-      setError(errorText(e));
-    }
+    saving = saving.then(async () => {
+      try {
+        setSettings(await api.saveSettings({ ...(await api.getSettings()), ...patch }));
+        setError("");
+      } catch (e) {
+        setError(errorText(e));
+        await api.getSettings().then(setSettings, () => undefined);
+      }
+    });
+    return saving;
   };
 
   const changeBilling = (next: Billing) => {
@@ -104,6 +115,18 @@ function GeneralSettings(props: { agents: Agent[] }) {
 
   const changeDock = (next: DockEdge) => {
     if (next !== settings().dockEdge) void saveSetting({ dockEdge: next }, setDockError);
+  };
+
+  const [quickError, setQuickError] = createSignal("");
+  const [recording, setRecording] = createSignal(false);
+  const recordShortcut = (e: KeyboardEvent) => {
+    if (!recording() || e.key === "Tab") return;
+    e.preventDefault();
+    if (e.key === "Escape") return setRecording(false);
+    const next = shortcutFromKey(e);
+    if (!next) return;
+    setRecording(false);
+    if (next !== settings().quickAskShortcut) void saveSetting({ quickAskShortcut: next }, setQuickError);
   };
 
   const appVersion = createFetch(() => null, getVersion);
@@ -232,6 +255,42 @@ function GeneralSettings(props: { agents: Agent[] }) {
           <div class="error-box settings-error">{dockError()}</div>
         </Show>
 
+        <h2 class="section-title">Quick Ask</h2>
+        <div class="list">
+          <div class="list-row settings-row">
+            <div class="list-main">
+              <div class="list-title">Open Quick Ask from any app</div>
+              <p class="settings-detail">Ask a familiar something or answer what it's waiting on, without switching to Grimoire.</p>
+            </div>
+            <Toggle
+              label="Open Quick Ask from any app"
+              checked={settings().quickAskEnabled}
+              onChange={(on) => void saveSetting({ quickAskEnabled: on }, setQuickError)}
+            />
+          </div>
+          <div class="list-row settings-row">
+            <div class="list-main">
+              <div class="list-title">Shortcut</div>
+            </div>
+            <button
+              type="button"
+              class={["ghost small quick-shortcut", { recording: recording() }]}
+              aria-label={recording() ? "Press the new shortcut, or Escape to cancel" : `Shortcut ${shortcutLabel(settings().quickAskShortcut)}. Click to change`}
+              onClick={() => setRecording(true)}
+              onKeyDown={recordShortcut}
+              onBlur={() => setRecording(false)}
+            >
+              {recording() ? "Press keys" : shortcutLabel(settings().quickAskShortcut)}
+            </button>
+          </div>
+        </div>
+        <p class="hint settings-footnote">
+          Use Command, Control, or Option with another key. Grimoire needs no Accessibility or Input Monitoring permission for this. Shortcuts macOS keeps for itself, like ⌘Space for Spotlight, never reach Grimoire.
+        </p>
+        <Show when={quickError() || settings().quickAskError}>
+          {(message) => <div class="error-box settings-error">{message()}</div>}
+        </Show>
+
         <h2 class="section-title">Menu bar</h2>
         <div class="list">
           <div class="list-row settings-row">
@@ -325,7 +384,7 @@ export type SettingsSection = "general" | "appearance" | "notifications" | "vaul
 
 /** The sections, with words the ⌘K palette also finds them by. */
 export const SETTINGS_SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element; keywords: string }[] = [
-  { id: "general", label: "General", icon: GearIcon, keywords: "claude billing dock providers about menu bar" },
+  { id: "general", label: "General", icon: GearIcon, keywords: "claude billing dock providers about menu bar quick ask shortcut hotkey" },
   { id: "appearance", label: "Appearance", icon: PaletteIcon, keywords: "theme dark light mode app icon colors" },
   { id: "notifications", label: "Notifications", icon: BellIcon, keywords: "alerts banners finished approvals rituals" },
   { id: "vault", label: "Vault", icon: VaultIcon, keywords: "keychain passwords logins api keys cards secrets" },

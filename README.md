@@ -48,6 +48,9 @@
 - **The dock** pins your familiars to the edge of the screen, so you can chat without opening
   the main window. Pick which familiars it shows in Settings, General; new ones show up until you
   turn them off.
+- **Quick Ask** opens a small panel from any app with ⇧⌘Space. Pick a familiar, ask it something,
+  watch the reply stream in, or answer what's waiting in the inbox. Change or turn off the shortcut in
+  Settings, General. It needs no Accessibility or Input Monitoring permission.
 - **Helpers** take long jobs. A familiar calls `start_helper` and keeps chatting while a helper works
   in a hidden chat, on a fresh session with the familiar's model, workspace, and access. The result
   comes back as a message labeled "Helper <label>", which starts the familiar's next turn. Up to 3 run
@@ -438,6 +441,29 @@ the file brings, or else at yours with the same name; anything that can't be pla
 out. Imported familiars get new workspace folders under `~/Grimoire`, and the rows go in one
 transaction. A familiar the file gives full access comes in with workspace access, unless you turn on
 "Keep full access" in the preview.
+
+### Grok Bot templates
+
+"Import a Grok Bot template" on the summon form copies a template from the
+[Grok Bot marketplace](https://x.ai/bot/marketplace). Paste a template page or a share link, like
+`https://x.ai/bot/marketplace/bots/haggle-bot` or `https://x.ai/bot/pwQ612YrX3R0eACnIMlom`, or pick one
+from Browse. The marketplace has no public API or export format. Grimoire reads the template data the
+public pages carry for their own rendering, so import can stop working when x.ai changes those pages.
+Private bots, and share links that aren't listed in the marketplace, can't be imported.
+
+Grimoire has no persona field, so a template maps onto memory and rituals:
+
+- The description, any instructions, its memories, and its skills become rules. Grimoire can't run Grok
+  skills, so each skill comes in as "When asked to <skill>: <what it does>". Long text is split to fit
+  memory's entry limit, and rows past the 16 KB limit start unchecked.
+- Its integrations become one fact naming the apps it expected. Grimoire connects none of them.
+- Its routines become rituals. Templates describe schedules in words, so Grimoire guesses a daily or
+  weekly time, and every ritual comes in turned off.
+
+The preview shows what the template asks for, and you can edit or drop every rule and ritual before
+anything is created. The text is someone else's, so the familiar gets workspace access and no tools
+unless you turn on full access in the preview. The familiar is created through the same path as
+"Import", in one transaction.
 
 ## Updates
 

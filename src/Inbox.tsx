@@ -8,7 +8,7 @@ import { EmptyState, Page } from "./ui";
 import "./inbox.css";
 
 /** The inbox list, kept fresh by the events that change it. */
-function createInbox() {
+export function createInbox() {
   const [items, setItems] = createSignal<InboxItem[]>([]);
   const [loaded, setLoaded] = createSignal(false);
   const reload = () =>
@@ -54,6 +54,15 @@ export function InboxLink(props: { active: boolean; onClick: () => void }) {
 
 /** Every familiar's open questions and pending approvals, answered with one tap. */
 export default function InboxPage(props: { agents: Agent[]; onOpenAgent: (id: string) => void }) {
+  return (
+    <Page title="Inbox">
+      <InboxList agents={props.agents} onOpenAgent={props.onOpenAgent} />
+    </Page>
+  );
+}
+
+/** The inbox's groups and answer controls, also shown in Quick Ask. */
+export function InboxList(props: { agents: Agent[]; onOpenAgent: (id: string) => void }) {
   const inbox = createInbox();
   const [error, setError] = createSignal("");
   const agentById = (id: string) => props.agents.find((a) => a.id === id);
@@ -87,7 +96,7 @@ export default function InboxPage(props: { agents: Agent[]; onOpenAgent: (id: st
   const dismiss = (item: InboxItem) => run(item, () => api.dismissQuestion(item.id));
 
   return (
-    <Page title="Inbox">
+    <>
       <div class="inbox">
         <Show when={error()}>
           <p class="error-box" role="alert">
@@ -151,7 +160,7 @@ export default function InboxPage(props: { agents: Agent[]; onOpenAgent: (id: st
           </Shield>
         )}
       </Show>
-    </Page>
+    </>
   );
 }
 

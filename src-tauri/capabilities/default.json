@@ -4,7 +4,8 @@
   "description": "Main window permissions",
   "windows": [
     "main",
-    "dock"
+    "dock",
+    "quick"
   ],
   "permissions": [
     "core:default",
