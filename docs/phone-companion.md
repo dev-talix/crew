@@ -6,12 +6,15 @@ alerts when something needs you. Familiars, tools, the vault, and settings stay 
 
 This is the MVP scope. The last section lists what it leaves out.
 
+Screenshots from the iOS Simulator (iPhone 15 Pro Max, Safari), talking to a real Grimoire build over Tailscale:
+
 <table>
   <tr>
-    <td width="25%"><img src="screenshots/phone-pair.png" alt="Pairing screen on the phone"></td>
-    <td width="25%"><img src="screenshots/phone-inbox.png" alt="The inbox on the phone with two questions"></td>
-    <td width="25%"><img src="screenshots/phone-drafts.png" alt="An email draft on the phone in the dark theme"></td>
-    <td width="25%"><img src="screenshots/phone-chat.png" alt="A chat on the phone with a banner saying another familiar replied"></td>
+    <td width="20%"><img src="screenshots/phone-pair.png" alt="Pairing screen on the phone"></td>
+    <td width="20%"><img src="screenshots/phone-inbox.png" alt="The inbox with two questions"></td>
+    <td width="20%"><img src="screenshots/phone-notification.png" alt="A banner saying the Researcher asks a new question"></td>
+    <td width="20%"><img src="screenshots/phone-drafts.png" alt="A Slack draft ready to edit and send"></td>
+    <td width="20%"><img src="screenshots/phone-chat.png" alt="A chat with the Researcher"></td>
   </tr>
 </table>
 
