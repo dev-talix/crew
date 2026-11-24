@@ -67,6 +67,8 @@
   points to. Only http and https pages open. Up to 4 run at once, each closes after 15 idle minutes,
   and deleting a familiar deletes its profile.
 - **Voice** dictation in the composer uses macOS speech recognition.
+- **Your phone** pairs with Grimoire over Tailscale to answer the inbox, send drafts, and chat with familiars.
+  See [docs/phone-companion.md](docs/phone-companion.md).
 - **Remote familiars** run on another Mac over SSH, so the menu bar app on your laptop can drive a
   Mac Studio at home.
 
