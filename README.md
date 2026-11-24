@@ -57,6 +57,15 @@
   at once, each for at most 30 minutes, and a helper can't start helpers or message other familiars.
   The helpers button in the chat header shows each one's status, time, and transcript, with a Stop
   button. Helpers still running when Grimoire quits show as interrupted at the next launch.
+- **A browser of its own.** A familiar opens pages with `browser_open`, then reads, clicks, and types
+  with `browser_read`, `browser_click`, and `browser_type`. It runs in a headless Chromium with a profile
+  folder for that familiar, so it never opens a window on your screen or touches your own browser, and
+  sign-ins stay between sessions. The Browser button in the chat header shows the page live. For a
+  sign-in or a 2FA code, press Take over: your clicks, scrolls, typing, and pastes go to the page, and
+  the familiar's browser tools wait until you press Hand back. Grimoire uses Chrome, Chromium, Edge,
+  Brave, Playwright's Chrome for Testing, or Helium, in that order, or the browser `GRIMOIRE_BROWSER`
+  points to. Only http and https pages open. Up to 4 run at once, each closes after 15 idle minutes,
+  and deleting a familiar deletes its profile.
 - **Voice** dictation in the composer uses macOS speech recognition.
 - **Remote familiars** run on another Mac over SSH, so the menu bar app on your laptop can drive a
   Mac Studio at home.

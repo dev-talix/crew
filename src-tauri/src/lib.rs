@@ -2,6 +2,7 @@ mod approvals;
 mod chats;
 mod attachments;
 mod briefing;
+mod browser;
 mod budgets;
 mod covens;
 mod db;
@@ -342,6 +343,8 @@ async fn delete_agent(app: AppHandle, state: State<'_, AppState>, agent_id: Stri
         attachments::remove_for_agent(&state.db, &attachments::root(&dir), &agent_id);
     }
     state.db.delete_agent(&agent_id)?;
+    // After the row is gone, so a browser_open racing the delete finds no familiar to start for.
+    browser::forget(&agent_id).await;
     memory::forget(&state.db, memory::Owner { scope: memory::Scope::Familiar, id: &agent_id })?;
     let _ = app.emit("agents_changed", ());
     Ok(())
@@ -756,6 +759,7 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             memory::init(&dir);
+            browser::install(app.handle(), &dir);
             attachments::clear_staging(&attachments::root(&dir));
             // A setup error ends the app with a panic nobody sees, so say what's wrong first.
             let db = Arc::new(Db::open(&dir.join("grimoire.db")).inspect_err(|e| startup_alert(&e.to_string()))?);
@@ -920,6 +924,13 @@ pub fn run() {
             drafts::list_drafts,
             drafts::close_draft,
             drafts::open_draft_link,
+            browser::browser_status,
+            browser::browser_start,
+            browser::browser_stop,
+            browser::browser_frame,
+            browser::browser_control,
+            browser::browser_navigate,
+            browser::browser_input,
             remote::check_host,
             link::link_status,
             link::link_start_pairing,
@@ -941,8 +952,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Grimoire")
         .run(|app, event| {
-            if let RunEvent::Reopen { .. } = event {
-                let _ = dock::show_main(app, None);
+            match event {
+                RunEvent::Reopen { .. } => {
+                    let _ = dock::show_main(app, None);
+                }
+                // Closes familiars' browsers the gentle way, so they keep their sign-ins.
+                RunEvent::Exit => tauri::async_runtime::block_on(browser::close_all()),
+                _ => {}
             }
         });
 }
