@@ -254,12 +254,14 @@ export default function Chat(props: {
   const deleteRemote = async (id: string) => {
     setDeleting(true);
     setDeleteError("");
+    // A switch to another familiar closes this sheet, so a late answer only touches its own sheet.
+    const mine = () => confirmingDelete()?.id === id;
     try {
       await api.deleteAgent(id);
-      setConfirmingDelete(null);
+      if (mine()) setConfirmingDelete(null);
       props.onDeleted?.(id);
     } catch (err) {
-      setDeleteError(errorText(err));
+      if (mine()) setDeleteError(errorText(err));
     } finally {
       setDeleting(false);
     }

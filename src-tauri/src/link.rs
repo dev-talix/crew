@@ -1712,16 +1712,18 @@ impl Link {
     pub async fn delete(&self, id: &str) -> Result<(), String> {
         let (peer, agent) = parse_remote(id).ok_or("That familiar id is malformed.")?;
         let (name, mac) = self.names(peer, agent).ok_or("That Mac isn't linked anymore.")?;
+        let unconfirmed = || format!("{mac} didn't confirm that {name} was deleted. Check again in a moment.");
         match self.peer_call(peer, "DELETE", &format!("/v1/familiars/{agent}"), None, CALL_TIMEOUT).await {
             Ok(_) => {}
             // No answer can mean the delete ran but took too long, so ask what the home Mac has now.
-            Err(CallError::Offline) => {
-                return match self.refresh(peer).await {
-                    Ok(()) if !self.remote_familiars().iter().any(|f| f["id"] == id) => Ok(()),
-                    Ok(()) => Err(format!("{mac} didn't confirm that {name} was deleted. Check again in a moment.")),
-                    Err(_) => Err(format!("{mac} is offline, so {name} wasn't deleted. Try again when {mac} is back.")),
-                };
-            }
+            Err(CallError::Offline) => match self.peer_call(peer, "GET", "/v1/familiars", None, CALL_TIMEOUT).await {
+                Ok(reply) => match reply["familiars"].as_array() {
+                    Some(list) if !list.iter().any(|f| f["id"] == agent) => {}
+                    _ => return Err(unconfirmed()),
+                },
+                Err(CallError::Offline) => return Err(format!("{mac} is offline, so {name} can't be deleted right now. Try again when {mac} is back.")),
+                Err(_) => return Err(unconfirmed()),
+            },
             Err(CallError::Refused(_, why) | CallError::Untrusted(why)) => return Err(why),
         }
         // The home Mac's agents_changed event refreshes the list too; this drops it right away.
@@ -2722,7 +2724,7 @@ mod tests {
         cache_familiars(&b.db, "mac-a", &[json!({ "id": "f1", "name": "Scribe" })]);
         b.link.tokens.lock().unwrap().insert("mac-a".into(), tokens(&new_token(), &[&new_token()]));
         let error = b.link.delete(&remote_id("mac-a", "f1")).await.unwrap_err();
-        assert_eq!(error, "NigelBot is offline, so Scribe wasn't deleted. Try again when NigelBot is back.");
+        assert_eq!(error, "NigelBot is offline, so Scribe can't be deleted right now. Try again when NigelBot is back.");
         assert_eq!(b.link.remote_familiars().len(), 1, "it still shows until its Mac deletes it");
     }
 
@@ -2730,8 +2732,11 @@ mod tests {
     async fn a_delete_with_no_answer_checks_the_home_macs_list() {
         let still_there = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let there = still_there.clone();
+        let garbled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let garble = garbled.clone();
         let address = fake_peer(move |path, _| match path {
             "/v1/familiars/f1" => (0, Value::Null),
+            "/v1/familiars" if garble.load(std::sync::atomic::Ordering::SeqCst) => (200, Value::Null),
             "/v1/familiars" if there.load(std::sync::atomic::Ordering::SeqCst) => (200, json!({ "familiars": [{ "id": "f1", "name": "Scribe" }], "busy": [] })),
             _ => (200, json!({ "familiars": [], "busy": [] })),
         })
@@ -2746,8 +2751,14 @@ mod tests {
         assert_eq!(b.link.delete(&remote).await.unwrap_err(), "NigelBot didn't confirm that Scribe was deleted. Check again in a moment.");
         assert_eq!(b.link.remote_familiars().len(), 1);
 
-        // The delete ran there; only its answer was lost.
+        // A reply that isn't a list proves nothing.
         still_there.store(false, std::sync::atomic::Ordering::SeqCst);
+        garbled.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(b.link.delete(&remote).await.unwrap_err().contains("didn't confirm"));
+        assert_eq!(b.link.remote_familiars().len(), 1);
+
+        // The delete ran there; only its answer was lost.
+        garbled.store(false, std::sync::atomic::Ordering::SeqCst);
         b.link.delete(&remote).await.unwrap();
         assert!(b.link.remote_familiars().is_empty());
     }
