@@ -85,6 +85,8 @@ pub trait Local: Send + Sync {
     fn busy(&self) -> Vec<String>;
     /// Makes a familiar here and returns it as `list_agents` shows it.
     fn create(&self, input: NewFamiliar) -> BoxFuture<'_, Result<Value, String>>;
+    /// Deletes a familiar here and everything kept for it, as deleting it in this Mac's window does.
+    fn delete<'a>(&'a self, agent_id: &'a str) -> BoxFuture<'a, Result<(), String>>;
     /// A familiar on `peer` (called `mac`) asks or messages one here: see `delegation::incoming`.
     /// `here` is this Mac's install id. Returns the side conversation's id and its exchange.
     fn handoff(&self, here: &str, peer: &str, mac: &str, request: &crate::delegation::Incoming) -> Result<(String, BoxFuture<'static, TurnOutcome>), String>;
@@ -1145,6 +1147,11 @@ impl Link {
                 Ok(input) => self.local.create(input).await,
                 Err(e) => Err(format!("Bad familiar: {e}")),
             },
+            // Any linked Mac that may summon a familiar here may also delete one.
+            ("DELETE", ["familiars", id]) => match self.familiar_here(id) {
+                Ok(()) => self.local.delete(id).await.map(|_| json!({})),
+                Err(e) => Err(e),
+            },
             ("GET", ["familiars", id, "messages"]) => self.messages_here(id, &head.query),
             ("POST", ["familiars", id, "messages"]) => self.send_here(&peer, id, &request.body),
             ("POST", ["familiars", id, "stop"]) => match self.familiar_here(id) {
@@ -1701,6 +1708,33 @@ impl Link {
         self.peer_call(peer, "POST", &format!("/v1/familiars/{agent}/stop"), None, CALL_TIMEOUT).await.map(|_| ()).map_err(|e| self.explain(peer, e))
     }
 
+    /// Asks the familiar's home Mac to delete it, then drops it from this Mac's list.
+    pub async fn delete(&self, id: &str) -> Result<(), String> {
+        let (peer, agent) = parse_remote(id).ok_or("That familiar id is malformed.")?;
+        let (name, mac) = self.names(peer, agent).ok_or("That Mac isn't linked anymore.")?;
+        let unconfirmed = || format!("{mac} didn't confirm that {name} was deleted. Check again in a moment.");
+        match self.peer_call(peer, "DELETE", &format!("/v1/familiars/{agent}"), None, CALL_TIMEOUT).await {
+            Ok(_) => {}
+            // No answer can mean the delete ran but took too long, so ask what the home Mac has now.
+            Err(CallError::Offline) => match self.peer_call(peer, "GET", "/v1/familiars", None, CALL_TIMEOUT).await {
+                Ok(reply) => match reply["familiars"].as_array() {
+                    Some(list) if !list.iter().any(|f| f["id"] == agent) => {}
+                    _ => return Err(unconfirmed()),
+                },
+                Err(CallError::Offline) => return Err(format!("{mac} is offline, so {name} can't be deleted right now. Try again when {mac} is back.")),
+                Err(_) => return Err(unconfirmed()),
+            },
+            Err(CallError::Refused(_, why) | CallError::Untrusted(why)) => return Err(why),
+        }
+        // The home Mac's agents_changed event refreshes the list too; this drops it right away.
+        if let Some(row) = peer_row(&self.db, peer)? {
+            let rest: Vec<Value> = row.familiars.into_iter().filter(|f| f["id"] != agent).collect();
+            cache_familiars(&self.db, peer, &rest);
+        }
+        self.remote_changed(peer);
+        Ok(())
+    }
+
     pub async fn create(&self, peer: &str, input: &NewFamiliar) -> Result<Value, String> {
         let row = peer_row(&self.db, peer)?.ok_or("That Mac isn't linked anymore.")?;
         let body = serde_json::to_value(input).map_err(|e| e.to_string())?;
@@ -1775,6 +1809,10 @@ impl Local for AppLocal {
             let _ = tauri::Emitter::emit(&self.app, "agents_changed", ());
             serde_json::to_value(status).map_err(|e| e.to_string())
         })
+    }
+
+    fn delete<'a>(&'a self, agent_id: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(crate::remove_agent(&self.app, &self.db, &self.runtime, agent_id))
     }
 
     fn handoff(&self, here: &str, peer: &str, mac: &str, request: &crate::delegation::Incoming) -> Result<(String, BoxFuture<'static, TurnOutcome>), String> {
@@ -1892,6 +1930,10 @@ pub async fn create(peer: &str, input: NewFamiliar) -> Result<Value, String> {
     running()?.create(peer, &input).await
 }
 
+pub async fn delete(id: &str) -> Result<(), String> {
+    running()?.delete(id).await
+}
+
 #[tauri::command]
 pub fn link_status() -> Result<LinkStatus, String> {
     running()?.status()
@@ -1923,6 +1965,7 @@ mod tests {
         db: Arc<Db>,
         sent: Mutex<Vec<(String, String, String)>>,
         created: Mutex<Vec<NewFamiliar>>,
+        deleted: Mutex<Vec<String>>,
         familiars: Arc<FakeFamiliars>,
         chains: &'static Chains,
         waiters: Waiters,
@@ -1989,6 +2032,10 @@ mod tests {
             self.created.lock().unwrap().push(input);
             Box::pin(async { Ok(json!({ "id": "made" })) })
         }
+        fn delete<'a>(&'a self, agent_id: &'a str) -> BoxFuture<'a, Result<(), String>> {
+            self.deleted.lock().unwrap().push(agent_id.into());
+            Box::pin(async move { self.db.delete_agent(agent_id) })
+        }
     }
 
     /// Tailscale as the tests need it: a status to report, or none for a Mac without the CLI.
@@ -2054,6 +2101,7 @@ mod tests {
             db: db.clone(),
             sent: Mutex::new(Vec::new()),
             created: Mutex::new(Vec::new()),
+            deleted: Mutex::new(Vec::new()),
             familiars,
             chains: Box::leak(Box::default()),
             waiters: Waiters::default(),
@@ -2085,7 +2133,7 @@ mod tests {
     }
 
     /// A stand-in for a linked Mac that answers each path, and how many times it was asked, as
-    /// `answer` says.
+    /// `answer` says. Status 0 closes the connection without a reply.
     async fn fake_peer(answer: impl Fn(&str, usize) -> (u16, Value) + Send + Sync + 'static) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
@@ -2102,6 +2150,9 @@ mod tests {
                         *times
                     };
                     let (status, body) = answer(&request.head.path, times);
+                    if status == 0 {
+                        return;
+                    }
                     http::reply(&mut stream, status_line(status), "application/json", body.to_string().as_bytes()).await;
                 });
             }
@@ -2627,6 +2678,89 @@ mod tests {
         for (method, path) in [("GET", "/v1/vault"), ("POST", "/v1/approvals"), ("POST", "/v1/tools"), ("GET", "/v1/settings"), ("POST", "/v1/familiars/f1/access")] {
             assert_eq!(a.link.route(request(method, path, json!({}))).await.0, 404, "{method} {path}");
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_linked_mac_deletes_a_familiar_on_its_home_mac() {
+        let (a, b, peer) = linked().await;
+        eventually("B to list Scribe", || b.link.remote_familiars().len() == 1).await;
+        let remote = remote_id(&peer, "f1");
+        b.ui.0.lock().unwrap().clear();
+
+        b.link.delete(&remote).await.unwrap();
+        assert_eq!(*a.local.deleted.lock().unwrap(), ["f1"], "A ran its own delete");
+        assert!(a.db.get_agent("f1").unwrap().is_none());
+        assert!(b.link.remote_familiars().is_empty(), "B dropped it at once");
+        assert!(events_named(&b, "agents_changed").contains(&json!({ "peerId": peer })), "B's window reloads its list");
+
+        let again = b.link.delete(&remote).await.unwrap_err();
+        assert!(again.contains("no longer exists"), "{again}");
+        assert!(b.link.delete("peer:../x:f1").await.unwrap_err().contains("malformed"));
+        assert_eq!(a.local.deleted.lock().unwrap().len(), 1, "nothing else was deleted");
+    }
+
+    #[tokio::test]
+    async fn the_home_mac_checks_the_familiar_a_linked_mac_deletes() {
+        let a = mac("Studio");
+        a.db.insert_agent(&agent("f1", "Scribe")).unwrap();
+        let token = new_token();
+        a.link.tokens.lock().unwrap().insert("b".into(), tokens("s", &[&token]));
+        let delete = |path: &str, auth: &str| http::Request { head: http::parse_head(&format!("DELETE {path} HTTP/1.1\r\nAuthorization: Bearer {auth}")).unwrap(), body: Vec::new() };
+        assert_eq!(a.link.route(delete("/v1/familiars/f1", &new_token())).await.0, 401, "an unlinked Mac can't delete");
+        for path in ["/v1/familiars/nobody", "/v1/familiars/..", "/v1/familiars/f1%2F.."] {
+            let (status, reply) = a.link.route(delete(path, &token)).await;
+            assert_eq!(status, 400, "{path}");
+            assert!(reply["error"].as_str().unwrap().contains("no longer exists"), "{path}: {reply}");
+        }
+        assert!(a.local.deleted.lock().unwrap().is_empty());
+        assert_eq!(a.link.route(delete("/v1/familiars/f1", &token)).await.0, 200);
+        assert_eq!(*a.local.deleted.lock().unwrap(), ["f1"]);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_familiar_on_an_offline_mac_says_so_and_keeps_it() {
+        let b = mac("Laptop");
+        save_peer(&b.db, "mac-a", "NigelBot", "127.0.0.1:1").unwrap();
+        cache_familiars(&b.db, "mac-a", &[json!({ "id": "f1", "name": "Scribe" })]);
+        b.link.tokens.lock().unwrap().insert("mac-a".into(), tokens(&new_token(), &[&new_token()]));
+        let error = b.link.delete(&remote_id("mac-a", "f1")).await.unwrap_err();
+        assert_eq!(error, "NigelBot is offline, so Scribe can't be deleted right now. Try again when NigelBot is back.");
+        assert_eq!(b.link.remote_familiars().len(), 1, "it still shows until its Mac deletes it");
+    }
+
+    #[tokio::test]
+    async fn a_delete_with_no_answer_checks_the_home_macs_list() {
+        let still_there = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let there = still_there.clone();
+        let garbled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let garble = garbled.clone();
+        let address = fake_peer(move |path, _| match path {
+            "/v1/familiars/f1" => (0, Value::Null),
+            "/v1/familiars" if garble.load(std::sync::atomic::Ordering::SeqCst) => (200, Value::Null),
+            "/v1/familiars" if there.load(std::sync::atomic::Ordering::SeqCst) => (200, json!({ "familiars": [{ "id": "f1", "name": "Scribe" }], "busy": [] })),
+            _ => (200, json!({ "familiars": [], "busy": [] })),
+        })
+        .await;
+        let b = mac("Laptop");
+        save_peer(&b.db, "mac-a", "NigelBot", &address).unwrap();
+        b.link.tokens.lock().unwrap().insert("mac-a".into(), tokens(&new_token(), &[&new_token()]));
+        let remote = remote_id("mac-a", "f1");
+
+        still_there.store(true, std::sync::atomic::Ordering::SeqCst);
+        cache_familiars(&b.db, "mac-a", &[json!({ "id": "f1", "name": "Scribe" })]);
+        assert_eq!(b.link.delete(&remote).await.unwrap_err(), "NigelBot didn't confirm that Scribe was deleted. Check again in a moment.");
+        assert_eq!(b.link.remote_familiars().len(), 1);
+
+        // A reply that isn't a list proves nothing.
+        still_there.store(false, std::sync::atomic::Ordering::SeqCst);
+        garbled.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(b.link.delete(&remote).await.unwrap_err().contains("didn't confirm"));
+        assert_eq!(b.link.remote_familiars().len(), 1);
+
+        // The delete ran there; only its answer was lost.
+        garbled.store(false, std::sync::atomic::Ordering::SeqCst);
+        b.link.delete(&remote).await.unwrap();
+        assert!(b.link.remote_familiars().is_empty());
     }
 
     #[tokio::test]

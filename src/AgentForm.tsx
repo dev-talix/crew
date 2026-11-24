@@ -323,7 +323,7 @@ export default function AgentForm(props: {
               <Show when={peer()}>
                 {(mac) => (
                   <p class="hint">
-                    It lives on {mac().name} and shows up here too. Only {mac().name} can change or delete it, and{" "}
+                    It lives on {mac().name} and shows up here too. Only {mac().name} can change it, any linked Mac can delete it, and{" "}
                     {PROVIDER_NAMES[provider()]} must be installed and signed in there.
                   </p>
                 )}
