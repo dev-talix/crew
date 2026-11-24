@@ -388,6 +388,7 @@ export default function App() {
                     }}
                     onMemory={() => setMemoryOpen(true)}
                     onAgentUpdated={replaceAgent}
+                    onDeleted={deleted}
                     intent={chatIntent()}
                     onIntentDone={() => setChatIntent(null)}
                   />

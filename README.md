@@ -241,8 +241,9 @@ stream.
 Two Macs running Grimoire on the same Tailscale tailnet can link, with no SSH. Each familiar lives
 on one Mac, its home, which keeps its chats, memory, ledger, and rituals. Every linked Mac lists it
 with its home Mac's name, shows its chat as it streams, and can send it messages and stop its turns.
-Only the home Mac can edit or delete it. A linked Mac can also summon a new familiar on another
-Mac, which then becomes its home.
+Only the home Mac can edit it. Any linked Mac can delete it, and the home Mac then deletes it the
+same way it would locally. Deleting needs the home Mac online. A linked Mac can also summon a new
+familiar on another Mac, which then becomes its home.
 
 To link, make a pairing code on one Mac, then enter that Mac's Tailscale name or address and the
 code on the other. A code is 8 characters, works once, lasts 10 minutes, and dies after 5 wrong
@@ -256,8 +257,8 @@ It checks again every minute and moves to new addresses when they change. Withou
 back to tailnet-range addresses (100.64.0.0/10 and fd7a:115c:a1e0::/48) on Tailscale's own tunnel
 interfaces, never Wi-Fi or Ethernet, since ISPs and hotspots use 100.64.0.0/10 too. Tailscale
 encrypts the traffic. Each pair of Macs shares a token each way, kept in the Keychain. A linked Mac
-can only list familiars, read and send chat messages, stop turns, and summon familiars that run on
-the home Mac itself with workspace access. It can't reach the vault, approvals, settings, memory, or
+can only list familiars, read and send chat messages, stop turns, summon familiars that run on
+the home Mac itself with workspace access, and delete the home Mac's familiars. It can't reach the vault, approvals, settings, memory, or
 Grimoire's tools. Attachments don't cross yet. When a linked Mac is offline, its familiars stay
 listed as of the last time it answered. When it reconnects, it catches up on what it missed, or
 reloads open chats if it missed too much or the other Mac restarted. Switching chats on the home Mac

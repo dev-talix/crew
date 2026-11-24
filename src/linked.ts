@@ -6,7 +6,7 @@ export function parseRemoteId(id: string): { peerId: string; agentId: string } |
   return match ? { peerId: match[1], agentId: match[2] } : null;
 }
 
-/** Lives on a linked Mac, so only that Mac can change or delete it. */
+/** Lives on a linked Mac, so only that Mac can change it. Any linked Mac can delete it. */
 export const isRemote = (agent: Pick<Agent, "home">) => !!agent.home;
 
 /**
@@ -39,6 +39,12 @@ export const homeOffline = (agent: Pick<Agent, "home">) => !!agent.home && !agen
 export function offlineNotice(agent: Pick<Agent, "name" | "home">): string {
   const mac = agent.home?.name ?? "Its Mac";
   return `${mac} is offline, so ${agent.name} can't be reached right now. Try again when that Mac is back.`;
+}
+
+/** What the confirm sheet says before a linked familiar is deleted on its Mac. */
+export function remoteDeleteNotice(agent: Pick<Agent, "name" | "home">): string {
+  const mac = agent.home?.name ?? "its Mac";
+  return `${agent.name} lives on ${mac}. Deleting it there removes its chats, memory, and settings on every linked Mac. Its workspace folder on ${mac} stays.`;
 }
 
 /** What the badge on a linked familiar says when you hover it. */

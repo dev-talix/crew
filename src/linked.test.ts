@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { AgentHome } from "./api";
-import { countdown, groupByHome, homeOffline, homeTitle, isRemote, isRemoteThread, offlineNotice, parseRemoteId, peerState, reloadsOpenChat, remoteSideLabel, runsOnOptions } from "./linked";
+import { countdown, groupByHome, homeOffline, homeTitle, isRemote, isRemoteThread, offlineNotice, parseRemoteId, peerState, reloadsOpenChat, remoteDeleteNotice, remoteSideLabel, runsOnOptions } from "./linked";
 
 const studio: AgentHome = { peerId: "p1", name: "Studio", online: true };
 const air: AgentHome = { peerId: "p2", name: "Air", online: false };
@@ -25,6 +25,12 @@ test("words the offline notice and badge title", () => {
   expect(offlineNotice({ name: "Nigel", home: air })).toBe("Air is offline, so Nigel can't be reached right now. Try again when that Mac is back.");
   expect(homeTitle({ name: "Nigel", home: studio })).toBe("Nigel lives on Studio. Open Grimoire there to change it.");
   expect(homeTitle({ name: "Nigel", home: air })).toBe("Air can't be reached right now.");
+});
+
+test("names the Mac a linked familiar is deleted on", () => {
+  expect(remoteDeleteNotice({ name: "Nigel", home: studio })).toBe(
+    "Nigel lives on Studio. Deleting it there removes its chats, memory, and settings on every linked Mac. Its workspace folder on Studio stays.",
+  );
 });
 
 test("groups this Mac first, then linked Macs by name", () => {

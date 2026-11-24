@@ -10,8 +10,8 @@ import Ledger from "./Ledger";
 import Helpers from "./Helpers";
 import BrowserPanel from "./BrowserPanel";
 import ModelPicker from "./ModelPicker";
-import { HostBadge } from "./ui";
-import { homeOffline, isRemote, offlineNotice, remoteSideLabel } from "./linked";
+import { HostBadge, Sheet } from "./ui";
+import { homeOffline, isRemote, offlineNotice, remoteDeleteNotice, remoteSideLabel } from "./linked";
 import SideConversation from "./SideConversation";
 import { effortName, runningModelName } from "./models";
 import {
@@ -34,6 +34,7 @@ import {
   StopIcon,
   TalkIcon,
   TerminalIcon,
+  TrashIcon,
   WrenchIcon,
 } from "./icons";
 import { openLinks, renderMarkdown } from "./markdown";
@@ -230,6 +231,8 @@ export default function Chat(props: {
   onEdit: (opener: HTMLElement) => void;
   onMemory?: () => void;
   onAgentUpdated: (agent: Agent) => void;
+  /** After a familiar on a linked Mac is deleted there. Its settings stay on that Mac, so this is the only way here. */
+  onDeleted?: (id: string) => void;
   compact?: { onClose: () => void; onOpenMain: () => void };
   intent?: ChatIntent | null;
   onIntentDone?: () => void;
@@ -240,6 +243,27 @@ export default function Chat(props: {
   // A familiar on a linked Mac: chat and stop work here; its settings, chats, memory, and files stay on that Mac.
   const remote = () => isRemote(props.agent);
   const offline = () => homeOffline(props.agent);
+  // The familiar the confirm sheet is for, held so switching familiars can't retarget the delete.
+  const [confirmingDelete, setConfirmingDelete] = createSignal<Agent | null>(null);
+  const [deleteError, setDeleteError] = createSignal("");
+  const [deleting, setDeleting] = createSignal(false);
+  const closeDelete = () => {
+    setConfirmingDelete(null);
+    setDeleteError("");
+  };
+  const deleteRemote = async (id: string) => {
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await api.deleteAgent(id);
+      setConfirmingDelete(null);
+      props.onDeleted?.(id);
+    } catch (err) {
+      setDeleteError(errorText(err));
+    } finally {
+      setDeleting(false);
+    }
+  };
   const files = createComposerFiles(setActionError, () => !remote());
   let recognition: SpeechRecognitionLike | undefined;
   let list!: HTMLDivElement;
@@ -335,6 +359,7 @@ export default function Chat(props: {
       stickToBottom = true;
       setActionError("");
       setChatsOpen(false);
+      closeDelete();
       shown = null;
       void refreshChats();
       input?.focus();
@@ -575,6 +600,11 @@ export default function Chat(props: {
               </button>
             )}
           </Show>
+          <Show when={!props.compact && remote() && props.onDeleted}>
+            <button class="icon-button" aria-label={`Delete ${props.agent.name}`} title={`Delete ${props.agent.name}`} onClick={() => setConfirmingDelete(props.agent)}>
+              <TrashIcon />
+            </button>
+          </Show>
           <Show
             when={props.compact}
             fallback={
@@ -593,6 +623,28 @@ export default function Chat(props: {
           </Show>
         </div>
       </header>
+      <Show when={confirmingDelete()}>
+        {(target) => (
+          <Sheet label={`Delete ${target().name}`} onClose={closeDelete}>
+            <h1>Delete {target().name}?</h1>
+            <p class="hint">{remoteDeleteNotice(target())}</p>
+            <Show when={deleteError()}>
+              <p class="error-box" role="alert">
+                {deleteError()}
+              </p>
+            </Show>
+            <div class="form-actions">
+              <span class="spacer" />
+              <button type="button" class="ghost" onClick={closeDelete}>
+                Cancel
+              </button>
+              <button type="button" class="ghost danger" disabled={deleting()} onClick={() => void deleteRemote(target().id)}>
+                {deleting() ? "Deleting..." : `Delete on ${target().home?.name ?? "its Mac"}`}
+              </button>
+            </div>
+          </Sheet>
+        )}
+      </Show>
       <Show when={!remote()}>
         <Ledger agentId={props.agent.id} name={props.agent.name} />
       </Show>
