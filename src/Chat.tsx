@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, flush, For, Match, onCleanup, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, flush, For, Match, onCleanup, onSettled, Show, Switch } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import BotAvatar, { type Mood } from "./BotAvatar";
 import { api, changesFor, errorText, onEvent, onMountAsync, PROVIDER_NAMES, type Agent, type Attachment, type ChatInfo, type Message } from "./api";
@@ -226,7 +226,7 @@ export default function Chat(props: {
   busy: boolean;
   mood?: Mood;
   store: ChatStore;
-  onEdit: () => void;
+  onEdit: (opener: HTMLElement) => void;
   onMemory?: () => void;
   onAgentUpdated: (agent: Agent) => void;
   compact?: { onClose: () => void; onOpenMain: () => void };
@@ -393,11 +393,25 @@ export default function Chat(props: {
     }
   };
 
-  const resize = () => {
-    flush(); // Measure the textarea after the draft change reaches the DOM.
+  const fitInput = () => {
     input.style.height = "auto";
     input.style.height = `${Math.min(input.scrollHeight, 240)}px`;
   };
+  const resize = () => {
+    flush(); // Measure the textarea after the draft change reaches the DOM.
+    fitInput();
+  };
+  // The composer narrows when familiar settings open beside the chat, so the draft fits itself again.
+  onSettled(() => {
+    let width = input.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (input.clientWidth === width) return;
+      width = input.clientWidth;
+      fitInput();
+    });
+    observer.observe(input);
+    return () => observer.disconnect();
+  });
 
   const stopDictation = () => recognition?.stop();
   onCleanup(stopDictation);
@@ -561,7 +575,7 @@ export default function Chat(props: {
             when={props.compact}
             fallback={
               <Show when={!remote()}>
-                <button class="icon-button" aria-label="Familiar settings" title="Familiar settings" onClick={props.onEdit}>
+                <button class="icon-button" aria-label="Familiar settings" title="Familiar settings" onClick={(e) => props.onEdit(e.currentTarget)}>
                   <GearIcon />
                 </button>
               </Show>

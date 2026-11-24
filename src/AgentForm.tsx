@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, onSettled, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 import AvatarStudio from "./AvatarStudio";
 import { Segmented } from "./ui";
 import { inkFor, randomAvatar, type Avatar } from "./avatar";
@@ -9,6 +9,7 @@ import { BudgetField } from "./BudgetControls";
 import { formatTokens, parseTokens, type BudgetPeriod } from "./budgets";
 import { ExportButton } from "./ImportExport";
 import TemplateImport from "./TemplateImport";
+import { followUntouched } from "./panel";
 
 const ACCESS_HELP: Record<Provider, Record<Access, string>> = {
   codex: {
@@ -95,6 +96,23 @@ export default function AgentForm(props: {
   const [confirmDelete, setConfirmDelete] = createSignal(false);
   const [importing, setImporting] = createSignal(false);
   const [budget, setBudget] = createSignal("");
+  // Settings sit beside the chat, which can change the model, effort, and access while they're open.
+  // A field the user hasn't touched follows those changes, so saving doesn't undo them.
+  if (props.agent) {
+    let before = props.agent;
+    createEffect(
+      () => props.agent!,
+      (after) => {
+        setName((v) => followUntouched(v, before.name, after.name));
+        setModel((v) => followUntouched(v, before.model ?? "", after.model ?? ""));
+        setEffort((v) => followUntouched(v, before.effort ?? "", after.effort ?? ""));
+        setCoven((v) => followUntouched(v, before.covenId ?? "", after.covenId ?? ""));
+        setAccess((v) => followUntouched(v, before.access, after.access));
+        setAvatar((v) => followUntouched(v, before.avatar, after.avatar));
+        before = after;
+      },
+    );
+  }
   const [period, setPeriod] = createSignal<BudgetPeriod>("day");
   let hadBudget = false;
   onSettled(() => {
@@ -132,7 +150,15 @@ export default function AgentForm(props: {
     setSaving(true);
     try {
       const saved = props.agent
-        ? await api.updateAgent(props.agent.id, { name: name(), model: model(), access: access(), avatar: avatar(), effort: effort(), covenId: coven() || null })
+        ? await api.updateAgent(props.agent.id, {
+            name: name(),
+            model: model(),
+            access: access(),
+            avatar: avatar(),
+            // The chat beside these settings can switch to a model that doesn't offer the effort picked here.
+            effort: efforts().includes(effort()) ? effort() : "",
+            covenId: coven() || null,
+          })
         : await api.createAgent(
             target
               ? { name: name(), provider: provider(), model: model(), workspace: "", access: access(), avatar: avatar(), effort: effort(), peerId: target.id }

@@ -1,8 +1,10 @@
-import { For, onSettled, Show } from "solid-js";
+import { createSignal, For, onSettled, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import BotAvatar from "./BotAvatar";
 import { hostState, type Agent } from "./api";
+import { CloseIcon } from "./icons";
 import { homeTitle } from "./linked";
+import { CHAT_MIN, clampPanelWidth, OVERLAY_GAP, PANEL_MIN, panelMax, parsePanelWidth } from "./panel";
 
 /** The Mac a remote or linked familiar runs on, and whether that Mac is offline or still owes it its setup. */
 export function HostBadge(props: { agent: Agent; host: string; title?: string }) {
@@ -56,6 +58,120 @@ export function Sheet(props: { label: string; onClose: () => void; children: JSX
       <div class={["sheet", { narrow: !props.wide }]} role="dialog" aria-modal="true" aria-label={props.label}>
         {props.children}
       </div>
+    </div>
+  );
+}
+
+const PANEL_KEY = "grimoire-panel-width";
+
+function readWidth(): string | null {
+  try {
+    return localStorage.getItem(PANEL_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A resizable panel on the right of its parent, beside the page rather than over it. A narrow parent
+ * gets it floating over the page instead. Escape closes it while focus is inside, and closing hands
+ * focus back to `opener`, or to whatever had focus when it opened.
+ */
+export function SidePanel(props: { label: string; onClose: () => void; children: JSX.Element; opener?: HTMLElement }) {
+  let panel!: HTMLDivElement;
+  const opener = props.opener ?? (document.activeElement as HTMLElement | null);
+  // `wanted` is the width the user chose. `width` is what fits the current layout.
+  let wanted = parsePanelWidth(readWidth());
+  const [width, setWidth] = createSignal(wanted);
+  const [max, setMax] = createSignal(width());
+  // What the page beside or under the panel keeps, read from the layout the stylesheet picked.
+  const reserve = () => (getComputedStyle(panel).position === "absolute" ? OVERLAY_GAP : CHAT_MIN);
+  const available = () => panel.parentElement?.clientWidth ?? width() + CHAT_MIN;
+  const fit = (next: number) => {
+    setMax(panelMax(available(), reserve()));
+    const fitted = clampPanelWidth(next, available(), reserve());
+    setWidth(fitted);
+    return fitted;
+  };
+  const resize = (next: number) => {
+    const fitted = fit(next);
+    wanted = fitted;
+    try {
+      localStorage.setItem(PANEL_KEY, String(fitted));
+    } catch {
+      // The width still applies until the panel closes.
+    }
+  };
+  // The handle is on the left edge, so dragging left makes the panel wider.
+  const startDrag = (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const handle = e.currentTarget as HTMLElement;
+    const startX = e.clientX;
+    const startWidth = width();
+    handle.setPointerCapture(e.pointerId);
+    const move = (m: PointerEvent) => resize(startWidth + startX - m.clientX);
+    const stop = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", stop);
+      handle.removeEventListener("pointercancel", stop);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", stop);
+    handle.addEventListener("pointercancel", stop);
+  };
+  const resizeKey = (e: KeyboardEvent) => {
+    const step = e.shiftKey ? 64 : 16;
+    if (e.key === "ArrowLeft") resize(width() + step);
+    else if (e.key === "ArrowRight") resize(width() - step);
+    else return;
+    e.preventDefault();
+  };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key !== "Escape" || e.defaultPrevented) return;
+    // A modal opened on top, like Settings from ⌘, while a field here had focus, takes Escape first.
+    if (document.querySelector('[aria-modal="true"]')) return;
+    e.preventDefault();
+    props.onClose();
+  };
+  onSettled(() => {
+    panel.focus();
+    // The window or the layout changed: keep the chosen width, but show what fits now.
+    const observer = new ResizeObserver(() => fit(wanted));
+    if (panel.parentElement) observer.observe(panel.parentElement);
+    return () => {
+      observer.disconnect();
+      if (opener?.isConnected) opener.focus();
+    };
+  });
+  return (
+    <div
+      ref={panel}
+      class="side-panel"
+      role="dialog"
+      aria-modal="false"
+      aria-label={props.label}
+      tabindex="-1"
+      style={{ "--panel-width": `${width()}px` }}
+      onKeyDown={onKey}
+    >
+      <div
+        class="side-panel-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={`Resize ${props.label.toLowerCase()}`}
+        aria-valuenow={width()}
+        aria-valuemin={PANEL_MIN}
+        aria-valuemax={max()}
+        tabindex="0"
+        title="Drag to resize. Arrow keys work too."
+        onPointerDown={startDrag}
+        onKeyDown={resizeKey}
+      />
+      <button class="icon-button side-panel-close" aria-label={`Close ${props.label.toLowerCase()}`} title="Close (Esc)" onClick={() => props.onClose()}>
+        <CloseIcon />
+      </button>
+      <div class="side-panel-body">{props.children}</div>
     </div>
   );
 }

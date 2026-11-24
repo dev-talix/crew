@@ -25,6 +25,9 @@
 }
 
 .crumb-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font: 500 17px/1 var(--font-display);
   white-space: nowrap;
 }
