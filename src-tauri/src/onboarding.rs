@@ -56,7 +56,12 @@ pub(crate) fn onboarding_needed(state: State<'_, crate::AppState>) -> Result<boo
     if state.db.setting(DONE)?.is_some() {
         return Ok(false);
     }
-    Ok(state.db.list_agents()?.is_empty())
+    // Someone with familiars is past setup, even if saving that failed when the first was made.
+    if !state.db.list_agents()?.is_empty() {
+        state.db.set_setting(DONE, "1")?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 #[tauri::command]

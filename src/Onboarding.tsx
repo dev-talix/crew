@@ -165,6 +165,7 @@ function StarterStep(props: { statuses: ProviderStatus[]; onBack: () => void; on
 
   const create = async (e: SubmitEvent) => {
     e.preventDefault();
+    if (busy()) return;
     setBusy(true);
     setError("");
     try {
@@ -219,7 +220,7 @@ function StarterStep(props: { statuses: ProviderStatus[]; onBack: () => void; on
         </p>
       </Show>
       <div class="onboarding-actions">
-        <button type="button" class="ghost" onClick={props.onBack}>
+        <button type="button" class="ghost" disabled={busy()} onClick={props.onBack}>
           Back
         </button>
         <span class="onboarding-spacer" />

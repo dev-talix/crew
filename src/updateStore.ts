@@ -21,6 +21,14 @@ function read(key: string): string | null {
   }
 }
 
+function forget(key: string) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // The next launch checks again anyway when storage is unavailable.
+  }
+}
+
 function write(key: string, value: string) {
   try {
     localStorage.setItem(key, value);
@@ -72,7 +80,12 @@ export function startUpdateChecks() {
   const last = read(LAST_KEY);
   if (autoCheck() && isDue(last === null ? null : Number(last), Date.now())) {
     checkForUpdates()
-      .then((check) => (shouldInstall(check, autoCheck()) ? installUpdate() : null))
+      .then((check) =>
+        shouldInstall(check, autoCheck())
+          ? // A failed download shouldn't wait a day: the next launch checks and tries again.
+            installUpdate().catch(() => forget(LAST_KEY))
+          : null,
+      )
       .catch(() => {});
   }
 }
