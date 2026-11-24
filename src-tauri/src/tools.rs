@@ -213,6 +213,13 @@ pub fn server_command(agent_id: &str) -> Option<ServerCommand> {
     })
 }
 
+/// The command for a relay to one connector. It shares `agent_id`'s token, so the app knows who calls.
+pub fn connector_command(agent_id: &str, connector_id: &str) -> Option<ServerCommand> {
+    let mut command = server_command(agent_id)?;
+    command.args.push(connector_id.into());
+    Some(command)
+}
+
 /// Where Claude MCP configs go: next to the socket, readable only by this user.
 fn config_dir(socket: &Path) -> PathBuf {
     socket.with_file_name("mcp-config")
@@ -615,9 +622,15 @@ struct Request {
     agent: String,
     #[serde(default)]
     token: String,
+    #[serde(default)]
     tool: String,
     #[serde(default)]
     arguments: Value,
+    /// Set by a connector relay, with the raw MCP message to forward.
+    #[serde(default)]
+    connector: Option<String>,
+    #[serde(default)]
+    message: Value,
 }
 
 /// Reads one relayed call and checks that its token belongs to the familiar it names.
@@ -635,6 +648,14 @@ async fn handle_connection(stream: UnixStream, ctx: Arc<Context>) {
     let mut lines = BufReader::new(read).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         let reply = match authorize(&line) {
+            Ok(Request { agent, connector: Some(connector), message, .. }) => {
+                // The agent is the one the token belongs to; a familiar in a side conversation calls as "familiar~chat".
+                let familiar = crate::side::split(&agent).0.to_string();
+                match crate::connectors::forward(&ctx.db, ctx.secrets.as_ref(), &agent, &familiar, &connector, message).await {
+                    Ok(messages) => json!({ "ok": true, "messages": messages }),
+                    Err(error) => json!({ "ok": false, "error": error }),
+                }
+            }
             Ok(request) => {
                 // A familiar answering in a side conversation calls as "familiar~chat".
                 let (caller, lane) = crate::side::split(&request.agent);

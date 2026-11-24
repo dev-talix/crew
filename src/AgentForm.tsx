@@ -1,6 +1,6 @@
 import { createEffect, createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 import AvatarStudio from "./AvatarStudio";
-import { Segmented } from "./ui";
+import { Segmented, Toggle } from "./ui";
 import { inkFor, randomAvatar, type Avatar } from "./avatar";
 import { api, createFetch, errorText, onEvent, onMountAsync, PROVIDER_NAMES, shortPath, type Access, type Agent, type Coven, type HostCheck, type Peer, type Provider } from "./api";
 import { runsOnOptions } from "./linked";
@@ -10,6 +10,8 @@ import { formatTokens, parseTokens, type BudgetPeriod } from "./budgets";
 import { ExportButton } from "./ImportExport";
 import TemplateImport from "./TemplateImport";
 import { followUntouched } from "./panel";
+import { toggleId, type Connector } from "./connectors";
+import "./connectors.css";
 
 const ACCESS_HELP: Record<Provider, Record<Access, string>> = {
   codex: {
@@ -127,6 +129,17 @@ export default function AgentForm(props: {
       }
     }, () => undefined);
   });
+  const [connectors, setConnectors] = createSignal<Connector[]>([]);
+  const [enabled, setEnabled] = createSignal<string[]>([]);
+  onSettled(() => {
+    api.listConnectors().then((list) => {
+      setConnectors(list);
+      const id = props.agent?.id;
+      if (id) setEnabled(list.filter((c) => c.agents.includes(id)).map((c) => c.id));
+    }, () => undefined);
+  });
+  // Connectors go through the tool socket on this Mac, so familiars elsewhere can't use them yet.
+  const connectorsHere = () => !linkedMac() && !remote() && !props.agent?.host && !props.agent?.home;
   let confirmTimer: number | undefined;
   onCleanup(() => clearTimeout(confirmTimer));
 
@@ -176,6 +189,12 @@ export default function AgentForm(props: {
           );
       // A linked Mac keeps its familiars' budgets; this Mac can't set one there.
       if (!target && (tokens !== null || hadBudget)) await api.setBudget(saved.id, tokens === null ? null : { tokens, period: period() });
+      if (connectorsHere() && connectors().length > 0) {
+        const assigned = api.setAgentConnectors(saved.id, enabled());
+        // A new familiar exists by now; failing here would invite a second Summon and a duplicate.
+        // Its connectors can be turned on again in its settings.
+        await (editing ? assigned : assigned.catch(() => undefined));
+      }
       if (!editing && saved.setupPending) {
         setSavedPending(saved);
         return;
@@ -363,6 +382,27 @@ export default function AgentForm(props: {
 
           <Show when={!linkedMac()}>
             <BudgetField text={budget()} period={period()} onText={setBudget} onPeriod={setPeriod} />
+          </Show>
+
+          <Show when={connectorsHere()}>
+            <div class="field wide">
+              <span>Connectors</span>
+              <Show when={connectors().length > 0} fallback={<p class="hint">Add hosted servers like Linear or Notion in Settings, under Connectors, then turn them on here.</p>}>
+                <div class="list connector-toggles">
+                  <For each={connectors()}>
+                    {(c) => (
+                      <div class="list-row">
+                        <div class="list-main">
+                          <span class="list-title">{c.name}</span>
+                          <span class="list-sub">{c.auth ? `Tools appear as ${c.key} in new chats` : "Sign in under Settings, Connectors, before it works"}</span>
+                        </div>
+                        <Toggle label={`Use ${c.name}`} checked={enabled().includes(c.id)} onChange={(on) => setEnabled((ids) => toggleId(ids, c.id, on))} />
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </div>
           </Show>
 
           <div class="field wide">

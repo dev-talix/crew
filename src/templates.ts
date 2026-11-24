@@ -136,18 +136,24 @@ export function memoryFit(rows: MemoryRow[]): { bytes: number; fits: boolean; to
   return { bytes, fits: bytes <= MEMORY_LIMIT && tooLong === 0, tooLong };
 }
 
-/** What the template asks for, in words for the preview. */
-export function permissionLines(t: MarketTemplate, access: Access, provider: Provider): string[] {
+/**
+ * What the template asks for, in words for the preview. `connectable` names the template's apps
+ * that Grimoire offers as connectors.
+ */
+export function permissionLines(t: MarketTemplate, access: Access, provider: Provider, connectable: string[] = []): string[] {
   const workspace =
     provider === "codex"
       ? "Full access: off. Codex runs it in a sandbox that changes files only in its workspace folder."
       : "Full access: off. Claude edits files only in its workspace, but shell commands follow your Permissions settings, which allow them unless you set Grimoire to ask.";
   const lines = [
     access === "full" ? "Full access: on. Commands can run anywhere on this Mac without a sandbox." : workspace,
-    "No tools, skills, or connectors are installed. Skills come in as written rules only.",
+    connectable.length
+      ? "No tools or skills are installed. Skills come in as written rules only."
+      : "No tools, skills, or connectors are installed. Skills come in as written rules only.",
   ];
-  if (t.integrations.length)
-    lines.push(`Expects ${t.integrations.length === 1 ? "this app" : "these apps"}, which Grimoire won't connect: ${t.integrations.map((i) => i.name).join(", ")}.`);
+  if (connectable.length) lines.push(`Connectors below can link ${connectable.join(", ")} once you sign in.`);
+  const rest = t.integrations.map((i) => i.name).filter((name) => !connectable.includes(name));
+  if (rest.length) lines.push(`Expects ${rest.length === 1 ? "this app" : "these apps"}, which Grimoire won't connect: ${rest.join(", ")}.`);
   if (t.routines.length) lines.push(`Rituals come in turned off. Turn each on in Rituals after you check its schedule.`);
   return lines;
 }

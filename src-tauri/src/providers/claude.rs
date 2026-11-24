@@ -100,9 +100,20 @@ fn args(agent: &Agent, lane: Option<&Lane>) -> Vec<String> {
             "env": { (crate::tools::TOKEN_ENV): tools.token },
             "timeout": crate::tools::CALL_TIMEOUT_SECS * 1000,
         });
-        let config = json!({ "mcpServers": { (crate::tools::SERVER_NAME): server } });
-        if let Some(path) = crate::tools::claude_config_file(lane.map_or(&agent.id, |l| &l.key), &config) {
-            args.extend(["--mcp-config".into(), path.to_string_lossy().into_owned(), "--allowedTools".into(), crate::tools::claude_tool_names()]);
+        let key = lane.map_or(&agent.id, |l| &l.key);
+        let mut servers = serde_json::Map::from_iter([(crate::tools::SERVER_NAME.to_string(), server)]);
+        let mut allowed = crate::tools::claude_tool_names();
+        // Each connector the familiar has on runs through its own relay; the person turned it on, so its tools are allowed.
+        for (name, id) in crate::connectors::servers_for(agent) {
+            if let Some(relay) = crate::tools::connector_command(key, &id) {
+                let relay = json!({ "command": relay.command, "args": relay.args, "env": { (crate::tools::TOKEN_ENV): relay.token }, "timeout": crate::tools::CALL_TIMEOUT_SECS * 1000 });
+                allowed.push_str(&format!(",mcp__{name}"));
+                servers.insert(name, relay);
+            }
+        }
+        let config = json!({ "mcpServers": servers });
+        if let Some(path) = crate::tools::claude_config_file(key, &config) {
+            args.extend(["--mcp-config".into(), path.to_string_lossy().into_owned(), "--allowedTools".into(), allowed]);
         }
     }
     if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {

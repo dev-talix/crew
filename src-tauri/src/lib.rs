@@ -1,5 +1,6 @@
 mod approvals;
 mod chats;
+mod connectors;
 mod attachments;
 mod companion;
 mod briefing;
@@ -640,7 +641,7 @@ fn list_vault(state: State<AppState>) -> Result<Vec<vault::VaultItem>, String> {
 /// The secret fields of an item, for revealing or copying in the vault.
 #[tauri::command]
 fn vault_secret(state: State<AppState>, id: String) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    vault::secret(state.secrets.as_ref(), &id)
+    vault::item_secret(&state.db, state.secrets.as_ref(), &id)
 }
 
 #[tauri::command]
@@ -790,6 +791,7 @@ pub fn run() {
             permissions::install(app.handle().clone(), db.clone(), approvals.clone());
             #[cfg(target_os = "macos")]
             let secrets: Arc<dyn vault::SecretStore> = Arc::new(vault::Keychain);
+            connectors::install(db.clone());
             let tools = tools::Context {
                 app: app.handle().clone(),
                 db: db.clone(),
@@ -943,7 +945,15 @@ pub fn run() {
             link::link_status,
             link::link_start_pairing,
             link::link_pair,
-            link::link_unlink
+            link::link_unlink,
+            connectors::connector_catalog,
+            connectors::list_connectors,
+            connectors::add_connector,
+            connectors::remove_connector,
+            connectors::connector_sign_in,
+            connectors::connector_set_token,
+            connectors::connector_sign_out,
+            connectors::set_agent_connectors
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {

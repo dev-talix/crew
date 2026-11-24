@@ -41,6 +41,14 @@
   library" and it saves it through Grimoire's own tools, credited to it.
 - **The vault** keeps logins, API keys, and cards in your macOS Keychain. Familiars can use a
   secret in a command without ever seeing it, and Grimoire asks you first.
+- **Connectors** let familiars use hosted MCP servers like Linear, Notion, Sentry, Atlassian, Figma,
+  and Stripe. Add one from the catalog in Settings, Connectors, or paste any server's URL, then sign
+  in with your own account in the browser. Grimoire registers itself with the server, so you don't
+  need a developer account. Turn each connector on per familiar in its settings. Sign-ins stay in your
+  Keychain, and Grimoire adds them to each request itself, so familiars never see them. Servers that
+  only work with your own OAuth app, like Gmail and Slack, aren't supported. GitHub takes a personal
+  access token instead. Connectors run through this Mac, so remote familiars don't get them yet.
+  Importing a template that names apps like Linear or Jira suggests the matching connectors.
 - **Drafts, not sends.** A familiar never sends email, Slack messages, or posts. It drafts them with
   `draft_message`, and the draft shows up as a card in the corner, with a notification when approval
   notifications are on. Edit it, open it in Mail or copy it, then mark it sent or discard it; the

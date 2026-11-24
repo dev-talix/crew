@@ -74,6 +74,13 @@ test("permissionLines states access and what isn't connected", () => {
   expect(permissionLines(haggle, "full", "codex")[0]).toContain("Full access: on");
 });
 
+test("permissionLines leaves apps a connector covers out of the won't-connect line", () => {
+  const lines = permissionLines(haggle, "workspace", "codex", ["Ramp"]).join(" ");
+  expect(lines).toContain("Connectors below can link Ramp once you sign in.");
+  expect(lines).toContain("won't connect: Gmail.");
+  expect(lines).not.toContain("connectors are installed");
+});
+
 test("matchesSearch needs every word", () => {
   expect(matchesSearch(haggle, "saas daniel")).toBe(true);
   expect(matchesSearch(haggle, "saas figma")).toBe(false);
