@@ -6,9 +6,11 @@
 
 use crate::approvals::Request;
 use crate::db::{now_ms, Db};
+use crate::runtime::Runtime;
 use crate::AppState;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
+use std::sync::Arc;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 
@@ -256,12 +258,11 @@ pub fn inbox(state: State<AppState>) -> Result<Vec<InboxItem>, String> {
     Ok(items)
 }
 
-/// Sends the person's answer to the familiar that asked.
-#[tauri::command]
-pub fn answer_question(app: AppHandle, state: State<AppState>, id: String, answer: String) -> Result<(), String> {
-    let (agent_id, text) = claim(&state.db, &id, &answer)?;
-    if let Err(e) = state.runtime.send(&agent_id, text, Some(ANSWER_SOURCE)) {
-        reopen(&state.db, &id)?;
+/// Sends the person's answer to the familiar that asked, which the question itself names.
+pub(crate) fn answer(app: &AppHandle, db: &Db, runtime: &Arc<Runtime>, id: &str, answer: &str) -> Result<(), String> {
+    let (agent_id, text) = claim(db, id, answer)?;
+    if let Err(e) = runtime.send(&agent_id, text, Some(ANSWER_SOURCE)) {
+        reopen(db, id)?;
         return Err(e);
     }
     let _ = app.emit(CHANGED, ());
@@ -269,11 +270,20 @@ pub fn answer_question(app: AppHandle, state: State<AppState>, id: String, answe
 }
 
 /// Closes a question without answering. The familiar isn't told.
-#[tauri::command]
-pub fn dismiss_question(app: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
-    dismiss(&state.db, &id)?;
+pub(crate) fn close_unanswered(app: &AppHandle, db: &Db, id: &str) -> Result<(), String> {
+    dismiss(db, id)?;
     let _ = app.emit(CHANGED, ());
     Ok(())
+}
+
+#[tauri::command]
+pub fn answer_question(app: AppHandle, state: State<AppState>, id: String, answer: String) -> Result<(), String> {
+    self::answer(&app, &state.db, &state.runtime, &id, &answer)
+}
+
+#[tauri::command]
+pub fn dismiss_question(app: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
+    close_unanswered(&app, &state.db, &id)
 }
 
 #[cfg(test)]

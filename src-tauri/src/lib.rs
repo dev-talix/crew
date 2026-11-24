@@ -1,6 +1,7 @@
 mod approvals;
 mod chats;
 mod attachments;
+mod companion;
 mod briefing;
 mod browser;
 mod budgets;
@@ -803,6 +804,10 @@ pub fn run() {
             if let Err(e) = link::install(app.handle(), db.clone(), secrets.clone(), runtime.clone(), approvals.clone(), cut_off) {
                 eprintln!("Linked Macs are off: {e}");
             }
+            let mac = link::current().map_or_else(|| "your Mac".to_string(), |l| l.name().to_string());
+            if let Err(e) = companion::install(app.handle(), db.clone(), secrets.clone(), runtime.clone(), approvals.clone(), mac) {
+                eprintln!("The phone companion is off: {e}");
+            }
             // Rituals can fire as soon as the scheduler starts, so the approval gate and the tool socket
             // have to be up first.
             let scheduler = Scheduler::start(db.clone(), &runtime, &workflows, app.handle().clone());
@@ -932,6 +937,9 @@ pub fn run() {
             browser::browser_navigate,
             browser::browser_input,
             remote::check_host,
+            companion::companion_status,
+            companion::companion_start_pairing,
+            companion::companion_remove,
             link::link_status,
             link::link_start_pairing,
             link::link_pair,
