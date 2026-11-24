@@ -89,11 +89,27 @@ pub(crate) fn login_shell_path() -> Option<String> {
         .clone()
 }
 
+/// Folders the official installers use, added after `path` when missing. A CLI installed while
+/// Grimoire runs, or one whose installer only edited `.zshrc`, is still found.
+pub fn with_install_dirs(path: &str, home: &str) -> String {
+    let mut dirs: Vec<String> = path.split(':').filter(|d| !d.is_empty()).map(String::from).collect();
+    for extra in [format!("{home}/.local/bin"), "/opt/homebrew/bin".into(), "/usr/local/bin".into()] {
+        if !dirs.contains(&extra) {
+            dirs.push(extra);
+        }
+    }
+    dirs.join(":")
+}
+
+/// The PATH every CLI launch gets: the login shell's, plus the installers' folders.
+pub fn cli_path() -> String {
+    let base = login_shell_path().or_else(|| std::env::var("PATH").ok()).unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into());
+    with_install_dirs(&base, &std::env::var("HOME").unwrap_or_default())
+}
+
 pub fn command(program: &str, cwd: &str) -> Command {
     let mut cmd = Command::new(program);
-    if let Some(path) = login_shell_path() {
-        cmd.env("PATH", path);
-    }
+    cmd.env("PATH", cli_path());
     let use_subscription = USE_CLAUDE_SUBSCRIPTION.load(Ordering::Relaxed);
     for name in inherited_vars_to_drop(std::env::vars().map(|(k, _)| k), use_subscription) {
         cmd.env_remove(name);
@@ -185,6 +201,12 @@ impl IdleTimer {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn adds_installer_folders_once() {
+        assert_eq!(with_install_dirs("/usr/bin:/bin", "/Users/me"), "/usr/bin:/bin:/Users/me/.local/bin:/opt/homebrew/bin:/usr/local/bin");
+        assert_eq!(with_install_dirs("/opt/homebrew/bin:/usr/bin", "/Users/me"), "/opt/homebrew/bin:/usr/bin:/Users/me/.local/bin:/usr/local/bin");
+    }
 
     #[test]
     fn drops_nested_session_and_key_overrides() {

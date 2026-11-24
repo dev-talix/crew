@@ -1,0 +1,101 @@
+name: Release
+
+# Pushing a tag like v0.5.0 builds a universal Mac app, signs it with the Developer ID certificate,
+# notarizes it, signs the update for the Tauri updater, and saves it all as a draft GitHub release.
+# Publishing the draft is what makes the update reach people: the updater reads
+# releases/latest/download/latest.json, which skips drafts.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the app version
+        run: |
+          version=$(jq -r .version src-tauri/tauri.conf.json)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "Tag $GITHUB_REF_NAME doesn't match version $version in src-tauri/tauri.conf.json." >&2
+            exit 1
+          fi
+
+      - name: Check the signing secrets are set
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+        run: |
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_API_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY TAURI_UPDATER_PUBKEY; do
+            if [ -z "${!name}" ]; then echo "::error::$name is not set." >&2; missing=1; fi
+          done
+          exit $missing
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - run: bun install --frozen-lockfile
+
+      # rustup reads src-tauri/rust-toolchain.toml; a universal app needs both Mac targets.
+      - name: Add Rust targets
+        working-directory: src-tauri
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # The public key goes into the app so it accepts only updates signed with the matching private
+      # key. The base config leaves it empty, so local builds open the release page instead.
+      - name: Write the release config
+        env:
+          TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          jq -n --arg key "$TAURI_UPDATER_PUBKEY" \
+            '{bundle: {createUpdaterArtifacts: true}, plugins: {updater: {pubkey: $key}}}' > "$RUNNER_TEMP/release.conf.json"
+          umask 077
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/AuthKey.p8"
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Code signing. The Tauri CLI imports the certificate into a temporary keychain.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # Notarization with an App Store Connect API key.
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+          # Update signing.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: v__VERSION__
+          releaseName: Grimoire __VERSION__
+          releaseBody: Download the .dmg below, open it, and drag Grimoire to Applications. Grimoire updates itself after that.
+          releaseDraft: true
+          prerelease: false
+          tauriScript: bunx tauri
+          args: --target universal-apple-darwin --bundles app,dmg --config ${{ runner.temp }}/release.conf.json
+
+      - name: Remove the API key file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"

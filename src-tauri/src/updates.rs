@@ -1,8 +1,29 @@
-//! Checks GitHub for a newer Grimoire release. Installing it is still a download for now: automatic
-//! installs need signed release builds.
+//! Checks GitHub for a newer Grimoire release and installs it through the Tauri updater.
+//!
+//! Release builds from CI carry the updater's public key, so they download the signed update,
+//! check its signature, and replace the app. Builds without a key, like a local `tauri build`,
+//! fall back to opening the release page.
 
 use serde::Serialize;
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use tauri::AppHandle;
+use tauri_plugin_updater::UpdaterExt;
+
+/// One install at a time.
+static INSTALLING: AtomicBool = AtomicBool::new(false);
+
+/// The updater's public key from tauri.conf.json, when this build has one.
+fn pubkey(config: &tauri::Config) -> Option<String> {
+    let key = config.plugins.0.get("updater")?.get("pubkey")?.as_str()?.trim();
+    (!key.is_empty()).then(|| key.to_string())
+}
+
+/// Whether this build can install updates itself.
+pub fn can_install(app: &AppHandle) -> bool {
+    pubkey(app.config()).is_some()
+}
 
 /// `owner/name` from the repository URL in Cargo.toml.
 fn repository() -> &'static str {
@@ -24,6 +45,8 @@ pub struct UpdateCheck {
     /// The latest published release, if there is one.
     pub latest: Option<Release>,
     pub newer: bool,
+    /// Whether this build can install the update itself, rather than open the release page.
+    pub can_install: bool,
 }
 
 /// Compares dotted version numbers, ignoring a leading "v" and anything after a "-".
@@ -51,7 +74,7 @@ pub fn parse_release(body: &Value) -> Option<Release> {
     Some(Release { version: tag.trim_start_matches('v').to_string(), url, published_at: body["published_at"].as_str().map(String::from) })
 }
 
-pub async fn check() -> Result<UpdateCheck, String> {
+pub async fn check(can_install: bool) -> Result<UpdateCheck, String> {
     let url = format!("https://api.github.com/repos/{}/releases/latest", repository());
     // macOS ships curl, which keeps an HTTP client out of the app for one request a day.
     let output = tokio::process::Command::new("/usr/bin/curl")
@@ -71,7 +94,42 @@ pub async fn check() -> Result<UpdateCheck, String> {
         other => return Err(format!("GitHub answered with status {other}. Try again later.")),
     };
     let newer = latest.as_ref().is_some_and(|r| is_newer(&r.version, &current));
-    Ok(UpdateCheck { current, latest, newer })
+    Ok(UpdateCheck { current, latest, newer, can_install })
+}
+
+/// Downloads and installs the newest signed release. The endpoint and the key come from this
+/// build's config, never from the window. Returns the installed version, or None when there was
+/// nothing newer. The new version runs after a restart.
+#[tauri::command]
+pub(crate) async fn install_update(app: AppHandle) -> Result<Option<String>, String> {
+    if !can_install(&app) {
+        return Err("This build of Grimoire can't install updates. Download the new version instead.".into());
+    }
+    if INSTALLING.swap(true, Ordering::SeqCst) {
+        return Err("An update is already downloading.".into());
+    }
+    let result = async {
+        // Without timeouts a stalled download would hold the install guard until Grimoire quits.
+        let updater = app
+            .updater_builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("Could not start the updater: {e}"))?;
+        let Some(mut update) = updater.check().await.map_err(|e| format!("Could not check for updates: {e}"))? else {
+            return Ok(None);
+        };
+        update.timeout = Some(Duration::from_secs(600));
+        update.download_and_install(|_, _| {}, || {}).await.map_err(|e| format!("Could not install the update: {e}"))?;
+        Ok(Some(update.version.clone()))
+    }
+    .await;
+    INSTALLING.store(false, Ordering::SeqCst);
+    result
+}
+
+#[tauri::command]
+pub(crate) fn restart_app(app: AppHandle) {
+    app.restart();
 }
 
 #[cfg(test)]
@@ -95,6 +153,16 @@ mod tests {
         assert_eq!(parse_release(&body).unwrap().version, "0.2.0");
         assert!(parse_release(&json!({ "message": "Not Found" })).is_none());
         assert!(!repository().contains("github.com") && repository().contains('/'));
+    }
+
+    #[test]
+    fn installs_only_with_a_public_key() {
+        let mut config = tauri::Config::default();
+        assert_eq!(pubkey(&config), None);
+        config.plugins.0.insert("updater".into(), json!({ "pubkey": "  " }));
+        assert_eq!(pubkey(&config), None, "the empty key in tauri.conf.json means no installs");
+        config.plugins.0.insert("updater".into(), json!({ "pubkey": "dW50cnVzdGVk" }));
+        assert_eq!(pubkey(&config).as_deref(), Some("dW50cnVzdGVk"));
     }
 
     #[test]

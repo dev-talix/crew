@@ -19,6 +19,7 @@ mod marketplace;
 mod mcp;
 mod memory;
 mod notify;
+mod onboarding;
 mod permissions;
 mod providers;
 mod quick;
@@ -702,8 +703,8 @@ async fn plan_limits(state: State<'_, AppState>) -> Result<PlanLimits, String> {
 }
 
 #[tauri::command]
-async fn check_for_updates() -> Result<updates::UpdateCheck, String> {
-    updates::check().await
+async fn check_for_updates(app: AppHandle) -> Result<updates::UpdateCheck, String> {
+    updates::check(updates::can_install(&app)).await
 }
 
 #[tauri::command]
@@ -750,6 +751,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -877,6 +879,12 @@ pub fn run() {
             usage_since,
             plan_limits,
             check_for_updates,
+            updates::install_update,
+            updates::restart_app,
+            onboarding::onboarding_needed,
+            onboarding::finish_onboarding,
+            onboarding::install_provider,
+            onboarding::open_sign_in,
             list_covens,
             save_coven,
             delete_coven,

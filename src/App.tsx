@@ -8,6 +8,7 @@ import CommandPalette, { type PaletteActions } from "./CommandPalette";
 import Drafts from "./Drafts";
 import { createChatStore } from "./chatStore";
 import HomePage from "./HomePage";
+import Onboarding from "./Onboarding";
 import HandoffsPage from "./Handoffs";
 import InboxPage, { InboxLink } from "./Inbox";
 import { MemorySheet } from "./MemoryEditor";
@@ -22,10 +23,10 @@ import { createMoods } from "./moods";
 import { ClockIcon, GearIcon, HomeIcon, PlusIcon, TalkIcon } from "./icons";
 import { SidePanel } from "./ui";
 import { shownIcon } from "./themeStore";
-import { startUpdateChecks, updateCheck } from "./updateStore";
+import { restartToUpdate, startUpdateChecks, updateCheck, updateInstalled } from "./updateStore";
 import type { SettingsSection } from "./SettingsPage";
 
-type View = "home" | "inbox" | "handoffs" | "routines" | "workflows" | "new" | { agent: string };
+type View = "home" | "inbox" | "handoffs" | "routines" | "workflows" | "new" | "welcome" | { agent: string };
 
 function NavItem(props: { label: string; icon: JSX.Element; active: boolean; onClick: () => void; shortcut?: string }) {
   return (
@@ -124,7 +125,11 @@ export default function App() {
       setBusy((b) => {
         for (const id of running) b[id] = true;
       });
-      if (!list.length) summon();
+      // A first launch opens the setup wizard; once it's done or skipped, an empty list opens the form.
+      if (!list.length) {
+        if (await api.onboardingNeeded().catch(() => false)) setView("welcome");
+        else summon();
+      }
     } catch (e) {
       setLoadError(errorText(e));
     } finally {
@@ -337,10 +342,21 @@ export default function App() {
           </For>
         </nav>
         <div class="sidebar-footer">
-          <Show when={updateCheck()?.newer && updateCheck()?.latest}>
-            {(latest) => (
-              <button class="update-notice" onClick={() => openSettings("updates")}>
-                Version {latest().version} is available
+          <Show
+            when={updateInstalled()}
+            fallback={
+              <Show when={updateCheck()?.newer && updateCheck()?.latest}>
+                {(latest) => (
+                  <button class="update-notice" onClick={() => openSettings("updates")}>
+                    Version {latest().version} is available
+                  </button>
+                )}
+              </Show>
+            }
+          >
+            {(version) => (
+              <button class="update-notice" title="Restart Grimoire to finish updating" onClick={() => void restartToUpdate().catch(() => openSettings("updates"))}>
+                Restart to use {version()}
               </button>
             )}
           </Show>
@@ -398,6 +414,9 @@ export default function App() {
                   {(_count) => <AgentForm covens={covens()} onSaved={created} onImported={imported} onCancel={agents().length ? () => setView("home") : undefined} />}
                 </Show>
               </div>
+            </Match>
+            <Match when={is("welcome")}>
+              <Onboarding onCreated={imported} onSkip={summon} />
             </Match>
             <Match when={is("inbox")}>
               <InboxPage agents={agents()} onOpenAgent={openAgent} />
