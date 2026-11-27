@@ -186,9 +186,23 @@ pub fn definitions() -> Value {
     list
 }
 
-/// Tool names as Claude's `--allowedTools` expects them.
+/// The tools `agent_id` sees: everyone's, plus the Mac app tools for the apps it has on. In a side
+/// conversation `agent_id` is its lane key.
+pub fn definitions_for(db: &Db, agent_id: &str) -> Value {
+    let mut list = definitions();
+    let familiar = crate::side::split(agent_id).0;
+    let on_this_mac = db.get_agent(familiar).ok().flatten().is_some_and(|a| a.host.is_none());
+    let apps = if on_this_mac { crate::mac_apps::enabled(db, familiar).unwrap_or_default() } else { vec![] };
+    if let Some(list) = list.as_array_mut() {
+        list.extend(crate::mac_apps::definitions(&apps));
+    }
+    list
+}
+
+/// Tool names as Claude's `--allowedTools` expects them. The Mac app tools are listed too: a familiar
+/// only sees the ones it has on, and the app refuses the rest.
 pub fn claude_tool_names() -> String {
-    TOOL_NAMES.iter().chain(&memory::TOOL_NAMES).chain(&inbox::TOOL_NAMES).chain(&ledger::TOOL_NAMES).chain(&crate::helpers::TOOL_NAMES).chain(&[crate::drafts::TOOL]).chain(&crate::browser::TOOL_NAMES).map(|name| format!("mcp__{SERVER_NAME}__{name}")).collect::<Vec<_>>().join(",")
+    TOOL_NAMES.iter().chain(&memory::TOOL_NAMES).chain(&inbox::TOOL_NAMES).chain(&ledger::TOOL_NAMES).chain(&crate::helpers::TOOL_NAMES).chain(&[crate::drafts::TOOL]).chain(&crate::browser::TOOL_NAMES).chain(&crate::mac_apps::TOOL_NAMES).map(|name| format!("mcp__{SERVER_NAME}__{name}")).collect::<Vec<_>>().join(",")
 }
 
 /// How a CLI starts the Grimoire tool server for one familiar.
@@ -637,6 +651,9 @@ struct Request {
     /// Set by a connector relay, with the raw MCP message to forward.
     #[serde(default)]
     connector: Option<String>,
+    /// Set when the tool server asks which tools its familiar has.
+    #[serde(default)]
+    list: bool,
     #[serde(default)]
     message: Value,
 }
@@ -670,6 +687,11 @@ async fn handle_connection(stream: UnixStream, ctx: Arc<Context>) {
                     Err(error) => json!({ "ok": false, "error": error }),
                 }
             }
+            Ok(Request { agent, list: true, .. }) => {
+                let db = ctx.db.clone();
+                let tools = tokio::task::spawn_blocking(move || definitions_for(&db, &agent)).await.unwrap_or_else(|_| definitions());
+                json!({ "ok": true, "tools": tools })
+            }
             Ok(request) => {
                 // A familiar answering in a side conversation calls as "familiar~chat".
                 let (caller, lane) = crate::side::split(&request.agent);
@@ -689,6 +711,9 @@ async fn handle_connection(stream: UnixStream, ctx: Arc<Context>) {
                     crate::drafts::run(&ctx.app, &ctx.db, &caller, &request.arguments).map(|text| Outcome { text, changed: None })
                 } else if crate::browser::TOOL_NAMES.contains(&request.tool.as_str()) {
                     crate::browser::call_tool(&ctx.db, &caller, &request.tool, request.arguments).await.map(|text| Outcome { text, changed: None })
+                } else if crate::mac_apps::TOOL_NAMES.contains(&request.tool.as_str()) {
+                    let ask = |question| ctx.approvals.ask(&ctx.app, question);
+                    crate::mac_apps::call_tool(&ctx.db, &crate::mac_apps::system(), &caller, &request.tool, request.arguments, ask).await.map(|text| Outcome { text, changed: None })
                 } else if request.tool == "vault_use" {
                     let ask = |question| ctx.approvals.ask(&ctx.app, question);
                     let used = vault_use(&ctx.db, ctx.secrets.as_ref(), &caller, request.arguments, ask).await;
@@ -883,6 +908,21 @@ mod tests {
         let mut remote = agent("r1", "Remote");
         remote.host = Some("me@studio.local".into());
         assert!(!available_for(&remote));
+    }
+
+    #[test]
+    fn lists_mac_app_tools_only_for_apps_a_familiar_has_on() {
+        let (db, _) = setup();
+        let names = |agent: &str| definitions_for(&db, agent).as_array().unwrap().iter().map(|d| d["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let base = definitions().as_array().unwrap().len();
+        assert_eq!(names("r1").len(), base, "every app starts off");
+        crate::mac_apps::set_for_agent(&db, "r1", &["mail".into()]).unwrap();
+        let tools = names("r1");
+        assert!(tools.contains(&"mail_search".into()) && tools.contains(&"mail_read".into()));
+        assert!(!tools.contains(&"calendar_events".into()));
+        assert!(names("r1~chat-9").contains(&"mail_read".into()), "a side conversation sees its familiar's tools");
+        assert_eq!(names("w1").len(), base);
+        assert!(claude_tool_names().contains("mcp__grimoire__shortcuts_run"));
     }
 
     #[test]

@@ -7,6 +7,16 @@
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>Grimoire turns your dictation into text for messages to your agents.</string>
   <key>NSAppleEventsUsageDescription</key>
-  <string>Grimoire reads the newest message in Mail's inbox for rituals that run on new email.</string>
+  <string>Grimoire reads the newest message in Mail's inbox for rituals that run on new email, and searches and reads Mail for familiars you've given Mail.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>Grimoire reads your events, and adds one when you allow it, for familiars you've given Calendar.</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>Grimoire reads your events, and adds one when you allow it, for familiars you've given Calendar.</string>
+  <key>NSRemindersFullAccessUsageDescription</key>
+  <string>Grimoire reads your reminders, and adds one when you allow it, for familiars you've given Reminders.</string>
+  <key>NSRemindersUsageDescription</key>
+  <string>Grimoire reads your reminders, and adds one when you allow it, for familiars you've given Reminders.</string>
+  <key>NSContactsUsageDescription</key>
+  <string>Grimoire looks up names, emails, and phone numbers for familiars you've given Contacts.</string>
 </dict>
 </plist>

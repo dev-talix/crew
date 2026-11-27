@@ -20,6 +20,7 @@ mod http;
 mod inbox;
 mod ledger;
 mod link;
+mod mac_apps;
 mod marketplace;
 mod mcp;
 mod memory;
@@ -1001,7 +1002,9 @@ pub fn run() {
             telegram::telegram_unpair,
             checkins::get_checkins,
             checkins::save_checkins,
-            checkins::list_checkins
+            checkins::list_checkins,
+            mac_apps::agent_mac_apps,
+            mac_apps::set_agent_mac_apps
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {
