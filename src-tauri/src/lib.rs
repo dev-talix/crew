@@ -2,6 +2,7 @@ mod approvals;
 mod chats;
 mod connectors;
 mod attachments;
+mod background;
 mod companion;
 mod briefing;
 mod browser;
@@ -801,6 +802,7 @@ pub fn run() {
             app.manage(notify::Notifier::new(db.clone(), approvals.clone()));
             notify::install(app.handle());
             tray::install(app.handle(), db.clone());
+            let windowless = background::install(app.handle(), db.clone());
             permissions::install(app.handle().clone(), db.clone(), approvals.clone());
             #[cfg(target_os = "macos")]
             let secrets: Arc<dyn vault::SecretStore> = Arc::new(vault::Keychain);
@@ -834,6 +836,12 @@ pub fn run() {
             if edge.is_some() {
                 let state = app.state::<AppState>();
                 state.dock.set_edge(app.handle(), edge)?;
+            }
+            // The main window starts hidden, so a background launch never shows it.
+            if !windowless {
+                if let Err(e) = dock::show_main(app.handle(), None) {
+                    eprintln!("Couldn't show the Grimoire window: {e}");
+                }
             }
             Ok(())
         })
@@ -975,17 +983,21 @@ pub fn run() {
             connectors::connector_sign_in,
             connectors::connector_set_token,
             connectors::connector_sign_out,
-            connectors::set_agent_connectors
+            connectors::set_agent_connectors,
+            background::background_settings,
+            background::save_background_settings
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {
                 tray::main_focused(window.app_handle());
             }
             if let WindowEvent::CloseRequested { api, .. } = event {
-                let dock_on = window.app_handle().state::<AppState>().dock.edge().is_some();
-                if window.label() == "main" && dock_on {
+                let app = window.app_handle();
+                let dock_on = app.state::<AppState>().dock.edge().is_some();
+                if window.label() == "main" && (dock_on || background::on(app)) {
                     api.prevent_close();
                     let _ = window.hide();
+                    background::window_hidden(app);
                 }
             }
         })

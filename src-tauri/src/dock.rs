@@ -157,7 +157,15 @@ fn work_area(app: &AppHandle, dock: &WebviewWindow) -> Result<Area, String> {
 }
 
 pub fn show_main(app: &AppHandle, agent_id: Option<String>) -> Result<(), String> {
-    let main = app.get_webview_window("main").ok_or("The Grimoire window is missing.")?;
+    let main = match app.get_webview_window("main") {
+        Some(main) => main,
+        // Gone after a close with nothing to keep it, while a hidden dock or Quick Ask kept Grimoire running.
+        None => {
+            let config = app.config().app.windows.iter().find(|w| w.label == "main").ok_or("The Grimoire window is missing.")?;
+            WebviewWindowBuilder::from_config(app, config).and_then(|b| b.build()).map_err(|e| e.to_string())?
+        }
+    };
+    crate::background::window_shown(app);
     main.show().map_err(|e| e.to_string())?;
     let _ = main.unminimize();
     main.set_focus().map_err(|e| e.to_string())?;
