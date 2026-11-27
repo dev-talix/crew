@@ -59,11 +59,11 @@ impl App {
 
     fn description(self) -> &'static str {
         match self {
-            App::Calendar => "Read events, and add one after you allow it",
-            App::Reminders => "Read lists, and add a reminder after you allow it",
-            App::Contacts => "Look up names, emails, and phone numbers",
-            App::Mail => "Search and read mail. Replies go to drafts, never sent",
-            App::Shortcuts => "List Shortcuts, and run one after you allow it",
+            App::Calendar => "Read events, add with your OK",
+            App::Reminders => "Read lists, add with your OK",
+            App::Contacts => "Find emails and phone numbers",
+            App::Mail => "Search and read, never send",
+            App::Shortcuts => "Run one with your OK",
         }
     }
 

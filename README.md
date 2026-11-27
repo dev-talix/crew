@@ -497,6 +497,10 @@ A familiar's settings have a Mac apps group with a switch for each app, all off 
 only sees the tools for the apps it has on, and Grimoire refuses the rest. The tools appear in the
 familiar's next new chat.
 
+<p align="center">
+  <img src="docs/screenshots/mac-apps.png" width="480" alt="The Mac apps group in a familiar's settings, with Calendar and Contacts turned on">
+</p>
+
 - **Calendar**: `calendar_events` lists events in a range of up to 92 days, at most 50 at a time.
   `calendar_create_event` adds one, and invites no one.
 - **Reminders**: `reminders_list` lists up to 50, incomplete first by due date. `reminders_add` adds one.
