@@ -44,12 +44,19 @@ pub struct CatalogEntry {
     pub description: &'static str,
     /// App names a template might use for this service, lowercase.
     pub apps: &'static [&'static str],
+    /// Set when an app name is also a common word, like Square, so "Square Enix" doesn't match it.
+    /// Then a template's app name must equal one of `apps`.
+    pub exact_apps: bool,
     /// Set when the server doesn't let apps register themselves, so the person pastes a token instead.
     pub token_help: Option<&'static str>,
 }
 
 const fn entry(id: &'static str, name: &'static str, url: &'static str, description: &'static str, apps: &'static [&'static str]) -> CatalogEntry {
-    CatalogEntry { id, name, url, description, apps, token_help: None }
+    CatalogEntry { id, name, url, description, apps, exact_apps: false, token_help: None }
+}
+
+const fn exact(entry: CatalogEntry) -> CatalogEntry {
+    CatalogEntry { exact_apps: true, ..entry }
 }
 
 /// Hosted MCP servers that sign in through the browser with no developer app. Each one's OAuth
@@ -88,25 +95,25 @@ pub const CATALOG: &[CatalogEntry] = &[
     entry("granola", "Granola", "https://mcp.granola.ai/mcp", "Meeting notes and transcripts", &["granola"]),
     entry("fireflies", "Fireflies.ai", "https://api.fireflies.ai/mcp", "Meeting transcripts and summaries", &["fireflies", "fireflies.ai"]),
     entry("attio", "Attio", "https://mcp.attio.com/mcp", "Companies, people, and deals", &["attio"]),
-    entry("close", "Close", "https://mcp.close.com/mcp", "Leads, contacts, and opportunities", &["close crm", "close.com"]),
+    exact(entry("close", "Close", "https://mcp.close.com/mcp", "Leads, contacts, and opportunities", &["close", "close crm", "close.com"])),
     entry("mailchimp", "Mailchimp", "https://mcp.mailchimp.com/mcp", "Audiences, campaigns, and reports", &["mailchimp"]),
     entry("klaviyo", "Klaviyo", "https://mcp.klaviyo.com/mcp", "Profiles, campaigns, and flows", &["klaviyo"]),
-    entry("square", "Square", "https://mcp.squareup.com/mcp", "Payments, orders, and catalog items", &["square"]),
+    exact(entry("square", "Square", "https://mcp.squareup.com/mcp", "Payments, orders, and catalog items", &["square", "square pos", "squareup"])),
     entry("wix", "Wix", "https://mcp.wix.com/mcp", "Sites, stores, and bookings", &["wix"]),
     entry("dovetail", "Dovetail", "https://dovetail.com/api/mcp", "Research notes, insights, and highlights", &["dovetail"]),
     entry("gitlab", "GitLab", "https://gitlab.com/api/v4/mcp", "Projects, issues, and merge requests", &["gitlab"]),
     entry("netlify", "Netlify", "https://netlify-mcp.netlify.app/mcp", "Sites, deploys, and forms", &["netlify"]),
-    entry("neon", "Neon", "https://mcp.neon.tech/mcp", "Postgres projects, branches, and queries", &["neon"]),
+    exact(entry("neon", "Neon", "https://mcp.neon.tech/mcp", "Postgres projects, branches, and queries", &["neon", "neon postgres", "neon.tech"])),
     entry("railway", "Railway", "https://mcp.railway.com", "Projects, services, and deployments", &["railway"]),
     entry("digitalocean", "DigitalOcean", "https://mcp.digitalocean.com/mcp", "Apps, droplets, and databases", &["digitalocean"]),
     CatalogEntry {
         token_help: Some("Render signs in only for apps it knows. Make an API key under Account Settings in the Render Dashboard and paste it here. It can reach every workspace your account can."),
-        ..entry("render", "Render", "https://mcp.render.com/mcp", "Services, deploys, and logs", &["render"])
+        ..exact(entry("render", "Render", "https://mcp.render.com/mcp", "Services, deploys, and logs", &["render", "render.com"]))
     },
     entry("posthog", "PostHog", "https://mcp.posthog.com/mcp", "Product analytics, flags, and experiments", &["posthog"]),
     entry("amplitude", "Amplitude", "https://mcp.amplitude.com/mcp", "Charts, cohorts, and events", &["amplitude"]),
     entry("mixpanel", "Mixpanel", "https://mcp.mixpanel.com/mcp", "Reports, events, and funnels", &["mixpanel"]),
-    entry("make", "Make", "https://mcp.make.com", "Scenarios you've built in Make", &["make.com", "integromat"]),
+    exact(entry("make", "Make", "https://mcp.make.com", "Scenarios you've built in Make", &["make", "make.com", "integromat"])),
     entry("apify", "Apify", "https://mcp.apify.com", "Web scrapers and their results", &["apify"]),
 ];
 
@@ -580,7 +587,8 @@ fn quoted(value: &str) -> String {
 }
 
 /// The curl config for one request. It goes in on stdin, so tokens never show in process arguments.
-fn curl_config(method: &str, url: &str, headers: &[(&str, String)], body: Option<&str>) -> String {
+/// With `follow`, curl follows up to five https redirects.
+fn curl_config(method: &str, url: &str, headers: &[(&str, String)], body: Option<&str>, follow: bool) -> String {
     let mut lines = vec![
         "silent".to_string(),
         "show-error".to_string(),
@@ -592,7 +600,7 @@ fn curl_config(method: &str, url: &str, headers: &[(&str, String)], body: Option
         format!("request = {}", quoted(method)),
         format!("url = {}", quoted(url)),
     ];
-    if method == "GET" {
+    if follow {
         lines.push("location".into());
         lines.push("max-redirs = 5".into());
         lines.push("proto-redir = \"=https\"".into());
@@ -623,7 +631,12 @@ fn parse_output(output: &[u8]) -> Result<Answer, String> {
     Ok(answer)
 }
 
+/// Sends one request. GETs follow redirects; other methods don't.
 async fn fetch(method: &str, url: &str, headers: &[(&str, String)], body: Option<&str>) -> Result<Answer, String> {
+    fetch_with(method, url, headers, body, method == "GET").await
+}
+
+async fn fetch_with(method: &str, url: &str, headers: &[(&str, String)], body: Option<&str>, follow: bool) -> Result<Answer, String> {
     let host = Url::parse(url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_else(|| "the server".into());
     // --disable skips any ~/.curlrc, so the person's curl settings can't redirect the request.
     let mut child = tokio::process::Command::new("/usr/bin/curl")
@@ -634,7 +647,7 @@ async fn fetch(method: &str, url: &str, headers: &[(&str, String)], body: Option
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("Could not start curl: {e}"))?;
-    let config = curl_config(method, url, headers, body);
+    let config = curl_config(method, url, headers, body, follow);
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(config.as_bytes()).await.map_err(|e| format!("Could not reach {host}: {e}"))?;
     }
@@ -890,9 +903,10 @@ async fn client_for(plan: &Plan, name: &str, redirect: &str, document: &str) -> 
         Registration::Token => return Err(format!("{name} doesn't let apps register themselves, so Grimoire can't sign in for you. Paste an access token instead.")),
         Registration::Dynamic(endpoint) => endpoint,
         Registration::Document => {
-            // The sign-in server fetches the document itself. Without it, the browser would land on the
-            // server's error page, so check first and say why.
-            if get_json(document).await.is_none_or(|d| d["client_id"] != document) {
+            // The sign-in server fetches the document itself, without following redirects. Without it,
+            // the browser would land on the server's error page, so check the same way first and say why.
+            let answer = fetch_with("GET", document, &[("Accept", "application/json".to_string())], None, false).await.ok();
+            if answer.filter(Answer::ok).and_then(|a| a.json().ok()).is_none_or(|d| d["client_id"] != document) {
                 return Err(format!("{name} needs Grimoire's client document, which isn't published yet, so Grimoire can't sign in there. Paste an access token instead."));
             }
             return Ok(Client { id: document.into(), secret: None });
@@ -1166,12 +1180,13 @@ mod tests {
     fn quotes_curl_config_values() {
         assert_eq!(quoted(r#"a"b\c"#), r#""a\"b\\c""#);
         assert_eq!(quoted("x\ny"), r#""x\ny""#);
-        let config = curl_config("POST", "https://mcp.linear.app/mcp", &[("Authorization", "Bearer t".into())], Some("{\"id\":1}"));
+        let config = curl_config("POST", "https://mcp.linear.app/mcp", &[("Authorization", "Bearer t".into())], Some("{\"id\":1}"), false);
         assert!(config.starts_with("silent\n"));
         assert!(config.contains("header = \"Authorization: Bearer t\"\n"));
         assert!(config.contains("data-raw = \"{\\\"id\\\":1}\"\n"));
-        assert!(!config.contains("location"), "POSTs don't follow redirects");
-        assert!(curl_config("GET", "https://x", &[], None).contains("location\n"));
+        assert!(!config.contains("location"));
+        assert!(curl_config("GET", "https://x", &[], None, true).contains("location\n"));
+        assert!(!curl_config("GET", "https://x", &[], None, false).contains("location"));
     }
 
     #[test]
@@ -1340,7 +1355,7 @@ mod tests {
         let local = Url::parse("http://127.0.0.1:9/mcp").unwrap();
         assert!(check_sign_in_server(&local, &local, None, &["http://127.0.0.1:9/token"]).is_ok());
         assert!(check_sign_in_server(&local, &local, None, &["http://other.example/token"]).is_err());
-        assert!(curl_config("GET", "https://x", &[], None).contains("proto-redir = \"=https\""), "discovery only follows https redirects");
+        assert!(curl_config("GET", "https://x", &[], None, true).contains("proto-redir = \"=https\""), "discovery only follows https redirects");
     }
 
     #[tokio::test]
@@ -1554,6 +1569,19 @@ mod tests {
         assert_eq!(err, "Dovetail needs Grimoire's client document, which isn't published yet, so Grimoire can't sign in there. Paste an access token instead.");
         assert_eq!(seen.lock().unwrap().len(), 4);
         assert!(load_tokens(&secrets, &c.id).unwrap().is_none());
+
+        // The sign-in server won't follow a redirect to the document, so neither does the check.
+        let (base, seen) = fake_server_at(|base| {
+            let mut r = discovery(base, r#","client_id_metadata_document_supported":true"#);
+            r.push(response("302 Found", &format!("Location: {base}/elsewhere.json\r\n"), ""));
+            r.push(json_ok(&format!(r#"{{"client_id":"{base}/client.json"}}"#)));
+            r
+        })
+        .await;
+        let c = add(&db, NewConnector { url: Some(format!("{base}/mcp")), name: Some("Moved".into()), ..Default::default() }).unwrap();
+        let err = sign_in(|_| panic!("the browser stays closed"), &db, &secrets, &c.id, &format!("{base}/client.json")).await.unwrap_err();
+        assert!(err.contains("isn't published yet"), "{err}");
+        assert_eq!(seen.lock().unwrap().len(), 4, "the redirect isn't followed");
     }
 
     #[tokio::test]
