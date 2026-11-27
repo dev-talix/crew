@@ -62,6 +62,10 @@
   through this Mac, so remote familiars don't get them yet. Importing a template that names apps like
   Linear or Jira suggests the matching connectors. To check that every catalog server still offers
   sign-in, run `cargo test catalog_servers_offer_sign_in -- --ignored --nocapture` in `src-tauri`.
+- **Mac apps** let familiars use Calendar, Reminders, Contacts, Mail, and Shortcuts on this Mac,
+  including Google, Outlook, and iCloud accounts you added to Calendar and Mail, with no sign-in.
+  Turn each app on per familiar in its settings. Adding an event or reminder, or running a Shortcut,
+  asks you first. See [Mac apps](#mac-apps).
 - **Drafts, not sends.** A familiar never sends email, Slack messages, or posts. It drafts them with
   `draft_message`, and the draft shows up as a card in the corner, with a notification when approval
   notifications are on. Edit it, open it in Mail or copy it, then mark it sent or discard it; the
@@ -244,7 +248,7 @@ until a later try gets through. A key ssh refuses or a changed host key still sh
 message, since you have to fix those yourself.
 
 What doesn't cross machines yet: Grimoire's tools (saving memory, making spells and themes, the
-vault, and asking other familiars) need a socket on this Mac, so remote familiars run without them.
+vault, Mac apps, and asking other familiars) need a socket on this Mac, so remote familiars run without them.
 They still get their memory when a chat starts, and other familiars can still ask them. Attachments
 are refused, and Finder can't open the workspace. The host can't be changed after you summon the
 familiar. Your Permissions rules still apply, since Codex and Claude ask Grimoire over the same
@@ -486,6 +490,37 @@ Familiars can find items with `vault_search` (no secrets) and use one with `vaul
 A familiar with shell access could still print what it reads, so Grimoire tells familiars never to,
 and every request shows in the item's history. An item's page lists the familiars you've always
 allowed, with a button to make them ask again.
+
+## Mac apps
+
+A familiar's settings have a Mac apps group with a switch for each app, all off at first. A familiar
+only sees the tools for the apps it has on, and Grimoire refuses the rest. The tools appear in the
+familiar's next new chat.
+
+- **Calendar**: `calendar_events` lists events in a range of up to 92 days, at most 50 at a time.
+  `calendar_create_event` adds one, and invites no one.
+- **Reminders**: `reminders_list` lists up to 50, incomplete first by due date. `reminders_add` adds one.
+- **Contacts**: `contacts_search` finds up to 10 people by name, email, or phone number, with their
+  name, organization, and up to 3 emails and phone numbers each.
+- **Mail**: `mail_search` matches the subject or sender in the inbox of every account, or in one
+  mailbox, newest first, from the last 30 days unless the familiar gives dates. It returns 20 messages,
+  or up to 50. `mail_read` returns one message's headers and up to 8,000 characters of plain text.
+  Mail has to be open. Familiars can't send mail; they write replies with `draft_message`.
+- **Shortcuts**: `shortcuts_list` lists your Shortcuts by name, and `shortcuts_run` runs one, with
+  optional text input, and returns up to 4,000 characters of its text output.
+
+Adding an event, adding a reminder, and running a Shortcut ask you first, in the corner of the window,
+with a notification when approval notifications are on. The card shows the event, reminder, or
+Shortcut and its input. There's no "Always allow": a Shortcut can send messages or change settings,
+so each run asks again. No answer in 2 minutes counts as Deny.
+
+macOS asks for permission the first time a familiar uses Calendar, Reminders, or Contacts, and the
+first time Grimoire controls Mail. If you said no, the familiar tells you where to allow it: System
+Settings, Privacy & Security, then Calendars, Reminders, Contacts, or Automation. Calendar,
+Reminders, and Contacts go through Apple's EventKit and Contacts frameworks, Mail through
+JavaScript for Automation, and Shortcuts through the `shortcuts` command.
+
+Mac apps run on this Mac, so familiars on another Mac over SSH or on a linked Mac don't get them.
 
 ## Permissions
 
@@ -742,8 +777,10 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
 - **Familiar tools.** Grimoire gives each familiar an MCP server named `grimoire` (`--mcp-config`
   for Claude, thread config for Codex) with `list_familiars`, `list_spells`, `create_spell`,
   `list_themes`, `create_theme`, `set_theme`, `vault_search`, `vault_use`, `ask_familiar`,
-  `read_memory`, `remember`, `forget_memory`, and `search_chats`. The CLI starts `grimoire mcp <socket> <agent-id>`,
-  which relays calls to the app over `grimoire.sock` in its data folder (owner-only). Each server gets
+  `read_memory`, `remember`, `forget_memory`, and `search_chats`, plus the [Mac app](#mac-apps) tools a
+  familiar has turned on. The CLI starts `grimoire mcp <socket> <agent-id>`, which asks the app for
+  that familiar's tool list and relays calls to the app over `grimoire.sock` in its data folder
+  (owner-only). Each server gets
   a random token for its familiar in `GRIMOIRE_TOOLS_TOKEN`, and the app refuses a call whose token
   doesn't match the familiar it names. Familiars can't cast, edit, or delete spells.
 - **Claude billing.** With "Claude subscription" (the default), Grimoire removes
