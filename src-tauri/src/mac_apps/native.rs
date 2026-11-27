@@ -104,15 +104,19 @@ fn all_calendars(store: &EKEventStore, app: App) -> Vec<Retained<EKCalendar>> {
     unsafe { store.calendarsForEntityType(entity(app)) }.to_vec()
 }
 
-fn named(store: &EKEventStore, app: App, name: &str) -> Result<Retained<EKCalendar>, String> {
-    let calendars = all_calendars(store, app);
-    let title = |c: &EKCalendar| unsafe { c.title() }.to_string();
-    calendars
-        .iter()
-        .find(|c| title(c) == name)
-        .or_else(|| calendars.iter().find(|c| title(c).eq_ignore_ascii_case(name)))
-        .cloned()
-        .ok_or_else(|| format!("There's no {} called \"{name}\".", if app == App::Reminders { "list" } else { "calendar" }))
+/// Every calendar or list with this title, for reading; two accounts can use the same one.
+fn named(store: &EKEventStore, app: App, name: &str) -> Result<Retained<NSArray<EKCalendar>>, String> {
+    let found: Vec<_> = all_calendars(store, app).into_iter().filter(|c| unsafe { c.title() }.to_string().eq_ignore_ascii_case(name)).collect();
+    if found.is_empty() {
+        return Err(format!("There's no {} called \"{name}\".", if app == App::Reminders { "list" } else { "calendar" }));
+    }
+    Ok(NSArray::from_retained_slice(&found))
+}
+
+/// The calendar or list the person approved, by its identifier.
+fn approved(store: &EKEventStore, id: Option<&str>) -> Result<Retained<EKCalendar>, String> {
+    let id = id.ok_or("Grimoire didn't pick a calendar.")?;
+    unsafe { store.calendarWithIdentifier(&ns(id)) }.ok_or_else(|| "That calendar is gone. Try again.".into())
 }
 
 pub fn calendars(app: App) -> Result<Vec<Calendar>, String> {
@@ -127,7 +131,14 @@ pub fn calendars(app: App) -> Result<Vec<Calendar>, String> {
     Ok(all_calendars(&store, app)
         .iter()
         .map(|c| unsafe {
-            Calendar { title: c.title().to_string(), writable: c.allowsContentModifications(), default: default.as_deref() == Some(&c.calendarIdentifier().to_string()) }
+            let id = c.calendarIdentifier().to_string();
+            Calendar {
+                default: default.as_deref() == Some(id.as_str()),
+                id,
+                title: c.title().to_string(),
+                account: c.source().map(|s| s.title().to_string()).unwrap_or_default(),
+                writable: c.allowsContentModifications(),
+            }
         })
         .collect())
 }
@@ -138,7 +149,7 @@ fn optional_text(text: Option<Retained<NSString>>) -> Option<String> {
 
 pub fn events(from: i64, to: i64, calendar: Option<&str>) -> Result<Vec<Event>, String> {
     let store = event_store(App::Calendar)?;
-    let only = calendar.map(|name| named(&store, App::Calendar, name)).transpose()?.map(|c| NSArray::from_retained_slice(&[c]));
+    let only = calendar.map(|name| named(&store, App::Calendar, name)).transpose()?;
     let events = unsafe {
         let predicate = store.predicateForEventsWithStartDate_endDate_calendars(&date(from), &date(to), only.as_deref());
         store.eventsMatchingPredicate(&predicate)
@@ -165,7 +176,7 @@ fn save_error(error: Retained<NSError>) -> String {
 
 pub fn create_event(new: &NewEvent) -> Result<(), String> {
     let store = event_store(App::Calendar)?;
-    let calendar = named(&store, App::Calendar, new.calendar.as_deref().unwrap_or_default())?;
+    let calendar = approved(&store, new.calendar.as_deref())?;
     unsafe {
         let event = EKEvent::eventWithEventStore(&store);
         event.setTitle(Some(&ns(&new.title)));
@@ -188,7 +199,7 @@ fn due_of(reminder: &EKReminder) -> Option<(i64, bool)> {
 
 pub fn reminders(list: Option<&str>, include_completed: bool) -> Result<Vec<Reminder>, String> {
     let store = event_store(App::Reminders)?;
-    let only = list.map(|name| named(&store, App::Reminders, name)).transpose()?.map(|c| NSArray::from_retained_slice(&[c]));
+    let only = list.map(|name| named(&store, App::Reminders, name)).transpose()?;
     let predicate = unsafe {
         if include_completed {
             store.predicateForRemindersInCalendars(only.as_deref())
@@ -223,7 +234,7 @@ pub fn reminders(list: Option<&str>, include_completed: bool) -> Result<Vec<Remi
 
 pub fn add_reminder(new: &NewReminder) -> Result<(), String> {
     let store = event_store(App::Reminders)?;
-    let list = named(&store, App::Reminders, new.list.as_deref().unwrap_or_default())?;
+    let list = approved(&store, new.list.as_deref())?;
     unsafe {
         let reminder = EKReminder::reminderWithEventStore(&store);
         reminder.setTitle(Some(&ns(&new.title)));

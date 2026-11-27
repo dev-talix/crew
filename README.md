@@ -525,6 +525,8 @@ Reminders, and Contacts go through Apple's EventKit and Contacts frameworks, Mai
 JavaScript for Automation, and Shortcuts through the `shortcuts` command.
 
 Mac apps run on this Mac, so familiars on another Mac over SSH or on a linked Mac don't get them.
+A familiar answering a question from a familiar on a linked Mac can't use them either, since its
+reply goes to that Mac.
 
 ## Permissions
 

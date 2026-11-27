@@ -301,7 +301,11 @@ pub fn definitions(apps: &[App]) -> Vec<Value> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Calendar {
+    /// EventKit's identifier, which stays unique when two accounts use the same title.
+    pub id: String,
     pub title: String,
+    /// The account it belongs to, like iCloud or a Gmail address.
+    pub account: String,
     pub writable: bool,
     pub default: bool,
 }
@@ -412,6 +416,7 @@ pub struct NewEvent {
     pub start: i64,
     pub end: i64,
     pub all_day: bool,
+    /// The name the familiar gave, then the id of the calendar the person approved.
     pub calendar: Option<String>,
     pub location: Option<String>,
     pub notes: Option<String>,
@@ -420,6 +425,7 @@ pub struct NewEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewReminder {
     pub title: String,
+    /// The name the familiar gave, then the id of the list the person approved.
     pub list: Option<String>,
     pub due: Option<(i64, bool)>,
     pub notes: Option<String>,
@@ -692,18 +698,41 @@ fn mail_ref(arguments: &Value) -> Result<MailRef, String> {
     Ok(MailRef { id, mailbox: required(arguments, "mailbox")?, account: text_arg(arguments, "account").unwrap_or_default() })
 }
 
-/// Picks a calendar or list by name, ignoring case, or the default one.
-fn pick_calendar(calendars: &[Calendar], wanted: Option<&str>, app: App) -> Result<String, String> {
-    let names = || calendars.iter().map(|c| c.title.as_str()).collect::<Vec<_>>().join(", ");
+/// A calendar's name as people see it: its title, with its account when another has the same title.
+fn calendar_label(calendar: &Calendar, all: &[Calendar]) -> String {
+    if all.iter().filter(|c| c.title.eq_ignore_ascii_case(&calendar.title)).count() > 1 {
+        format!("{} ({})", calendar.title, calendar.account)
+    } else {
+        calendar.title.clone()
+    }
+}
+
+/// Picks a calendar or list by name, ignoring case, or the default one, and returns its id and
+/// label. "Work (Google)" picks between two calendars called Work.
+fn pick_calendar(calendars: &[Calendar], wanted: Option<&str>, app: App) -> Result<(String, String), String> {
     let kind = if app == App::Reminders { "list" } else { "calendar" };
+    let labels = |list: &[&Calendar]| list.iter().map(|c| calendar_label(c, calendars)).collect::<Vec<_>>().join(", ");
+    let all: Vec<&Calendar> = calendars.iter().collect();
     let found = match wanted {
-        Some(name) => calendars.iter().find(|c| c.title == name).or_else(|| calendars.iter().find(|c| c.title.eq_ignore_ascii_case(name))),
+        Some(name) => {
+            let full = |c: &&Calendar| format!("{} ({})", c.title, c.account).eq_ignore_ascii_case(name);
+            let titled: Vec<&Calendar> = calendars.iter().filter(|c| c.title.eq_ignore_ascii_case(name)).collect();
+            match (all.iter().copied().find(full), titled.as_slice()) {
+                (Some(c), _) => Some(c),
+                (None, []) => None,
+                (None, [one]) => Some(*one),
+                (None, many) => match many.iter().find(|c| c.default) {
+                    Some(c) => Some(*c),
+                    None => return Err(format!("More than one {kind} is called \"{name}\". Name one of these: {}.", labels(many))),
+                },
+            }
+        }
         None => calendars.iter().find(|c| c.default).or_else(|| calendars.iter().find(|c| c.writable)),
     };
     match found {
-        Some(c) if c.writable => Ok(c.title.clone()),
-        Some(c) => Err(format!("The {kind} \"{}\" is read only. Pick another: {}.", c.title, names())),
-        None if wanted.is_some() => Err(format!("There's no {kind} called \"{}\". The {kind}s are: {}.", wanted.unwrap_or_default(), names())),
+        Some(c) if c.writable => Ok((c.id.clone(), calendar_label(c, calendars))),
+        Some(c) => Err(format!("The {kind} \"{}\" is read only. Pick another: {}.", calendar_label(c, calendars), labels(&all))),
+        None if wanted.is_some() => Err(format!("There's no {kind} called \"{}\". The {kind}s are: {}.", wanted.unwrap_or_default(), labels(&all))),
         None => Err(format!("The person has no {kind} Grimoire can add to.")),
     }
 }
@@ -722,11 +751,13 @@ fn pick_shortcut(shortcuts: &[Shortcut], wanted: &str) -> Result<Shortcut, Strin
 
 // ---- Output ----
 
+/// `text` in at most `max` characters, the last an ellipsis when it was cut.
 fn clip(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((at, _)) => format!("{}…", text[..at].trim_end()),
-        None => text.to_string(),
+    if text.chars().count() <= max {
+        return text.to_string();
     }
+    let cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", cut.trim_end())
 }
 
 fn some_clip(text: &Option<String>, max: usize) -> Option<String> {
@@ -913,9 +944,17 @@ where
 
 const NOT_ALLOWED: &str = "The person didn't allow it. Don't try again unless they ask you to.";
 
-/// Runs one Mac app tool for the familiar `caller`, after checking it has that app on. `ask` puts
-/// writes and Shortcut runs to the person.
-pub async fn call_tool<Ask, Answer>(db: &Db, backend: &Arc<dyn Backend>, caller: &str, tool: &str, arguments: Value, ask: Ask) -> Result<String, String>
+/// Whether a familiar answering in `lane`, a side conversation's chat id, may use Mac apps. A
+/// conversation a familiar on a linked Mac started sends its replies to that Mac, so this Mac's mail,
+/// calendars, and contacts stay out of it.
+pub fn lane_allows(db: &Db, lane: Option<&str>) -> bool {
+    let Some(chat) = lane else { return true };
+    !crate::side::get(db, chat).ok().flatten().is_some_and(|c| crate::link::is_remote(&c.asker_id))
+}
+
+/// Runs one Mac app tool for the familiar `caller`, answering in `lane` when it's in a side
+/// conversation, after checking it has that app on. `ask` puts writes and Shortcut runs to the person.
+pub async fn call_tool<Ask, Answer>(db: &Db, backend: &Arc<dyn Backend>, caller: &str, lane: Option<&str>, tool: &str, arguments: Value, ask: Ask) -> Result<String, String>
 where
     Ask: FnOnce(approvals::Request) -> Answer,
     Answer: std::future::Future<Output = Decision>,
@@ -924,6 +963,9 @@ where
     let agent = db.get_agent(caller)?.ok_or("Only a familiar can use Mac apps.")?;
     if agent.host.is_some() {
         return Err("Mac apps only work for familiars on this Mac.".into());
+    }
+    if !lane_allows(db, lane) {
+        return Err("A familiar on another Mac started this conversation, so Mac apps are off in it. Answer without them.".into());
     }
     if !enabled(db, caller)?.contains(&app) {
         return Err(format!("{} is off for {}. The person can turn it on in your settings, under Mac apps.", app.name(), agent.name));
@@ -946,15 +988,16 @@ where
         "calendar_create_event" => {
             let mut event = new_event(&arguments)?;
             let calendars = blocking(backend, |b| b.calendars(App::Calendar)).await?;
-            event.calendar = Some(pick_calendar(&calendars, event.calendar.as_deref(), App::Calendar)?);
-            let mut detail = format!("{}\n{}\nCalendar: {}", event.title, event_when(&event), event.calendar.as_deref().unwrap_or_default());
+            let (id, label) = pick_calendar(&calendars, event.calendar.as_deref(), App::Calendar)?;
+            event.calendar = Some(id);
+            let mut detail = format!("{}\n{}\nCalendar: {label}", event.title, event_when(&event));
             if let Some(location) = &event.location {
                 detail.push_str(&format!("\nWhere: {location}"));
             }
             if !allowed(ask, caller, format!("{} wants to add an event to your calendar", agent.name), detail).await {
                 return Err(NOT_ALLOWED.into());
             }
-            let summary = format!("Added \"{}\" to {}: {}.", event.title, event.calendar.as_deref().unwrap_or_default(), event_when(&event));
+            let summary = format!("Added \"{}\" to {label}: {}.", event.title, event_when(&event));
             blocking(backend, move |b| b.create_event(&event)).await?;
             Ok(summary)
         }
@@ -974,8 +1017,8 @@ where
         "reminders_add" => {
             let mut reminder = new_reminder(&arguments)?;
             let lists = blocking(backend, |b| b.calendars(App::Reminders)).await?;
-            let list = pick_calendar(&lists, reminder.list.as_deref(), App::Reminders)?;
-            reminder.list = Some(list.clone());
+            let (id, list) = pick_calendar(&lists, reminder.list.as_deref(), App::Reminders)?;
+            reminder.list = Some(id);
             let due = reminder.due.map(|(secs, with_time)| format!("\nDue {}", local_time(secs, with_time))).unwrap_or_default();
             if !allowed(ask, caller, format!("{} wants to add a reminder", agent.name), format!("{}\nList: {list}{due}", reminder.title)).await {
                 return Err(NOT_ALLOWED.into());
@@ -1062,6 +1105,7 @@ mod tests {
         events: Vec<Event>,
         mail: Vec<MailSummary>,
         body: String,
+        output: Option<String>,
     }
 
     impl Fake {
@@ -1071,7 +1115,7 @@ mod tests {
     }
 
     fn cal(title: &str, writable: bool, default: bool) -> Calendar {
-        Calendar { title: title.into(), writable, default }
+        Calendar { id: format!("id-{}", title.to_lowercase()), title: title.into(), account: "iCloud".into(), writable, default }
     }
 
     impl Backend for Fake {
@@ -1116,7 +1160,7 @@ mod tests {
         }
         fn run_shortcut(&self, shortcut: &Shortcut, input: Option<&str>, _: usize) -> Result<String, String> {
             self.log(format!("run {} {input:?}", shortcut.id));
-            Ok("done".into())
+            Ok(self.output.clone().unwrap_or_else(|| "done".into()))
         }
     }
 
@@ -1127,7 +1171,7 @@ mod tests {
 
     async fn run(db: &Db, b: &Arc<dyn Backend>, tool: &str, args: Value, answer: Decision) -> (Result<String, String>, Vec<approvals::Request>) {
         let asked = Mutex::new(Vec::new());
-        let result = call_tool(db, b, "r1", tool, args, |q: approvals::Request| {
+        let result = call_tool(db, b, "r1", None, tool, args, |q: approvals::Request| {
             asked.lock().unwrap().push(q);
             async move { answer }
         })
@@ -1175,10 +1219,21 @@ mod tests {
         assert!(fake.calls.lock().unwrap().is_empty(), "Mail was never touched");
 
         db.insert_agent(&agent("s1", "Remote", Some("me@studio.local"))).unwrap();
-        let remote = call_tool(&db, &b, "s1", "contacts_search", json!({ "query": "Sam" }), |_| async { Decision::Once }).await;
+        let remote = call_tool(&db, &b, "s1", None, "contacts_search", json!({ "query": "Sam" }), |_| async { Decision::Once }).await;
         assert!(remote.unwrap_err().contains("only work for familiars on this Mac"));
-        let nobody = call_tool(&db, &b, "ghost", "contacts_search", json!({ "query": "Sam" }), |_| async { Decision::Once }).await;
+        let nobody = call_tool(&db, &b, "ghost", None, "contacts_search", json!({ "query": "Sam" }), |_| async { Decision::Once }).await;
         assert!(nobody.is_err());
+
+        // A conversation a familiar on a linked Mac started gets no Mac apps; a local one does.
+        let away = crate::side::create_remote(&db, "mac-b", "ada", "Ada", "r1", "Read my mail").unwrap();
+        let refused = call_tool(&db, &b, "r1", Some(&away.id), "contacts_search", json!({ "query": "Sam" }), |_| async { Decision::Once }).await;
+        assert!(refused.unwrap_err().contains("another Mac started this conversation"));
+        assert!(!lane_allows(&db, Some(&away.id)));
+        db.insert_agent(&agent("w1", "Writer", None)).unwrap();
+        let here = crate::side::create(&db, "w1", "r1", "Who is Sam?").unwrap();
+        assert!(lane_allows(&db, Some(&here.id)));
+        assert!(call_tool(&db, &b, "r1", Some(&here.id), "contacts_search", json!({ "query": "Sam" }), |_| async { Decision::Once }).await.is_ok());
+        assert!(fake.calls.lock().unwrap().iter().all(|c| !c.contains("Read my mail")));
     }
 
     #[tokio::test]
@@ -1197,7 +1252,7 @@ mod tests {
 
         let (added, _) = run(&db, &b, "calendar_create_event", args, Decision::Once).await;
         assert_eq!(added.unwrap(), "Added \"Lunch with Sam\" to Work: Sat 28 Nov 2026, 12:00 to 13:00.");
-        assert_eq!(fake.calls.lock().unwrap()[0], "create Lunch with Sam Some(\"Work\")");
+        assert_eq!(fake.calls.lock().unwrap()[0], "create Lunch with Sam Some(\"id-work\")", "it saves to the approved calendar's id");
 
         let read_only = json!({ "title": "X", "start": "2026-11-28", "calendar": "holidays" });
         let (refused, asked) = run(&db, &b, "calendar_create_event", read_only, Decision::Once).await;
@@ -1214,7 +1269,7 @@ mod tests {
         assert_eq!(asked[0].detail, "Buy milk\nList: Groceries\nDue 2026-11-29");
         let (added, _) = run(&db, &b, "reminders_add", json!({ "title": "Buy milk" }), Decision::Once).await;
         assert_eq!(added.unwrap(), "Added the reminder \"Buy milk\" to Inbox.");
-        assert_eq!(*fake.calls.lock().unwrap(), ["add Buy milk Some(\"Inbox\")"]);
+        assert_eq!(*fake.calls.lock().unwrap(), ["add Buy milk Some(\"id-inbox\")"]);
         let (missing, _) = run(&db, &b, "reminders_add", json!({ "title": "X", "list": "Work" }), Decision::Once).await;
         assert!(missing.unwrap_err().contains("no list called \"Work\". The lists are: Inbox, Groceries"));
     }
@@ -1262,16 +1317,16 @@ mod tests {
 
     #[tokio::test]
     async fn caps_what_comes_back() {
-        let db = setup(&["calendar", "contacts", "mail"]);
+        let db = setup(&["calendar", "contacts", "mail", "shortcuts"]);
         let event = |i: i64| Event { title: format!("E{i}"), start: 1_800_000_000 - i * 60, end: 1_800_000_000, all_day: false, calendar: "Work".into(), location: None, notes: Some("n".repeat(1000)) };
         let mail = |i: i64| MailSummary { id: i, subject: "s".into(), from: "f".into(), date: i, read: false, mailbox: "INBOX".into(), account: "iCloud".into() };
-        let (_, b) = backend(Fake { events: (0..60).map(event).collect(), mail: (0..80).map(mail).collect(), body: "b".repeat(MAX_BODY + 500), ..Default::default() });
+        let (_, b) = backend(Fake { events: (0..60).map(event).collect(), mail: (0..80).map(mail).collect(), body: "b".repeat(MAX_BODY + 500), output: Some("o".repeat(MAX_SHORTCUT_OUTPUT + 1)), ..Default::default() });
 
         let out: Value = serde_json::from_str(&run(&db, &b, "calendar_events", json!({}), Decision::Once).await.0.unwrap()).unwrap();
         assert_eq!(out["events"].as_array().unwrap().len(), MAX_EVENTS);
         assert_eq!(out["more"], 10);
         assert_eq!(out["events"][0]["title"], "E59", "earliest first");
-        assert_eq!(out["events"][0]["notes"].as_str().unwrap().chars().count(), MAX_NOTES + 1);
+        assert_eq!(out["events"][0]["notes"].as_str().unwrap().chars().count(), MAX_NOTES);
 
         let out: Value = serde_json::from_str(&run(&db, &b, "contacts_search", json!({ "query": "Sam" }), Decision::Once).await.0.unwrap()).unwrap();
         assert_eq!(out["contacts"].as_array().unwrap().len(), MAX_CONTACTS);
@@ -1287,6 +1342,10 @@ mod tests {
         assert!(text.contains("and 5 more"));
         assert!(text.ends_with(&format!("[Cut at {MAX_BODY} of {} characters.]", MAX_BODY + 500)));
         assert!(text.chars().count() < MAX_BODY + 400);
+
+        let ran = run(&db, &b, "shortcuts_run", json!({ "name": "Log Water" }), Decision::Once).await.0.unwrap();
+        let output = ran.split_once("It returned:\n").unwrap().1;
+        assert_eq!(output.chars().count(), MAX_SHORTCUT_OUTPUT, "the ellipsis counts toward the cap");
     }
 
     #[test]
@@ -1329,6 +1388,19 @@ mod tests {
         assert!(new_event(&json!({ "start": "2026-12-01" })).unwrap_err().contains("title"));
         assert!(new_event(&json!({ "title": "x".repeat(201), "start": "2026-12-01" })).unwrap_err().contains("under 200"));
         assert!(new_reminder(&json!({ "title": "Pay rent", "due": "2026-12-01 09:00" })).unwrap().due.unwrap().1, "a time makes a timed reminder");
+    }
+
+    #[test]
+    fn picks_between_calendars_with_the_same_title_by_account() {
+        let work = |id: &str, account: &str, default: bool| Calendar { id: id.into(), title: "Work".into(), account: account.into(), writable: true, default };
+        let both = [work("personal", "iCloud", false), work("company", "Google", true), cal("Home", true, false)];
+        assert_eq!(pick_calendar(&both, Some("work"), App::Calendar).unwrap(), ("company".into(), "Work (Google)".into()), "the default wins a tie");
+        assert_eq!(pick_calendar(&both, Some("Work (iCloud)"), App::Calendar).unwrap(), ("personal".into(), "Work (iCloud)".into()));
+        assert_eq!(pick_calendar(&both, None, App::Calendar).unwrap().0, "company");
+        assert_eq!(pick_calendar(&both, Some("home"), App::Calendar).unwrap(), ("id-home".into(), "Home".into()), "a unique title needs no account");
+        let neither = [work("personal", "iCloud", false), work("company", "Google", false)];
+        let err = pick_calendar(&neither, Some("Work"), App::Calendar).unwrap_err();
+        assert!(err.contains("Work (iCloud), Work (Google)"), "{err}");
     }
 
     #[test]

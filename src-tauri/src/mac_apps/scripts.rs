@@ -44,7 +44,8 @@ function run(argv) {
   if (a.query) conds.push({ _or: [{ subject: { _contains: a.query } }, { sender: { _contains: a.query } }] });
   var found = [];
   boxes.forEach(function (box) {
-    var msgs = box.messages.whose({ _and: conds });
+    // JXA refuses an _and with one condition.
+    var msgs = box.messages.whose(conds.length === 1 ? conds[0] : { _and: conds });
     var dates = msgs.dateReceived();
     for (var i = 0; i < dates.length; i++) found.push({ msgs: msgs, i: i, date: dates[i] });
   });
@@ -78,6 +79,9 @@ function run(argv) {
   if (msgs.length === 0) return JSON.stringify({ error: 'no_message' });
   var m = msgs[0];
   var body = m.content() || '';
+  // Cutting between the halves of an emoji leaves text that isn't valid JSON for Grimoire.
+  var cut = body.slice(0, a.cap);
+  if (/[\ud800-\udbff]$/.test(cut)) cut = cut.slice(0, -1);
   var people = function (list) {
     return list.slice(0, 50).map(function (r) {
       var name = r.name(), address = r.address();
@@ -86,7 +90,7 @@ function run(argv) {
   };
   return JSON.stringify({
     subject: m.subject() || '', from: m.sender() || '', to: people(m.toRecipients()), cc: people(m.ccRecipients()),
-    date: Math.floor(m.dateReceived().getTime() / 1000), body: body.slice(0, a.cap), length: body.length
+    date: Math.floor(m.dateReceived().getTime() / 1000), body: cut, length: body.length
   });
 }
 "#;
@@ -319,6 +323,49 @@ mod tests {
             let _ = std::fs::remove_file(&path);
             compiled.unwrap();
         }
+    }
+
+    /// A stand-in for Mail inside osascript that answers like JXA does, including refusing an `_and`
+    /// with one condition. The scripts run against it, so no app is ever reached.
+    const FAKE_MAIL: &str = r#"
+function spec(items) {
+  var f = function () { return items; };
+  items.forEach(function (m, i) { f[i] = m; });
+  f.whose = function (p) {
+    if (p._and && p._and.length < 2) throw new Error('Whose clause "_and" array requires at least two elements.');
+    return spec(items);
+  };
+  f.dateReceived = function () { return items.map(function (m) { return m.dateReceived(); }); };
+  return f;
+}
+function value(v) { return function () { return v; }; }
+var BODY = 'a'.repeat(9) + '😀' + ' and more';
+var box = { name: value('INBOX'), account: function () { return { name: value('iCloud') }; } };
+var msg = { id: value(42), subject: value('Hi'), sender: value('Sam <s@x.com>'), readStatus: value(false), dateReceived: value(new Date(1795876200000)),
+  mailbox: value(box), content: value(BODY), toRecipients: value([{ name: value('Me'), address: value('me@x.com') }]), ccRecipients: value([]) };
+box.messages = spec([msg]);
+var account = { name: value('iCloud'), mailboxes: spec([box]) };
+var FAKE = { running: value(true), inbox: { messages: spec([msg]) }, accounts: spec([account]), mailboxes: spec([]) };
+"#;
+
+    fn run_against_fake(script: &str, input: Value) -> String {
+        let script = format!("{FAKE_MAIL}\n{}", script.replace("Application('Mail')", "FAKE"));
+        run("/usr/bin/osascript", &["-l", "JavaScript", "-e", &script, &input.to_string()], Duration::from_secs(30)).unwrap()
+    }
+
+    #[test]
+    fn mail_scripts_run_against_a_stand_in_for_mail() {
+        // One condition, the default search, and three conditions.
+        for input in [json!({ "since": 0, "limit": 5 }), json!({ "since": 0, "until": 2_000_000_000, "query": "Hi", "limit": 5 })] {
+            let found = parse_mail_search(&run_against_fake(MAIL_SEARCH, input)).unwrap();
+            assert_eq!(found.total, 1);
+            assert_eq!((found.messages[0].id, found.messages[0].account.as_str(), found.messages[0].mailbox.as_str()), (42, "iCloud", "INBOX"));
+        }
+        // A cap that lands inside the emoji drops its first half instead of breaking the JSON.
+        let message = parse_mail_read(&run_against_fake(MAIL_READ, json!({ "id": 42, "mailbox": "INBOX", "account": "iCloud", "cap": 10 }))).unwrap();
+        assert_eq!(message.body, "aaaaaaaaa");
+        assert_eq!(message.to, ["Me <me@x.com>"]);
+        assert_eq!(message.length, 20);
     }
 
     #[test]

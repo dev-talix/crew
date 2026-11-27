@@ -190,9 +190,9 @@ pub fn definitions() -> Value {
 /// conversation `agent_id` is its lane key.
 pub fn definitions_for(db: &Db, agent_id: &str) -> Value {
     let mut list = definitions();
-    let familiar = crate::side::split(agent_id).0;
+    let (familiar, lane) = crate::side::split(agent_id);
     let on_this_mac = db.get_agent(familiar).ok().flatten().is_some_and(|a| a.host.is_none());
-    let apps = if on_this_mac { crate::mac_apps::enabled(db, familiar).unwrap_or_default() } else { vec![] };
+    let apps = if on_this_mac && crate::mac_apps::lane_allows(db, lane) { crate::mac_apps::enabled(db, familiar).unwrap_or_default() } else { vec![] };
     if let Some(list) = list.as_array_mut() {
         list.extend(crate::mac_apps::definitions(&apps));
     }
@@ -713,7 +713,7 @@ async fn handle_connection(stream: UnixStream, ctx: Arc<Context>) {
                     crate::browser::call_tool(&ctx.db, &caller, &request.tool, request.arguments).await.map(|text| Outcome { text, changed: None })
                 } else if crate::mac_apps::TOOL_NAMES.contains(&request.tool.as_str()) {
                     let ask = |question| ctx.approvals.ask(&ctx.app, question);
-                    crate::mac_apps::call_tool(&ctx.db, &crate::mac_apps::system(), &caller, &request.tool, request.arguments, ask).await.map(|text| Outcome { text, changed: None })
+                    crate::mac_apps::call_tool(&ctx.db, &crate::mac_apps::system(), &caller, lane, &request.tool, request.arguments, ask).await.map(|text| Outcome { text, changed: None })
                 } else if request.tool == "vault_use" {
                     let ask = |question| ctx.approvals.ask(&ctx.app, question);
                     let used = vault_use(&ctx.db, ctx.secrets.as_ref(), &caller, request.arguments, ask).await;
@@ -921,6 +921,8 @@ mod tests {
         assert!(tools.contains(&"mail_search".into()) && tools.contains(&"mail_read".into()));
         assert!(!tools.contains(&"calendar_events".into()));
         assert!(names("r1~chat-9").contains(&"mail_read".into()), "a side conversation sees its familiar's tools");
+        let away = crate::side::create_remote(&db, "mac-b", "ada", "Ada", "r1", "Hi").unwrap();
+        assert_eq!(names(&format!("r1~{}", away.id)).len(), base, "not when a linked Mac's familiar asked");
         assert_eq!(names("w1").len(), base);
         assert!(claude_tool_names().contains("mcp__grimoire__shortcuts_run"));
     }
