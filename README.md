@@ -39,6 +39,9 @@
   a file or folder in your home folder changes, new mail reaches the Mail app's inbox, or something
   POSTs to the ritual's private webhook on `127.0.0.1:47615`. The message says what set it off.
   Saving or restarting never runs one, and each runs at most once a minute.
+- **Check-ins** wake a familiar every so often during the hours you pick. It looks over its ledger,
+  open questions, recent rituals, and today's drafts, and asks you or drafts something only when
+  something needs you. A check-in that finds nothing leaves no trace.
 - **Covens** group familiars. Home's summoning circle shows everyone or one coven at a time, with
   lines for the spells between familiars and gold arcs for their rituals.
 - **Themes** come as seven built-in inks, and you can edit or write your own as JSON.
@@ -340,6 +343,11 @@ project note), lists entries and their ids with `read_memory`, and deletes one w
 something done from now on, as a rule in your words. `rewrite_memory` is gone; a chat that calls it
 gets told to use the other three.
 
+A familiar looks back through its own past chats with `search_chats`. It searches the same index as
+the palette, but only the familiar's own chats with you and the rooms it was in, never another
+familiar's chats or hidden chats, and returns up to 20 matches with the chat or room title, the date,
+who wrote it, a snippet, and the message id.
+
 Hover a message you sent and click the book button to make it a rule for that familiar. The book
 button in the chat header opens a familiar's memory, and the coven editor on Home has the coven's.
 Both list Rules, Facts, and Projects, where you can add, edit, delete, and change the kind of any
@@ -377,6 +385,41 @@ next run, and a run missed while Grimoire was closed fires once at the next laun
 
 `create_spell` takes the same options: `parallel: true` on a step, and
 `check: { when: "contains" | "lacks", phrase, goToStep }` with steps counted from 1.
+
+## Check-ins
+
+Turn on "Check in on its own" in a familiar's settings, under Check-ins, and pick how often (every 15
+minutes or more), the hours, and the days. Check-ins are off until you turn them on. The first one
+runs at the start of the hours, then one every interval until the hours end. Hours that end before
+they start run past midnight, and the same start and end means all day. The days are the days the
+hours start on. Check-ins share the rituals' timer, saving never runs one, and a check-in missed while
+Grimoire was closed runs once at the next launch if it's still within the hours.
+
+Each check-in is one turn in a hidden chat, on a fresh session with the familiar's model. Grimoire
+tells it the time, its ledger, its open questions in the inbox, the rituals that messaged it since the
+last check-in (with what set them off), and its drafts from today. It replies with exactly NOTHING
+when nothing needs you. Otherwise it acts only through Grimoire's tools: `ask_person` for a question
+in the inbox, `draft_message` for a draft, `update_ledger`, and `remember`. Those show up the way they
+always do, with notifications as Settings, Notifications says.
+
+- A NOTHING reply leaves no row in any chat, no entry, and no notification, unless the check-in asked
+  you something or made a draft first.
+- Anything else stays as an entry under Check-ins in the familiar's settings, with a short summary
+  and the transcript. The line under the switch says when the next one runs and how the last went.
+- A check-in runs with workspace-only access even when the familiar has full access (Codex's
+  `workspace-write` sandbox, Claude's `acceptEdits`), so an unattended run never gets an unsandboxed
+  shell. It can't use connectors, the vault, the browser, helpers, or
+  other familiars; only the ledger, memory, inbox, drafts, `search_chats`, and `list_familiars` tools.
+- It skips, with the reason under the switch, when the familiar is over its budget, when the plan
+  limit guard is holding rituals back, when the familiar is in the middle of a turn, or when its last
+  check-in is still running. Each runs for at most 10 minutes. Familiars on another Mac can't check in
+  yet, since Grimoire's tools don't reach them.
+
+"Review each chat for things to remember", in the same group and also off by default, looks back when
+you start a new chat. If you sent at least 4 messages in the chat you're leaving since its last
+review, the familiar gets one hidden turn on a copy of that chat's session, with workspace-only
+access, asking it to save anything worth keeping with `remember` and reply DONE. Nothing shows in the
+chat and nothing is notified; what it saves shows in its memory, credited to it.
 
 ## Familiars asking familiars
 
@@ -694,7 +737,7 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
 - **Familiar tools.** Grimoire gives each familiar an MCP server named `grimoire` (`--mcp-config`
   for Claude, thread config for Codex) with `list_familiars`, `list_spells`, `create_spell`,
   `list_themes`, `create_theme`, `set_theme`, `vault_search`, `vault_use`, `ask_familiar`,
-  `read_memory`, `remember`, and `forget_memory`. The CLI starts `grimoire mcp <socket> <agent-id>`,
+  `read_memory`, `remember`, `forget_memory`, and `search_chats`. The CLI starts `grimoire mcp <socket> <agent-id>`,
   which relays calls to the app over `grimoire.sock` in its data folder (owner-only). Each server gets
   a random token for its familiar in `GRIMOIRE_TOOLS_TOKEN`, and the app refuses a call whose token
   doesn't match the familiar it names. Familiars can't cast, edit, or delete spells.
