@@ -300,11 +300,16 @@ impl Telegram {
 
     /// The owner's chat while Telegram is on and has a token.
     fn chat(&self) -> Option<i64> {
+        self.owner_here().map(|o| o.chat_id)
+    }
+
+    /// The paired owner while Telegram is on and has a token.
+    fn owner_here(&self) -> Option<Owner> {
         let saved = self.saved();
         if !saved.enabled || self.token().is_none() {
             return None;
         }
-        saved.owner.map(|o| o.chat_id)
+        saved.owner
     }
 
     fn name(&self, agent_id: &str) -> String {
@@ -341,19 +346,21 @@ impl Telegram {
         let me = self.call_with(token, "getMe", json!({})).await?;
         let bot = me["username"].as_str().filter(|n| valid_username(n)).map(String::from);
         self.secrets.set(TOKEN_KEY, token).map_err(|e| format!("Couldn't save the token in the Keychain: {e}"))?;
-        // The old bot's loop stops before anything about the new one is saved.
-        self.stop();
-        let same_bot = self.token().is_some_and(|old| old.split(':').next() == token.split(':').next());
-        *self.token.lock().map_err(|_| POISONED)? = Some(token.to_string());
-        self.change(|s| {
-            s.bot = bot;
-            // A new bot has a new chat and its own update numbers.
-            if !same_bot {
-                s.owner = None;
-                s.current = None;
-                s.offset = 0;
-            }
-        })?;
+        {
+            // Under the poller lock, so no loop can start between the new token and its reset offset.
+            let _poller = self.stop_locked()?;
+            let same_bot = self.token().is_some_and(|old| old.split(':').next() == token.split(':').next());
+            *self.token.lock().map_err(|_| POISONED)? = Some(token.to_string());
+            self.change(|s| {
+                s.bot = bot;
+                // A new bot has a new chat and its own update numbers.
+                if !same_bot {
+                    s.owner = None;
+                    s.current = None;
+                    s.offset = 0;
+                }
+            })?;
+        }
 
         let commands = json!({ "commands": [{ "command": "familiars", "description": "Pick a familiar to talk to" }] });
         if let Err(e) = self.call("setMyCommands", commands).await {
@@ -366,11 +373,14 @@ impl Telegram {
     }
 
     pub fn forget_token(self: &Arc<Self>) -> Result<TelegramStatus, String> {
-        self.stop();
-        *self.token.lock().map_err(|_| POISONED)? = None;
-        *self.pairing.lock().map_err(|_| POISONED)? = None;
-        let deleted = self.secrets.delete(TOKEN_KEY);
-        self.change(|s| *s = Saved { enabled: s.enabled, ..Saved::default() })?;
+        let deleted = {
+            let _poller = self.stop_locked()?;
+            *self.token.lock().map_err(|_| POISONED)? = None;
+            *self.pairing.lock().map_err(|_| POISONED)? = None;
+            let deleted = self.secrets.delete(TOKEN_KEY);
+            self.change(|s| *s = Saved { enabled: s.enabled, ..Saved::default() })?;
+            deleted
+        };
         self.set_error(None);
         deleted.map_err(|e| format!("Couldn't delete the token from the Keychain: {e}"))?;
         self.actions.changed();
@@ -401,9 +411,10 @@ impl Telegram {
 
     /// Whether the reply to `message_id`'s turn should go out: only when Telegram sent that message and
     /// the pairing that sent it is still the one paired.
-    fn reply_due(&self, message_id: i64) -> bool {
-        let asked = self.pending.lock().ok().and_then(|mut pending| pending.remove(&message_id));
-        asked.is_some() && asked == self.saved().owner.map(|o| o.paired_at)
+    /// Returns the chat that asked, so the reply goes there even if the owner changes before it's sent.
+    fn reply_due(&self, message_id: i64) -> Option<i64> {
+        let asked = self.pending.lock().ok().and_then(|mut pending| pending.remove(&message_id))?;
+        self.owner_here().filter(|o| o.paired_at == asked).map(|o| o.chat_id)
     }
 
     /// Drops replies still owed to a pairing that's gone, and the entries of turns that were stopped
@@ -416,11 +427,17 @@ impl Telegram {
 
     /// Stops the poll loop. One that is waiting on Telegram drops whatever comes back.
     fn stop(&self) {
-        let Ok(mut poller) = self.poller.lock() else { return };
+        drop(self.stop_locked());
+    }
+
+    /// `stop`, handing back the poller lock so the caller can change things before a loop restarts.
+    fn stop_locked(&self) -> Result<std::sync::MutexGuard<'_, Option<tauri::async_runtime::JoinHandle<()>>>, String> {
+        let mut poller = self.poller.lock().map_err(|_| POISONED)?;
         self.generation.fetch_add(1, Ordering::SeqCst);
         if let Some(old) = poller.take() {
             old.abort();
         }
+        Ok(poller)
     }
 
     /// Stops the poll loop and starts a new one while Telegram is on and has a token. The loop keeps
@@ -733,18 +750,19 @@ impl Telegram {
 
     async fn push_inbox(&self) {
         let (questions, drafts) = self.unseen();
-        if self.chat().is_none() {
-            return;
-        }
+        let Some(owner) = self.owner_here() else { return };
         let messages = questions
             .iter()
             .map(|q| (format!("q:{}", q.id), question_message(&self.name(&q.agent_id), q)))
             .chain(drafts.iter().map(|d| (format!("d:{}", d.id), draft_message(&self.name(&d.agent_id), d))));
         for (key, (text, buttons)) in messages.collect::<Vec<_>>() {
-            // One that didn't get through goes again with the next change to the inbox or drafts.
-            if !self.tell_owner(&text, Some(buttons)).await {
+            // One that didn't get through goes again with the next change to the inbox or drafts, unless
+            // the owner paired again meanwhile: a new pairing starts after what was open.
+            if !self.say(owner.chat_id, &text, Some(buttons)).await {
                 if let Ok(mut shown) = self.shown.lock() {
-                    shown.remove(&key);
+                    if self.owner_here().is_some_and(|now| now.paired_at == owner.paired_at) {
+                        shown.remove(&key);
+                    }
                 }
             }
         }
@@ -785,7 +803,12 @@ fn tell_owner(text: Option<String>) {
 
 /// A turn ended. A turn a Telegram message started sends its reply back there.
 pub fn turn_ended(agent_id: &str, message_id: i64, outcome: &TurnOutcome) {
-    tell_owner(TELEGRAM.get().filter(|t| t.reply_due(message_id)).map(|t| reply_text(&t.name(agent_id), outcome)));
+    let Some(telegram) = TELEGRAM.get().cloned() else { return };
+    let Some(chat) = telegram.reply_due(message_id) else { return };
+    let text = reply_text(&telegram.name(agent_id), outcome);
+    tauri::async_runtime::spawn(async move {
+        telegram.say(chat, &text, None).await;
+    });
 }
 
 pub fn approval_requested(request: &Request) {
@@ -1269,9 +1292,9 @@ mod tests {
         s.telegram.change(|saved| saved.current = Some("ada".into())).unwrap();
         s.api.queue([message(2, OWNER, private(OWNER), "one"), message(3, OWNER, private(OWNER), "two")]);
         s.telegram.poll_once().await.unwrap();
-        assert!(s.telegram.reply_due(2), "message 2's reply goes out, even before message 1's");
-        assert!(s.telegram.reply_due(1));
-        assert!(!s.telegram.reply_due(1) && !s.telegram.reply_due(99), "a turn that didn't come from Telegram stays on the Mac");
+        assert_eq!(s.telegram.reply_due(2), Some(OWNER), "message 2's reply goes out, even before message 1's");
+        assert_eq!(s.telegram.reply_due(1), Some(OWNER));
+        assert_eq!((s.telegram.reply_due(1), s.telegram.reply_due(99)), (None, None), "a turn that didn't come from Telegram stays on the Mac");
 
         // A turn from the old pairing still running when the owner pairs again doesn't reach the new
         // pairing, and doesn't take the new pairing's reply.
@@ -1284,8 +1307,8 @@ mod tests {
         s.telegram.change(|saved| saved.current = Some("ada".into())).unwrap();
         s.api.queue([message(6, OWNER, private(OWNER), "new")]);
         s.telegram.poll_once().await.unwrap();
-        assert!(!s.telegram.reply_due(3), "the old turn ends and stays quiet");
-        assert!(s.telegram.reply_due(4), "the new turn's reply goes out");
+        assert_eq!(s.telegram.reply_due(3), None, "the old turn ends and stays quiet");
+        assert_eq!(s.telegram.reply_due(4), Some(OWNER), "the new turn's reply goes out");
     }
 
     #[tokio::test]
