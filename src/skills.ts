@@ -132,8 +132,3 @@ export function skillRowProblem(row: TemplateSkillRow): string | null {
 export function skillChanges(before: string[], after: string[]): { on: string[]; off: string[] } {
   return { on: after.filter((n) => !before.includes(n)), off: before.filter((n) => !after.includes(n)) };
 }
-
-/** `current` with the flipped switches applied, keeping anything else that changed meanwhile. */
-export function applySkillChanges(current: string[], changes: { on: string[]; off: string[] }): string[] {
-  return [...current.filter((n) => !changes.off.includes(n)), ...changes.on.filter((n) => !current.includes(n))];
-}

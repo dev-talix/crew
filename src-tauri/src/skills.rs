@@ -279,7 +279,7 @@ pub fn compose(name: &str, description: &str, body: &str) -> String {
 pub fn renamed(text: &str, name: &str) -> String {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let Ok((lines, _)) = header_lines(text) else { return text.to_string() };
-    let Some(&(at, line)) = lines.iter().find(|(_, l)| l.split_once(':').is_some_and(|(k, _)| k == "name")) else { return text.to_string() };
+    let Some(&(at, line)) = lines.iter().find(|(_, l)| !l.starts_with([' ', '\t']) && l.split_once(':').is_some_and(|(k, _)| k.trim() == "name")) else { return text.to_string() };
     format!("{}name: {name}{}", &text[..at], &text[at + line.len()..])
 }
 
@@ -457,7 +457,9 @@ fn write_folder(root: &Path, name: &str, files: &[SkillFile]) -> Result<PathBuf,
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&path, &f.text)?;
+            // create_new: two names the file system treats as one, like Unicode spellings of
+            // the same word, fail here instead of one silently replacing the other.
+            std::io::Write::write_all(&mut std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?, f.text.as_bytes())?;
         }
         std::fs::rename(&staging, &target)
     };
@@ -685,16 +687,18 @@ pub fn add_in(db: &Db, root: &Path, preview: Preview) -> Result<Skill, String> {
 pub fn delete_in(db: &Db, root: &Path, name: &str) -> Result<(), String> {
     check_name(name)?;
     let _writing = writing();
-    db.with(|c| c.execute("DELETE FROM skills WHERE name = ?1", params![name]).map(|_| ()))?;
+    let deleted = db.with(|c| c.execute("DELETE FROM skills WHERE name = ?1", params![name]))?;
+    // No row means no skill: the folder may belong to an import whose rows haven't committed yet.
     let folder = library(root).join(name);
-    if folder.exists() {
+    if deleted > 0 && folder.exists() {
         std::fs::remove_dir_all(&folder).map_err(|e| format!("Could not delete the folder of {name}: {e}"))?;
     }
     sync_in(db, root);
     Ok(())
 }
 
-/// Turns on exactly `names` for the familiar `agent_id`.
+/// Turns on exactly `names` for the familiar `agent_id`. The app uses `change_for_agent_in`.
+#[cfg(test)]
 pub fn set_for_agent_in(db: &Db, root: &Path, agent_id: &str, names: &[String]) -> Result<(), String> {
     let _writing = writing();
     let agent = db.get_agent(agent_id)?.ok_or("That familiar no longer exists.")?;
@@ -709,6 +713,31 @@ pub fn set_for_agent_in(db: &Db, root: &Path, agent_id: &str, names: &[String]) 
         let tx = c.unchecked_transaction()?;
         tx.execute("DELETE FROM agent_skills WHERE agent_id = ?1", params![agent_id])?;
         for name in names {
+            tx.execute("INSERT OR IGNORE INTO agent_skills (agent_id, skill) VALUES (?1, ?2)", params![agent_id, name])?;
+        }
+        tx.commit()
+    })?;
+    sync_in(db, root);
+    Ok(())
+}
+
+/// Turns `on` on and `off` off for `agent_id`, leaving its other skills as they are, in one step.
+pub fn change_for_agent_in(db: &Db, root: &Path, agent_id: &str, on: &[String], off: &[String]) -> Result<(), String> {
+    let _writing = writing();
+    let agent = db.get_agent(agent_id)?.ok_or("That familiar no longer exists.")?;
+    if agent.host.is_some() && !on.is_empty() {
+        return Err("Skills live on this Mac, so a familiar on another Mac can't use them yet.".into());
+    }
+    let known = rows(db)?;
+    if let Some(unknown) = on.iter().find(|n| !known.iter().any(|r| &r.name == *n)) {
+        return Err(format!("No skill is called {unknown}."));
+    }
+    db.with(|c| {
+        let tx = c.unchecked_transaction()?;
+        for name in off {
+            tx.execute("DELETE FROM agent_skills WHERE agent_id = ?1 AND skill = ?2", params![agent_id, name])?;
+        }
+        for name in on {
             tx.execute("INSERT OR IGNORE INTO agent_skills (agent_id, skill) VALUES (?1, ?2)", params![agent_id, name])?;
         }
         tx.commit()
@@ -757,7 +786,8 @@ pub fn update_in(db: &Db, root: &Path, caller: &str, name: &str, description: Op
     }
     let temp = path.with_extension("md.tmp");
     std::fs::write(&temp, &text).and_then(|_| std::fs::rename(&temp, &path)).map_err(|e| format!("Could not save {name}: {e}"))?;
-    db.with(|c| c.execute("UPDATE skills SET updated_at = ?2 WHERE name = ?1", params![name, now_ms()]).map(|_| ()))?;
+    // Always moves forward, even for two edits in one millisecond: delivery signatures depend on it.
+    db.with(|c| c.execute("UPDATE skills SET updated_at = MAX(?2, updated_at + 1) WHERE name = ?1", params![name, now_ms()]).map(|_| ()))?;
     sync_in(db, root);
     Ok(())
 }
@@ -1228,9 +1258,9 @@ pub fn delete_skill(app: AppHandle, state: State<crate::AppState>, name: String)
 }
 
 #[tauri::command]
-pub fn set_agent_skills(app: AppHandle, state: State<crate::AppState>, agent_id: String, names: Vec<String>) -> Result<(), String> {
+pub fn change_agent_skills(app: AppHandle, state: State<crate::AppState>, agent_id: String, on: Vec<String>, off: Vec<String>) -> Result<(), String> {
     crate::link::local_only(&agent_id)?;
-    set_for_agent_in(&state.db, root()?, &agent_id, &names)?;
+    change_for_agent_in(&state.db, root()?, &agent_id, &on, &off)?;
     let _ = app.emit(CHANGED, ());
     Ok(())
 }
@@ -1495,6 +1525,39 @@ mod tests {
         for bad in ["https://raw.githubusercontent.com:444/a", "https://u:p@raw.githubusercontent.com/a", "http://raw.githubusercontent.com/a", "https://evil.example/a"] {
             assert!(!raw_host_ok(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn round_two_fixes_hold() {
+        let (db, root) = setup();
+        for name in ["kept", "flipped"] {
+            add_in(&db, &root, preview_in(&db, &root, vec![SkillFile { path: MAIN_FILE.into(), text: md(name, "d") }], vec![], "you", None).unwrap()).unwrap();
+        }
+        set_for_agent_in(&db, &root, "ada", &["kept".into()]).unwrap();
+        // A familiar saves a skill while its settings are open; flipping another switch keeps it.
+        create_in(&db, &root, "ada", "autosave", "Saved mid-form.", "Steps.").unwrap();
+        change_for_agent_in(&db, &root, "ada", &["flipped".into()], &["kept".into()]).unwrap();
+        let mut on = enabled_names(&db, "ada").unwrap();
+        on.sort();
+        assert_eq!(on, ["autosave", "flipped"]);
+        // Two edits in one millisecond still move the stamp.
+        let stamp = || row(&db, "autosave").unwrap().unwrap().updated_at;
+        let before = stamp();
+        update_in(&db, &root, "ada", "autosave", Some("One."), None).unwrap();
+        update_in(&db, &root, "ada", "autosave", Some("Two."), None).unwrap();
+        assert!(stamp() >= before + 2);
+        // Deleting a name with no row leaves its folder alone: it may be an import mid-commit.
+        std::fs::create_dir_all(root.join("skills/pending")).unwrap();
+        delete_in(&db, &root, "pending").unwrap();
+        assert!(root.join("skills/pending").exists());
+        // Two paths the file system treats as one fail instead of overwriting each other.
+        let files = vec![SkillFile { path: MAIN_FILE.into(), text: md("alias", "d") }, SkillFile { path: "caf\u{e9}.md".into(), text: "one".into() }, SkillFile { path: "cafe\u{301}.md".into(), text: "two".into() }];
+        assert!(write_folder(&root, "alias", &files).is_err());
+        assert!(!root.join("skills/alias").exists());
+        // The rename finds a name key written with a space before the colon.
+        let mut spaced = vec![SkillFile { path: MAIN_FILE.into(), text: "---\nname : weekly\ndescription: d\n---\n".into() }];
+        rename_main(&mut spaced, "weekly-2").unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

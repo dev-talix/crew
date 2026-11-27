@@ -773,7 +773,8 @@ export const api = {
   previewSkill: (source: Skills.AddFrom) => invoke<Skills.SkillPreview | null>("preview_skill", { source }),
   addSkill: (preview: Skills.SkillPreview) => invoke<Skills.Skill>("add_skill", { preview }),
   deleteSkill: (name: string) => invoke<void>("delete_skill", { name }),
-  setAgentSkills: (agentId: string, names: string[]) => invoke<void>("set_agent_skills", { agentId, names }),
+  /** Turns `on` on and `off` off for one familiar, leaving its other skills as they are. */
+  changeAgentSkills: (agentId: string, on: string[], off: string[]) => invoke<void>("change_agent_skills", { agentId, on, off }),
   listVault: () => invoke<VaultItem[]>("list_vault"),
   vaultSecret: (id: string) => invoke<Record<string, string>>("vault_secret", { id }),
   saveVaultItem: (input: VaultItemInput) => invoke<VaultItem>("save_vault_item", { input }),

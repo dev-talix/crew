@@ -11,7 +11,7 @@ import { ExportButton } from "./ImportExport";
 import TemplateImport from "./TemplateImport";
 import { followUntouched } from "./panel";
 import { toggleId, type Connector } from "./connectors";
-import { applySkillChanges, skillChanges, type Skill } from "./skills";
+import { skillChanges, type Skill } from "./skills";
 import "./connectors.css";
 import { CheckInsField } from "./CheckInSettings";
 import { sameSettings, settingsOf, type CheckInSettings, type CheckInStatus } from "./checkins";
@@ -235,10 +235,10 @@ export default function AgentForm(props: {
         await (editing ? apps : apps.catch(() => undefined));
       }
       // Skill folders live on this Mac too. A familiar can save a skill while this form is open, so
-      // the flipped switches apply to what's on now, not to the list from when the form opened.
+      // only the flipped switches go back, and the rest stay as they are now.
       const changed = skillChanges(skillsAtOpen, skillsOn());
       if (connectorsHere() && (changed.on.length || changed.off.length)) {
-        const assigned = api.skillLibrary().then((list) => api.setAgentSkills(saved.id, applySkillChanges(list.filter((s) => s.agents.includes(saved.id)).map((s) => s.name), changed)));
+        const assigned = api.changeAgentSkills(saved.id, changed.on, changed.off);
         await (editing ? assigned : assigned.catch(() => undefined));
       }
       if (!editing && saved.setupPending) {

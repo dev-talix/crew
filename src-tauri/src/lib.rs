@@ -1013,7 +1013,7 @@ pub fn run() {
             skills::preview_skill,
             skills::add_skill,
             skills::delete_skill,
-            skills::set_agent_skills
+            skills::change_agent_skills
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {
