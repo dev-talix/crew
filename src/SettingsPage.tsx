@@ -10,7 +10,8 @@ import { BackgroundSection } from "./BackgroundSettings";
 import { appIcon, readMode, setAppIcon, setMode, type AppIconSetting, type ModeSetting } from "./themeStore";
 import nightIcon from "./assets/icon-night.svg";
 import paperIcon from "./assets/icon-paper.svg";
-import { BarsIcon, BellIcon, CloseIcon, DownloadIcon, GearIcon, LinkIcon, PaletteIcon, PhoneIcon, PlugIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
+import { BarsIcon, BellIcon, ChannelIcon, CloseIcon, DownloadIcon, GearIcon, LinkIcon, PaletteIcon, PhoneIcon, PlugIcon, RefreshIcon, ShieldIcon, VaultIcon } from "./icons";
+import ChannelsPage from "./ChannelsPage";
 import ConnectorsPage from "./ConnectorsPage";
 import LinkedMacsPage from "./LinkedMacsPage";
 import PhonePage from "./PhonePage";
@@ -385,7 +386,7 @@ function AppearanceSettings() {
   );
 }
 
-export type SettingsSection = "general" | "appearance" | "notifications" | "vault" | "connectors" | "permissions" | "links" | "phone" | "usage" | "updates";
+export type SettingsSection = "general" | "appearance" | "notifications" | "vault" | "connectors" | "permissions" | "links" | "phone" | "usage" | "updates" | "channels";
 
 /** The sections, with words the ⌘K palette also finds them by. */
 export const SETTINGS_SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element; keywords: string }[] = [
@@ -399,6 +400,7 @@ export const SETTINGS_SECTIONS: { id: SettingsSection; label: string; icon: () =
   { id: "phone", label: "Phone", icon: PhoneIcon, keywords: "phone iphone android mobile companion pair tailscale" },
   { id: "usage", label: "Usage", icon: BarsIcon, keywords: "tokens plan limits rate" },
   { id: "updates", label: "Updates", icon: DownloadIcon, keywords: "version release download" },
+  { id: "channels", label: "Channels", icon: ChannelIcon, keywords: "telegram bot botfather chat messages away alerts" },
 ];
 
 export default function SettingsPage(props: { section?: SettingsSection; agents: Agent[] }) {
@@ -458,6 +460,9 @@ export default function SettingsPage(props: { section?: SettingsSection; agents:
         </Match>
         <Match when={section() === "updates"}>
           <UpdatesPage version={appVersion() ?? "0.5.0"} />
+        </Match>
+        <Match when={section() === "channels"}>
+          <ChannelsPage />
         </Match>
       </Switch>
     </div>
