@@ -480,12 +480,14 @@ by default:
 - **Run in the background.** Closing the window hides it and the Dock icon, and Grimoire keeps
   running. Opening Grimoire again (Dock, Finder, `open -a Grimoire`), the menu bar's Open Grimoire, or
   a notification click brings the window back.
-- **Start at login.** Writes `~/Library/LaunchAgents/dev.talix.grimoire.background.plist`, which opens
-  Grimoire with `--background` when you log in, with no window and no Dock icon. The menu bar item
-  stays if it's on.
-  macOS loads it at the next login. Turning it off unloads it with `launchctl bootout` and deletes the file.
+- **Start at login.** Writes `~/Library/LaunchAgents/dev.talix.grimoire.background.plist`, which runs
+  `open -b dev.talix.grimoire --args --background` when you log in, so Grimoire starts with no window
+  and no Dock icon. The menu bar item stays if it's on. Opening by bundle ID keeps it working after you
+  move or rename the app. macOS loads it at the next login. Turning it off unloads it with
+  `launchctl bootout` and deletes the file. It works only from Grimoire.app, not a development build.
 - **Keep this Mac awake while Grimoire runs.** Runs `caffeinate -i -w <Grimoire's pid>`, which stops
-  idle sleep and ends when Grimoire quits. The display can still sleep.
+  idle sleep and ends when Grimoire quits. The display can still sleep. If caffeinate stops, Settings
+  restarts it, and says so if it can't.
 
 You can also start it by hand with `open -a Grimoire --args --background`. Rituals, event triggers,
 the phone companion, and linked Macs don't need the window. Background mode still needs a logged-in
