@@ -40,17 +40,23 @@ pub const NOTHING: &str = "NOTHING";
 pub const REVIEW_AFTER: i64 = 4;
 pub const SEARCH_TOOL: &str = "search_chats";
 const SEARCH_MAX: i64 = 20;
+/// A room message for `search_chats`: id, room title, kind, author id and name, text, and time.
+type RoomRow = (i64, String, String, Option<String>, Option<String>, String, i64);
+/// How many of the latest room messages `search_chats` looks through.
+const ROOM_SCAN: i64 = 2000;
 const KIND_CHECKIN: &str = "checkin";
 const KIND_REVIEW: &str = "review";
 /// The source label on the first message of a check-in's transcript.
 const CHECKIN_SOURCE: &str = "Check-in";
 const REVIEW_SOURCE: &str = "Memory review";
-/// The only Grimoire tools a check-in or memory review can call.
+/// The only Grimoire tools a check-in can call.
 const ALLOWED: [&str; 9] =
     ["read_ledger", "update_ledger", "ask_person", "draft_message", "read_memory", "remember", "forget_memory", "search_chats", "list_familiars"];
 /// The tools that put something in front of the person, so a run that used one is kept even when its
 /// reply is NOTHING.
 const SURFACING: [&str; 2] = ["ask_person", "draft_message"];
+/// The only Grimoire tools a memory review can call.
+const REVIEW_ALLOWED: [&str; 2] = ["read_memory", "remember"];
 
 /// Schema version 30: check-in settings per familiar, the check-ins and reviews that ran, and how far
 /// each chat has been reviewed.
@@ -219,6 +225,10 @@ fn note(db: &Db, agent_id: &str, text: &str) {
     let _ = db.with(|c| c.execute("UPDATE checkins SET last_note = ?2 WHERE agent_id = ?1", params![agent_id, text]));
 }
 
+/// How late the timer may wake for a check-in and still run it, even after the hours end: the last
+/// check-in is due right at the end, and the timer always wakes a little after.
+const LATE_MS: i64 = 5 * 60_000;
+
 /// Moves every due check-in on and returns the familiars whose check-in runs now, and when the next
 /// one is due. A check-in missed while Grimoire was closed runs once, if it's still within the hours.
 pub fn due(db: &Db, now: i64) -> Result<(Vec<String>, Option<i64>), String> {
@@ -237,7 +247,7 @@ pub fn due(db: &Db, now: i64) -> Result<(Vec<String>, Option<i64>), String> {
         let next = match next {
             Some(at) if at > now => at,
             due => {
-                if due.is_some() && in_window(&settings, &local) {
+                if due.is_some_and(|at| now - at <= LATE_MS || in_window(&settings, &local)) {
                     run.push(agent_id.clone());
                 }
                 let next = next_run_ms(&settings, now);
@@ -265,11 +275,24 @@ pub fn is_nothing(reply: &str) -> bool {
 
 /// Familiars with a check-in running, so a slow one never overlaps the next.
 static RUNNING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
-/// Hidden chats where a check-in or review is running, with the surfacing tools each has used.
-static LANES: LazyLock<Mutex<HashMap<String, Vec<String>>>> = LazyLock::new(Default::default);
+/// Hidden chats where a check-in or review is running.
+static LANES: LazyLock<Mutex<HashMap<String, Watch>>> = LazyLock::new(Default::default);
 
-fn lanes() -> std::sync::MutexGuard<'static, HashMap<String, Vec<String>>> {
+/// What a running check-in or review may do, and the surfacing tools it has used.
+#[derive(Default)]
+struct Watch {
+    review: bool,
+    used: Vec<String>,
+}
+
+fn lanes() -> std::sync::MutexGuard<'static, HashMap<String, Watch>> {
     LANES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether the lane key or tool caller `key` is a running check-in or memory review, which the
+/// providers run with no shell approvals and no MCP servers but Grimoire's.
+pub fn unattended(key: &str) -> bool {
+    side::split(key).1.is_some_and(|chat| lanes().contains_key(chat))
 }
 
 /// Held while a familiar's check-in runs.
@@ -291,16 +314,25 @@ pub fn claim(agent_id: &str) -> Option<Claim> {
 pub fn check_lane(lane: Option<&str>, tool: &str) -> Result<(), String> {
     let Some(chat) = lane else { return Ok(()) };
     let mut lanes = lanes();
-    let Some(used) = lanes.get_mut(chat) else { return Ok(()) };
+    let Some(watch) = lanes.get_mut(chat) else { return Ok(()) };
+    if watch.review && !REVIEW_ALLOWED.contains(&tool) {
+        return Err(format!("A memory review can't use {tool}. Save what's worth keeping with remember, then reply DONE."));
+    }
     if !ALLOWED.contains(&tool) {
         return Err(format!(
             "A check-in can't use {tool}. Ask the person with ask_person, draft with draft_message, or keep a note with update_ledger or remember."
         ));
     }
     if SURFACING.contains(&tool) {
-        used.push(tool.to_string());
+        watch.used.push(tool.to_string());
     }
     Ok(())
+}
+
+/// Whether the familiar is replying in a room right now.
+fn in_room_turn(db: &Db, agent_id: &str) -> bool {
+    db.with(|c| c.query_row("SELECT EXISTS(SELECT 1 FROM room_members WHERE agent_id = ?1 AND speaking = 1)", params![agent_id], |r| r.get(0)))
+        .unwrap_or(false)
 }
 
 /// Why a familiar's check-in skips this run, if it does. `codex` is a fresh Codex plan reading.
@@ -435,7 +467,7 @@ pub fn list(db: &Db, agent_id: &str, limit: i64) -> Result<Vec<Run>, String> {
 }
 
 /// Saves a run and its hidden chat, and starts watching the chat's tool calls.
-fn begin(db: &Db, agent_id: &str, kind: &str, title: &str) -> Result<(String, String), String> {
+pub(crate) fn begin(db: &Db, agent_id: &str, kind: &str, title: &str) -> Result<(String, String), String> {
     let chat = side::create(db, agent_id, agent_id, title)?;
     let id = uuid::Uuid::new_v4().to_string();
     db.with(|c| {
@@ -444,13 +476,13 @@ fn begin(db: &Db, agent_id: &str, kind: &str, title: &str) -> Result<(String, St
             params![id, agent_id, chat.id, kind, now_ms()],
         )
     })?;
-    lanes().insert(chat.id.clone(), Vec::new());
+    lanes().insert(chat.id.clone(), Watch { review: kind == KIND_REVIEW, used: Vec::new() });
     Ok((id, chat.id))
 }
 
 /// Stops watching a hidden chat and returns the surfacing tools it used.
-fn release(chat_id: &str) -> Vec<String> {
-    lanes().remove(chat_id).unwrap_or_default()
+pub(crate) fn release(chat_id: &str) -> Vec<String> {
+    lanes().remove(chat_id).map(|w| w.used).unwrap_or_default()
 }
 
 fn delete_chat(db: &Db, chat_id: &str) -> Result<(), String> {
@@ -502,6 +534,8 @@ async fn hidden(runtime: &Arc<Runtime>, agent_id: &str, chat_id: &str, prompt: &
     let turn = Hidden { chat_id, shown: prompt, source: Some(source), prompt, session, workspace_only: true, origin: "ritual" };
     let ending = helpers::supervise(runtime.hidden_turn(turn, &startup), &stop, TIMEOUT, &startup, || runtime.stop_lane(&key)).await;
     runtime.forget_lane(&key);
+    // Nothing runs in the lane again, so a tool server left over from it can't call in.
+    crate::tools::revoke(&key);
     ending
 }
 
@@ -518,17 +552,18 @@ async fn run(db: &Db, runtime: &Arc<Runtime>, agent_id: &str) {
     let Some(_running) = claim(agent_id) else {
         return note(db, agent_id, "Skipped: the last check-in was still running.");
     };
-    let busy = runtime.is_busy(agent_id);
     // Read Codex's limits only when they could matter, since that starts Codex.
     let needs_codex = agent.provider == Provider::Codex
         && crate::budgets::plan_guard(db).enabled
-        && !busy
+        && !runtime.is_busy(agent_id)
         && crate::budgets::check_turn(db, agent_id).is_ok();
     let codex = if needs_codex { runtime.codex_rate_limits().await.ok() } else { None };
     if let Some(limits) = &codex {
         crate::budgets::remember_codex(db, limits);
     }
     let now = now_ms();
+    // Looked at after reading the limits, which can take a while, so a turn that started meanwhile counts.
+    let busy = runtime.is_busy(agent_id) || in_room_turn(db, agent_id);
     if let Some(reason) = skip_reason(db, &agent, busy, crate::tools::LAUNCH.get().is_some(), codex.as_ref(), now) {
         eprintln!("Skipped {}'s check-in: {reason}", agent.name);
         return note(db, agent_id, &format!("Skipped: {reason}"));
@@ -588,20 +623,38 @@ pub fn after_new_chat(db: &Arc<Db>, runtime: &Arc<Runtime>, agent_id: &str, left
     }
     let session: Option<String> = db.with(|c| c.query_row("SELECT session_id FROM chats WHERE id = ?1", params![left], |r| r.get(0))).ok().flatten();
     let (Some(session), Ok(Some(through))) = (session, review_due(db, left)) else { return };
-    if crate::budgets::check_turn(db, agent_id).is_err() || mark_reviewed(db, left, through).is_err() {
+    if crate::budgets::check_turn(db, agent_id).is_err() || !reviewing().insert(left.to_string()) {
         return;
     }
-    let (db, runtime, agent_id) = (db.clone(), runtime.clone(), agent_id.to_string());
+    let (db, runtime, agent_id, left) = (db.clone(), runtime.clone(), agent_id.to_string(), left.to_string());
     tauri::async_runtime::spawn(async move {
-        let Ok((_, chat_id)) = begin(&db, &agent_id, KIND_REVIEW, REVIEW_SOURCE) else { return };
-        let ending = hidden(&runtime, &agent_id, &chat_id, REVIEW_PROMPT, REVIEW_SOURCE, LaneSession::Fork(session)).await;
-        release(&chat_id);
-        if let Ending::Failed(reason) = &ending {
-            eprintln!("A memory review didn't finish: {reason}");
+        if let Ok((_, chat_id)) = begin(&db, &agent_id, KIND_REVIEW, REVIEW_SOURCE) {
+            let ending = hidden(&runtime, &agent_id, &chat_id, REVIEW_PROMPT, REVIEW_SOURCE, LaneSession::Fork(session)).await;
+            release(&chat_id);
+            reviewed(&db, &left, through, &ending);
+            // What it saved shows in the familiar's memory, credited to it, so the transcript goes.
+            let _ = delete_chat(&db, &chat_id);
         }
-        // What it saved shows in the familiar's memory, credited to it, so the transcript goes.
-        let _ = delete_chat(&db, &chat_id);
+        reviewing().remove(&left);
     });
+}
+
+/// Chats with a memory review running, so starting new chats quickly never reviews one twice.
+static REVIEWING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+
+fn reviewing() -> std::sync::MutexGuard<'static, HashSet<String>> {
+    REVIEWING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Counts a chat as reviewed through `through` only when its review finished, so a failed one runs
+/// again the next time.
+fn reviewed(db: &Db, chat_id: &str, through: i64, ending: &Ending) {
+    match ending {
+        Ending::Done(_) => {
+            let _ = mark_reviewed(db, chat_id, through);
+        }
+        other => eprintln!("A memory review didn't finish: {other:?}"),
+    }
 }
 
 /// Closes check-ins and reviews cut off when Grimoire last quit. A review's hidden chat goes, since
@@ -634,20 +687,32 @@ pub struct Found {
     pub at: i64,
 }
 
-/// The words of a search, at most 8, each with a letter or digit.
+/// The words of a search, at most 8, split at anything but letters and digits like the chat search index.
 fn words(query: &str) -> Vec<String> {
-    query.split_whitespace().filter(|w| w.chars().any(char::is_alphanumeric)).take(8).map(str::to_lowercase).collect()
+    query.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).take(8).map(str::to_lowercase).collect()
 }
 
 /// The part of `text` around the first of `words`, about 200 characters.
 fn excerpt(text: &str, words: &[String]) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let lower = flat.to_lowercase();
-    // Lowercasing can change byte lengths, so only use the match position when it can't have.
-    let at = if lower.len() == flat.len() { words.iter().filter_map(|w| lower.find(w.as_str())).min().unwrap_or(0) } else { 0 };
+    // Lowercase it a character at a time, remembering where each lowercase byte came from, since
+    // lowercasing can change a character's length.
+    let (mut lower, mut origin) = (String::new(), Vec::new());
+    for (i, c) in flat.char_indices() {
+        let before = lower.len();
+        lower.extend(c.to_lowercase());
+        origin.extend(std::iter::repeat_n(i, lower.len() - before));
+    }
+    let at = words.iter().filter_map(|w| lower.find(w.as_str())).min().map_or(0, |p| origin[p]);
     let start = flat[..at].char_indices().rev().nth(80).map_or(0, |(i, _)| i);
     let lead = if start > 0 { "…" } else { "" };
     format!("{lead}{}", short(&flat[start..], 200))
+}
+
+/// Whether `text` has every word, the last one as the start of a word, like the chat search index.
+fn has_words(text: &str, words: &[String]) -> bool {
+    let tokens: Vec<String> = text.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).map(str::to_lowercase).collect();
+    words.iter().enumerate().all(|(i, w)| tokens.iter().any(|t| if i + 1 == words.len() { t.starts_with(w.as_str()) } else { t == w }))
 }
 
 /// Searches `agent_id`'s own chats, then the rooms it was in, best matches first. Never another
@@ -656,7 +721,7 @@ pub fn search(db: &Db, agent_id: &str, query: &str, limit: i64) -> Result<Vec<Fo
     let Some(fts) = crate::chats::fts_query(query) else { return Ok(Vec::new()) };
     let words = words(query);
     let limit = limit.clamp(1, SEARCH_MAX);
-    let mut found: Vec<Found> = db.with(|c| {
+    let rows: Vec<(i64, String, String, String, i64)> = db.with(|c| {
         let mut stmt = c.prepare_cached(
             "SELECT m.id, chats.title, m.role, m.text, m.created_at FROM messages_fts
              JOIN messages m ON m.id = messages_fts.rowid
@@ -664,44 +729,44 @@ pub fn search(db: &Db, agent_id: &str, query: &str, limit: i64) -> Result<Vec<Fo
              WHERE messages_fts MATCH ?1 AND chats.agent_id = ?2 AND chats.side_of IS NULL
              ORDER BY bm25(messages_fts), m.id DESC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![fts, agent_id, limit], |r| {
-            let role: String = r.get(2)?;
-            Ok(Found {
-                place: "chat".into(),
-                title: r.get(1)?,
-                message_id: r.get(0)?,
-                from: if role == "user" { "the person".into() } else { "you".into() },
-                snippet: excerpt(&r.get::<_, String>(3)?, &words),
-                at: r.get(4)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![fts, agent_id, limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
         rows.collect()
     })?;
-    let left = limit - found.len() as i64;
-    if left > 0 && !words.is_empty() {
-        let like = words.iter().map(|_| "LOWER(r.text) LIKE ? ESCAPE '\\'").collect::<Vec<_>>().join(" AND ");
-        let sql = format!(
-            "SELECT r.id, rooms.title, r.kind, r.agent_id, r.name, r.text, r.created_at FROM room_messages r JOIN rooms ON rooms.id = r.room_id
-             WHERE r.room_id IN (SELECT room_id FROM room_members WHERE agent_id = ? UNION SELECT room_id FROM room_messages WHERE agent_id = ?)
-             AND r.kind IN ('user', 'reply') AND {like} ORDER BY r.id DESC LIMIT ?"
-        );
-        let mut values: Vec<rusqlite::types::Value> = vec![agent_id.to_string().into(), agent_id.to_string().into()];
-        values.extend(words.iter().map(|w| format!("%{}%", w.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")).into()));
-        values.push(left.into());
-        let rooms: Vec<Found> = db.with(|c| {
-            let mut stmt = c.prepare(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(values), |r| {
-                let (kind, author, name): (String, Option<String>, Option<String>) = (r.get(2)?, r.get(3)?, r.get(4)?);
-                let from = match (kind.as_str(), author) {
-                    ("user", _) => "the person".to_string(),
-                    (_, Some(author)) if author == agent_id => "you".to_string(),
-                    _ => name.unwrap_or_else(|| "another familiar".into()),
-                };
-                Ok(Found { place: "room".into(), title: r.get(1)?, message_id: r.get(0)?, from, snippet: excerpt(&r.get::<_, String>(5)?, &words), at: r.get(6)? })
-            })?;
+    let mut found: Vec<Found> = rows
+        .into_iter()
+        .map(|(id, title, role, text, at)| Found {
+            place: "chat".into(),
+            title,
+            message_id: id,
+            from: if role == "user" { "the person".into() } else { "you".into() },
+            snippet: excerpt(&text, &words),
+            at,
+        })
+        .collect();
+    if (found.len() as i64) < limit {
+        // Rooms aren't in the search index, so read the latest of their messages and match them here.
+        let rows: Vec<RoomRow> = db.with(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT r.id, rooms.title, r.kind, r.agent_id, r.name, r.text, r.created_at FROM room_messages r JOIN rooms ON rooms.id = r.room_id
+                 WHERE r.room_id IN (SELECT room_id FROM room_members WHERE agent_id = ?1 UNION SELECT room_id FROM room_messages WHERE agent_id = ?1)
+                 AND r.kind IN ('user', 'reply') ORDER BY r.id DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![agent_id, ROOM_SCAN], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?;
             rows.collect()
         })?;
-        found.extend(rooms);
+        let rooms = rows.into_iter().filter(|row| has_words(&row.5, &words)).take((limit - found.len() as i64) as usize);
+        found.extend(rooms.map(|(id, title, kind, author, name, text, at)| Found {
+            place: "room".into(),
+            title,
+            message_id: id,
+            from: match (kind.as_str(), author) {
+                ("user", _) => "the person".to_string(),
+                (_, Some(author)) if author == agent_id => "you".to_string(),
+                _ => name.unwrap_or_else(|| "another familiar".into()),
+            },
+            snippet: excerpt(&text, &words),
+            at,
+        }));
     }
     Ok(found)
 }
@@ -874,6 +939,10 @@ mod tests {
         assert!(get(&db, "b").unwrap().next_run_at.unwrap() > now);
         assert!(soonest.unwrap() > now);
         assert!(due(&db, now).unwrap().0.is_empty(), "and not again");
+
+        // The last check-in is due right as the hours end, and the timer wakes a moment after.
+        db.with(|c| c.execute("UPDATE checkins SET next_run_at = ?1 WHERE agent_id = 'b'", params![now - 1])).unwrap();
+        assert_eq!(due(&db, now).unwrap().0, ["b"], "a late wake still runs it");
     }
 
     #[test]
@@ -1088,4 +1157,57 @@ mod tests {
         assert_eq!(list(&db, "a", 20).unwrap()[0].status, "interrupted");
         assert!(side::get(&db, &review).unwrap().is_none(), "a review's chat goes");
     }
+
+    #[test]
+    fn excerpts_survive_text_that_changes_length_when_lowercased() {
+        let db = Db::open_in_memory().unwrap();
+        familiar(&db, "a", Access::Workspace);
+        // İ grows and the Kelvin sign shrinks when lowercased, so byte offsets shift either way.
+        db.insert_message("a", "user", "İ é İ\u{212A} and more", "done").unwrap();
+        assert!(excerpt("İ é İ\u{212A}", &["é".into()]).contains('é'));
+        assert_eq!(search(&db, "a", "é", 10).unwrap().len(), 1);
+        assert!(db.list_agents().is_ok(), "the database is still usable");
+    }
+
+    #[test]
+    fn rooms_match_whole_words_in_any_script() {
+        let words = |q: &str| super::words(q);
+        assert!(!has_words("A flaw appeared.", &words("law appeared")));
+        assert!(has_words("CAFÉ funds arrived.", &words("café")));
+        assert!(has_words("I do, with 100% oranges.", &words("100%")));
+        assert!(has_words("Lisbon venue", &words("venue lis")), "the last word can be the start of one");
+        assert!(!has_words("Lisbon venue", &words("ven lisbon")), "the others must be whole");
+    }
+
+    #[test]
+    fn a_failed_review_runs_again_next_time() {
+        let db = Db::open_in_memory().unwrap();
+        familiar(&db, "a", Access::Workspace);
+        for text in ["1", "2", "3", "4"] {
+            db.insert_message("a", "user", text, "done").unwrap();
+        }
+        let chat = crate::chats::current(&db, "a").unwrap().unwrap();
+        let through = review_due(&db, &chat).unwrap().unwrap();
+        reviewed(&db, &chat, through, &Ending::Failed("offline".into()));
+        assert_eq!(review_due(&db, &chat).unwrap(), Some(through));
+        reviewed(&db, &chat, through, &Ending::Done("DONE".into()));
+        assert_eq!(review_due(&db, &chat).unwrap(), None);
+    }
+
+    #[test]
+    fn reviews_only_get_memory_tools_and_lanes_say_they_are_unattended() {
+        let db = Db::open_in_memory().unwrap();
+        familiar(&db, "a", Access::Workspace);
+        let (_, chat) = begin(&db, "a", KIND_REVIEW, REVIEW_SOURCE).unwrap();
+        for tool in ["ask_person", "draft_message", "update_ledger", "search_chats"] {
+            assert!(check_lane(Some(&chat), tool).unwrap_err().contains("A memory review can't use"), "{tool}");
+        }
+        assert!(check_lane(Some(&chat), "remember").is_ok());
+        let key = side::lane_key("a", &chat);
+        assert!(unattended(&key));
+        assert!(!unattended("a"), "the main chat isn't");
+        release(&chat);
+        assert!(!unattended(&key));
+    }
+
 }

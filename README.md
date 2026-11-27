@@ -408,18 +408,22 @@ always do, with notifications as Settings, Notifications says.
   and the transcript. The line under the switch says when the next one runs and how the last went.
 - A check-in runs with workspace-only access even when the familiar has full access (Codex's
   `workspace-write` sandbox, Claude's `acceptEdits`), so an unattended run never gets an unsandboxed
-  shell. It can't use connectors, the vault, the browser, helpers, or
-  other familiars; only the ledger, memory, inbox, drafts, `search_chats`, and `list_familiars` tools.
+  shell. Codex never asks for approvals there, so no command leaves its sandbox, and Claude gets no
+  shell at all and no MCP servers from your own Claude settings. It can't use connectors, the vault,
+  the browser, helpers, or other familiars; only the ledger, memory, inbox, drafts, `search_chats`,
+  and `list_familiars` tools.
 - It skips, with the reason under the switch, when the familiar is over its budget, when the plan
-  limit guard is holding rituals back, when the familiar is in the middle of a turn, or when its last
+  limit guard is holding rituals back, when the familiar is in the middle of a turn in its chat or a
+  room, or when its last
   check-in is still running. Each runs for at most 10 minutes. Familiars on another Mac can't check in
   yet, since Grimoire's tools don't reach them.
 
 "Review each chat for things to remember", in the same group and also off by default, looks back when
 you start a new chat. If you sent at least 4 messages in the chat you're leaving since its last
 review, the familiar gets one hidden turn on a copy of that chat's session, with workspace-only
-access, asking it to save anything worth keeping with `remember` and reply DONE. Nothing shows in the
-chat and nothing is notified; what it saves shows in its memory, credited to it.
+access and only `read_memory` and `remember`, asking it to save anything worth keeping and reply
+DONE. Nothing shows in the chat and nothing is notified; what it saves shows in its memory, credited
+to it. A review that fails runs again the next time you start a new chat.
 
 ## Familiars asking familiars
 

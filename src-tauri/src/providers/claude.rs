@@ -90,6 +90,12 @@ fn args(agent: &Agent, lane: Option<&Lane>) -> Vec<String> {
         Access::Workspace => "acceptEdits".into(),
         Access::Full => "bypassPermissions".into(),
     });
+    // A check-in or memory review runs with nobody watching: no shell, and no MCP servers from the
+    // person's own Claude settings or the workspace, only Grimoire's.
+    let unattended = lane.is_some_and(|l| crate::checkins::unattended(&l.key));
+    if unattended {
+        args.extend(["--disallowedTools".into(), "Bash".into(), "--strict-mcp-config".into()]);
+    }
     // In a side conversation, Grimoire's tools know which one the familiar is calling from.
     // The tool socket is on this Mac, so a familiar on another Mac runs without the tools.
     if let Some(tools) = crate::tools::server_command(lane.map_or(&agent.id, |l| &l.key)).filter(|_| agent.host.is_none()) {
@@ -306,10 +312,12 @@ impl Claude {
             while let Ok(Some(line)) = lines.next_line().await {
                 let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
                 if value["type"] == "control_request" && value["request"]["callback_id"] == BASH_HOOK {
-                    let (agent, process) = (familiar.clone(), reader.clone());
+                    let (agent, process, lane) = (familiar.clone(), reader.clone(), agent_id.clone());
                     tauri::async_runtime::spawn(async move {
                         let command = value["request"]["input"]["tool_input"]["command"].as_str().unwrap_or_default();
-                        let allowed = crate::permissions::check_command(&agent, command, uuid::Uuid::new_v4().to_string()).await;
+                        // Nobody is there to approve a command in a check-in or memory review.
+                        let allowed = !crate::checkins::unattended(&lane)
+                            && crate::permissions::check_command(&agent, command, uuid::Uuid::new_v4().to_string()).await;
                         let output = json!({ "hookSpecificOutput": {
                             "hookEventName": "PreToolUse",
                             "permissionDecision": if allowed { "allow" } else { "deny" },
@@ -609,6 +617,33 @@ mod tests {
         assert!(args(&agent, Some(&lane(LaneSession::Fork("s1".into())))).join(" ").ends_with("--resume s1 --fork-session"));
         assert!(args(&agent, Some(&lane(LaneSession::Resume("s2".into())))).join(" ").ends_with("--resume s2"));
         assert!(!args(&agent, Some(&lane(LaneSession::Fresh))).contains(&"--resume".to_string()));
+        assert!(!args(&agent, Some(&lane(LaneSession::Fresh))).contains(&"--strict-mcp-config".to_string()));
+    }
+
+    #[test]
+    fn check_ins_run_without_a_shell_or_outside_mcp_servers() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let agent = Agent {
+            id: "ci".into(),
+            name: "Ada".into(),
+            provider: crate::db::Provider::Claude,
+            model: None,
+            workspace: "/tmp".into(),
+            access: Access::Workspace,
+            session_id: None,
+            avatar: crate::db::Avatar::for_seed("ci"),
+            effort: None,
+            active_model: None,
+            coven_id: None,
+            host: None,
+            created_at: 0,
+        };
+        db.insert_agent(&agent).unwrap();
+        let (_, chat) = crate::checkins::begin(&db, "ci", "checkin", "Check-in").unwrap();
+        let lane = Lane { key: crate::side::lane_key("ci", &chat), session: LaneSession::Fresh };
+        let joined = args(&agent, Some(&lane)).join(" ");
+        assert!(joined.contains("--disallowedTools Bash --strict-mcp-config"), "{joined}");
+        crate::checkins::release(&chat);
     }
 
     #[test]

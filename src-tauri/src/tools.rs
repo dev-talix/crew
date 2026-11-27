@@ -253,6 +253,11 @@ fn tokens() -> std::sync::MutexGuard<'static, HashMap<String, String>> {
     TOKENS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Ends a lane's token once nothing will run in it again, so a leftover tool server can't call in.
+pub fn revoke(agent_id: &str) {
+    tokens().remove(agent_id);
+}
+
 fn token_for(agent_id: &str) -> String {
     tokens().entry(agent_id.to_string()).or_insert_with(|| uuid::Uuid::new_v4().simple().to_string()).clone()
 }
@@ -966,6 +971,12 @@ mod tests {
         let no_token = json!({ "agent": "tok-r1", "tool": "list_familiars" }).to_string();
         assert_eq!(authorize(&no_token).err().unwrap(), refused);
         assert!(authorize("not json").err().unwrap().starts_with("Bad request"));
+
+        // A lane's token stops working once the lane ends.
+        let lane = token_for("tok-r1~chat");
+        assert!(authorize(&line("tok-r1~chat", &lane)).is_ok());
+        revoke("tok-r1~chat");
+        assert_eq!(authorize(&line("tok-r1~chat", &lane)).err().unwrap(), refused);
     }
 
     #[test]

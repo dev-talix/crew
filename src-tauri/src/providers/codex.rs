@@ -90,14 +90,16 @@ pub struct Codex {
 }
 
 /// "untrusted" makes Codex ask before commands it doesn't know are safe, so Grimoire's rules see them.
-fn approval_policy() -> &'static str {
-    if crate::permissions::active() { "untrusted" } else { "never" }
+/// A check-in or memory review (`key`) never asks, since nobody is there to answer, so Codex keeps
+/// every command in its sandbox.
+fn approval_policy(key: &str) -> &'static str {
+    if crate::permissions::active() && !crate::checkins::unattended(key) { "untrusted" } else { "never" }
 }
 
 /// `tools_key` is the familiar's id, or its side conversation's lane key, for Grimoire's tool server.
 fn thread_params(agent: &Agent, tools_key: &str) -> Value {
     let mut params = json!({
-        "approvalPolicy": approval_policy(),
+        "approvalPolicy": approval_policy(tools_key),
         // Approval requests come to Grimoire, not to Codex's own automatic reviewer.
         "approvalsReviewer": "user",
         "sandbox": match agent.access {
@@ -194,7 +196,7 @@ impl Codex {
         if let Ok(mut routes) = process.routes.lock() {
             routes.insert(thread_id.clone(), Route { tx: Some(tx), ..Route::default() });
         }
-        let mut params = json!({ "threadId": thread_id, "input": turn_input(text, images), "approvalPolicy": approval_policy(), "approvalsReviewer": "user" });
+        let mut params = json!({ "threadId": thread_id, "input": turn_input(text, images), "approvalPolicy": approval_policy(key), "approvalsReviewer": "user" });
         if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
             params["model"] = json!(model);
         }
@@ -398,6 +400,7 @@ impl Codex {
                         let (id, process) = (id.clone(), process.clone());
                         tauri::async_runtime::spawn(async move {
                             let allowed = match agent {
+                                Some(key) if crate::checkins::unattended(&key) => false,
                                 Some(key) => crate::permissions::check_command(crate::side::split(&key).0, &command, codex_request_key(process.serial, &id)).await,
                                 None => false,
                             };
