@@ -286,7 +286,7 @@ pub fn list(db: &Db) -> Result<Vec<Draft>, String> {
     })
 }
 
-fn what(draft: &Draft) -> String {
+pub(crate) fn what(draft: &Draft) -> String {
     let noun = draft.channel.noun();
     match (draft.channel, draft.to.is_empty()) {
         (Channel::Post, true) => format!("{noun} draft"),
