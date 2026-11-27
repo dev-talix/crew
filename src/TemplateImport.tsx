@@ -6,13 +6,14 @@ import { randomAvatar } from "./avatar";
 import { MEMORY_LIMIT, memoryUsage } from "./memory";
 import { Segmented, Sheet, Toggle } from "./ui";
 import { draftFromTemplate, matchesSearch, memoryFit, permissionLines, type MarketTemplate, type MemoryRow, type RitualRow } from "./templates";
+import { skillRowProblem, type TemplateSkillRow } from "./skills";
 import "./templates.css";
+import "./skills.css";
 
 const ORIGIN: Record<MemoryRow["origin"], string> = {
   description: "Description",
   instructions: "Instructions",
   memory: "Memory",
-  skill: "Skill",
   integrations: "Apps",
 };
 
@@ -134,6 +135,7 @@ function TemplateReview(props: { template: MarketTemplate; onBack: () => void; o
   const [access, setAccess] = createSignal<Access>("workspace");
   const [memory, setMemory] = createSignal<MemoryRow[]>(start.memory);
   const [rituals, setRituals] = createSignal<RitualRow[]>(start.rituals);
+  const [skills, setSkills] = createSignal<TemplateSkillRow[]>(start.skills);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const avatar = randomAvatar();
@@ -149,6 +151,8 @@ function TemplateReview(props: { template: MarketTemplate; onBack: () => void; o
 
   const editMemory = (id: string, change: Partial<MemoryRow>) => setMemory((rows) => rows.map((r) => (r.id === id ? { ...r, ...change } : r)));
   const editRitual = (id: string, change: Partial<RitualRow>) => setRituals((rows) => rows.map((r) => (r.id === id ? { ...r, ...change } : r)));
+  const editSkill = (id: string, change: Partial<TemplateSkillRow>) => setSkills((rows) => rows.map((r) => (r.id === id ? { ...r, ...change } : r)));
+  const skillsReady = () => skills().every((r) => !r.include || skillRowProblem(r) === null);
   const fit = () => memoryFit(memory());
   const usage = () => memoryUsage(fit().bytes, MEMORY_LIMIT);
 
@@ -170,6 +174,10 @@ function TemplateReview(props: { template: MarketTemplate; onBack: () => void; o
         rituals: rituals()
           .filter((r) => r.include)
           .map((r) => ({ name: r.name, prompt: r.prompt, schedule: r.schedule })),
+        skills: skills()
+          .filter((r) => r.include)
+          .map((r) => ({ name: r.name, description: r.description, body: r.body })),
+        sourceUrl: props.template.sourceUrl || null,
       });
       // The familiar exists now, so a connector that fails to add can't block opening it; it can be
       // turned on later in its settings. Retrying the import would make a second familiar.
@@ -268,7 +276,7 @@ function TemplateReview(props: { template: MarketTemplate; onBack: () => void; o
         <h2 class="section-title">
           Memory <span class={["template-usage", { over: !fit().fits }]}>{usage().label}</span>
         </h2>
-        <p class="hint">Grimoire tells a familiar its rules and facts at the start of every chat. Skills come in as rules, since Grimoire can't run Grok skills.</p>
+        <p class="hint">Grimoire tells a familiar its rules and facts at the start of every chat.</p>
         <ul class="list template-rows">
           <For each={memory().map((r) => r.id)}>
             {(id) => {
@@ -295,6 +303,31 @@ function TemplateReview(props: { template: MarketTemplate; onBack: () => void; o
           </For>
         </ul>
       </section>
+
+      <Show when={skills().length}>
+        <section>
+          <h2 class="section-title">Skills</h2>
+          <p class="hint">Each becomes a Grimoire skill, turned on for this familiar only. Its CLI reads the description to decide when to use it, then follows the instructions.</p>
+          <ul class="list template-rows">
+            <For each={skills().map((r) => r.id)}>
+              {(id) => {
+                const row = () => skills().find((r) => r.id === id)!;
+                return (
+                  <li class={["list-row template-row", { off: !row().include }]}>
+                    <input type="checkbox" checked={row().include} aria-label="Include" onChange={(e) => editSkill(row().id, { include: e.currentTarget.checked })} />
+                    <div class="list-main">
+                      <input class="template-skill-name" value={row().name} maxlength={64} aria-label="Skill name" spellcheck={false} onInput={(e) => editSkill(row().id, { name: e.currentTarget.value })} />
+                      <input class="template-skill-description" value={row().description} maxlength={1024} aria-label="Skill description" onInput={(e) => editSkill(row().id, { description: e.currentTarget.value })} />
+                      <textarea rows={3} value={row().body} aria-label="Skill instructions" onInput={(e) => editSkill(row().id, { body: e.currentTarget.value })} />
+                      <Show when={row().include && skillRowProblem(row())}>{(problem) => <span class="template-warn">{problem()}</span>}</Show>
+                    </div>
+                  </li>
+                );
+              }}
+            </For>
+          </ul>
+        </section>
+      </Show>
 
       <Show when={rituals().length}>
         <section>
@@ -335,7 +368,7 @@ function TemplateReview(props: { template: MarketTemplate; onBack: () => void; o
         <button type="button" class="ghost" onClick={props.onClose}>
           Cancel
         </button>
-        <button class="primary" type="submit" disabled={busy() || !name().trim() || !fit().fits}>
+        <button class="primary" type="submit" disabled={busy() || !name().trim() || !fit().fits || !skillsReady()}>
           {busy() ? "Creating..." : "Create familiar"}
         </button>
       </div>

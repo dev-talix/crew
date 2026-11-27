@@ -8,6 +8,7 @@ import type * as Budgets from "./budgets";
 import type * as Transfer from "./transfer";
 import type * as Templates from "./templates";
 import type * as Connectors from "./connectors";
+import type * as Skills from "./skills";
 import type { Ledger } from "./ledgers";
 import type { CheckInRun, CheckInSettings, CheckInStatus } from "./checkins";
 
@@ -766,6 +767,13 @@ export const api = {
   setAgentConnectors: (agentId: string, ids: string[]) => invoke<void>("set_agent_connectors", { agentId, ids }),
   agentMacApps: (agentId: string | null) => invoke<MacApp[]>("agent_mac_apps", { agentId }),
   setAgentMacApps: (agentId: string, apps: string[]) => invoke<void>("set_agent_mac_apps", { agentId, apps }),
+  skillLibrary: () => invoke<Skills.Skill[]>("skill_library"),
+  skillFiles: (name: string) => invoke<Skills.SkillFile[]>("skill_files", { name }),
+  /** What adding a skill would save. Null when the folder pick is cancelled. */
+  previewSkill: (source: Skills.AddFrom) => invoke<Skills.SkillPreview | null>("preview_skill", { source }),
+  addSkill: (preview: Skills.SkillPreview) => invoke<Skills.Skill>("add_skill", { preview }),
+  deleteSkill: (name: string) => invoke<void>("delete_skill", { name }),
+  setAgentSkills: (agentId: string, names: string[]) => invoke<void>("set_agent_skills", { agentId, names }),
   listVault: () => invoke<VaultItem[]>("list_vault"),
   vaultSecret: (id: string) => invoke<Record<string, string>>("vault_secret", { id }),
   saveVaultItem: (input: VaultItemInput) => invoke<VaultItem>("save_vault_item", { input }),
@@ -914,7 +922,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload" | "companion_changed" | "browser_changed" | "browser_frame" | "connectors_changed" | "rooms_changed" | "room_message" | "room_delta" | "room_floor" | "telegram_changed" | "checkins_changed",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload" | "companion_changed" | "browser_changed" | "browser_frame" | "connectors_changed" | "rooms_changed" | "room_message" | "room_delta" | "room_floor" | "telegram_changed" | "checkins_changed" | "skills_changed",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

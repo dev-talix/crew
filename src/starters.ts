@@ -77,5 +77,7 @@ export function starterDraft(starter: Starter, name: string, provider: Provider)
     avatar: starter.avatar,
     memory: starter.rules.map((text) => ({ kind: "rule", text })),
     rituals: [],
+    skills: [],
+    sourceUrl: null,
   };
 }
