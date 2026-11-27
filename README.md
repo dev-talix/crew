@@ -392,6 +392,17 @@ files and links. GitHub links are read over https from github.com and raw.github
 without a sign-in, so the repository has to be public. A name you already have gets "-2". New
 skills start turned off for every familiar; turn each on in a familiar's settings.
 
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/skills.png" alt="Settings, Skills: the library with who made each skill and which familiars have it on"></td>
+    <td width="50%"><img src="docs/screenshots/skills-import-preview.png" alt="Adding a skill from GitHub: every file shown in full before saving"></td>
+  </tr>
+  <tr>
+    <td>The library, with who made each skill and who has it on.</td>
+    <td>An import shows every file before anything is saved.</td>
+  </tr>
+</table>
+
 Familiars have three tools for skills:
 
 - `list_skills` shows the skills a familiar has on and the rest of the library, with who made each.
