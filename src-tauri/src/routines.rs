@@ -309,6 +309,16 @@ impl Scheduler {
         if fired {
             let _ = self.app.emit("routines_changed", RoutinesChanged);
         }
+        // Check-ins share this timer. Each runs in the background through its own budget and plan limit checks.
+        if let Some(runtime) = self.runtime.upgrade() {
+            let (run, next) = crate::checkins::due(&self.db, now)?;
+            for agent_id in run {
+                crate::checkins::spawn(self.db.clone(), runtime.clone(), self.app.clone(), agent_id);
+            }
+            if let Some(next) = next {
+                soonest = Some(soonest.map_or(next, |s| s.min(next)));
+            }
+        }
         Ok(soonest.map(|s| s - now))
     }
 }

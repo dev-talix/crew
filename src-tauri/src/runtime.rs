@@ -458,26 +458,37 @@ impl Runtime {
     /// Runs a background helper's one turn in its hidden chat (see `helpers`): `task` is shown in the
     /// transcript and `prompt` goes to the CLI, on a fresh session in the familiar's own settings.
     pub async fn helper_turn(self: &Arc<Self>, chat_id: &str, task: &str, prompt: &str, startup: &crate::helpers::Startup) -> TurnOutcome {
-        let Ok(Some(chat)) = crate::side::get(&self.db, chat_id) else {
-            return TurnOutcome::Failed("The helper's chat was deleted.".into());
+        let turn = Hidden { chat_id, shown: task, source: None, prompt, session: LaneSession::Fresh, workspace_only: false, origin: "you" };
+        self.hidden_turn(turn, startup).await
+    }
+
+    /// Runs one turn in a familiar's hidden chat for a caller that keeps its own record of it: a helper,
+    /// a check-in, or a memory review (see `Hidden`).
+    pub async fn hidden_turn(self: &Arc<Self>, turn: Hidden<'_>, startup: &crate::helpers::Startup) -> TurnOutcome {
+        let Ok(Some(chat)) = crate::side::get(&self.db, turn.chat_id) else {
+            return TurnOutcome::Failed("The hidden chat was deleted.".into());
         };
         let agent = match self.db.get_agent(&chat.target_id) {
+            Ok(Some(agent)) if turn.workspace_only => crate::checkins::clamped(agent),
             Ok(Some(agent)) => agent,
             _ => return TurnOutcome::Failed("That familiar no longer exists.".into()),
         };
         let sink = SideSink { app: self.app.clone(), chat_id: chat.id.clone() };
-        match self.db.insert_message_in(&chat.id, &agent.id, "user", task, "done", Some(&format!("From {}", agent.name))) {
+        let source = turn.source.map_or_else(|| format!("From {}", agent.name), String::from);
+        match self.db.insert_message_in(&chat.id, &agent.id, "user", turn.shown, "done", Some(&source)) {
             Ok(row) => sink.message(&row),
             Err(e) => return TurnOutcome::Failed(e),
         }
         let mut writer = TurnWriter::for_side(&self.db, &sink, &agent, &chat.id, None);
+        writer.origin = turn.origin;
         if let Err(reason) = crate::budgets::check_turn(&self.db, &agent.id) {
             return writer.fail(&reason);
         }
         if let Err(outcome) = gate(&mut writer, &self.db, &agent, crate::remote::quick_setup).await {
             return outcome;
         }
-        let lane = Lane { key: crate::side::lane_key(&agent.id, &chat.id), session: LaneSession::Fresh };
+        let prompt = turn.prompt;
+        let lane = Lane { key: crate::side::lane_key(&agent.id, &chat.id), session: turn.session };
         if !startup.begin() {
             return TurnOutcome::Stopped;
         }
@@ -556,6 +567,21 @@ impl Runtime {
             Err(e) => writer.fail_explained(e).await,
         }
     }
+}
+
+/// One turn in a familiar's hidden chat, on a session of its own.
+pub struct Hidden<'a> {
+    pub chat_id: &'a str,
+    /// What the transcript shows as the first message, under `source`, or "From <familiar>" when None.
+    pub shown: &'a str,
+    pub source: Option<&'a str>,
+    /// What goes to the CLI.
+    pub prompt: &'a str,
+    pub session: LaneSession,
+    /// Runs with workspace-only access whatever the familiar has, for turns nobody watches.
+    pub workspace_only: bool,
+    /// Who the usage counts as: "you", "ritual", or "spell".
+    pub origin: &'static str,
 }
 
 /// Stops a turn before anything spawns when the familiar's Mac can't be reached, with a plain error

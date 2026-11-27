@@ -119,13 +119,13 @@ pub fn follow_up(db: &Db, thread: &str, asker: &Agent, target: &Agent) -> Result
 }
 
 /// Side conversations whose last exchange never finished: no messages yet, or a last message that
-/// isn't a finished reply or an error. Helpers' chats don't count: nobody waits on them for a reply.
+/// isn't a finished reply or an error. Helpers' and check-ins' chats don't count: nobody waits on them for a reply.
 /// Only meaningful at startup, before any side turn runs.
 pub fn unfinished(db: &Db) -> Result<Vec<SideChat>, String> {
     db.with(|c| {
         let mut stmt = c.prepare(&format!(
             "SELECT {COLUMNS} FROM chats c
-             WHERE side_of IS NOT NULL AND id NOT IN (SELECT chat_id FROM helpers) AND NOT EXISTS (
+             WHERE side_of IS NOT NULL AND id NOT IN (SELECT chat_id FROM helpers) AND id NOT IN (SELECT chat_id FROM checkin_runs) AND NOT EXISTS (
                  SELECT 1 FROM messages m WHERE m.id = (SELECT MAX(id) FROM messages WHERE chat_id = c.id)
                  AND (m.role = 'error' OR (m.role = 'assistant' AND m.status IN ('done', 'stopped')))
              )"

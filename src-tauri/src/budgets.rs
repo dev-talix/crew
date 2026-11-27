@@ -309,7 +309,7 @@ pub fn remember_codex(db: &Db, limits: &Value) {
     let _ = db.set_setting(CODEX_LIMITS, &reading.to_string());
 }
 
-fn provider_pause(db: &Db, provider: &Provider, codex: Option<&Value>, now: i64) -> Option<String> {
+pub(crate) fn provider_pause(db: &Db, provider: &Provider, codex: Option<&Value>, now: i64) -> Option<String> {
     let guard = plan_guard(db);
     match provider {
         Provider::Codex => {

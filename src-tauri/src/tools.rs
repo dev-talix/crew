@@ -18,7 +18,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 pub const SERVER_NAME: &str = "grimoire";
-const TOOL_NAMES: [&str; 10] = [
+const TOOL_NAMES: [&str; 11] = [
     "list_familiars",
     "list_spells",
     "create_spell",
@@ -29,6 +29,7 @@ const TOOL_NAMES: [&str; 10] = [
     "vault_use",
     "ask_familiar",
     "message_familiar",
+    crate::checkins::SEARCH_TOOL,
 ];
 /// How long the CLIs let one Grimoire tool call run. ask_familiar waits up to 10 minutes for a reply,
 /// plus up to 2 for the person's OK, so this leaves room for both. Their defaults are far shorter.
@@ -180,6 +181,7 @@ pub fn definitions() -> Value {
         list.extend(crate::helpers::definitions().as_array().cloned().unwrap_or_default());
         list.extend(crate::drafts::definitions());
         list.extend(crate::browser::definitions());
+        list.extend(crate::checkins::definitions());
     }
     list
 }
@@ -431,6 +433,7 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
         tool if memory::handles(tool) => (memory::call_tool(db, caller, tool, &arguments)?, memory::changed_event(tool)),
         tool if inbox::TOOL_NAMES.contains(&tool) => (inbox::call_tool(db, caller, tool, &arguments)?, Some(inbox::CHANGED)),
         tool if ledger::TOOL_NAMES.contains(&tool) => (ledger::call_tool(db, caller, tool, &arguments)?, ledger::changed_event(tool)),
+        crate::checkins::SEARCH_TOOL => (crate::checkins::search_tool(db, caller, &arguments)?, None),
         _ => return Err(format!("Grimoire has no tool named {tool}.")),
     };
     Ok(Outcome { text, changed })
@@ -650,8 +653,14 @@ async fn handle_connection(stream: UnixStream, ctx: Arc<Context>) {
         let reply = match authorize(&line) {
             Ok(Request { agent, connector: Some(connector), message, .. }) => {
                 // The agent is the one the token belongs to; a familiar in a side conversation calls as "familiar~chat".
-                let familiar = crate::side::split(&agent).0.to_string();
-                match crate::connectors::forward(&ctx.db, ctx.secrets.as_ref(), &agent, &familiar, &connector, message).await {
+                let (familiar, lane) = crate::side::split(&agent);
+                let familiar = familiar.to_string();
+                // A check-in or memory review acts only through Grimoire's own tools.
+                let forwarded = match crate::checkins::check_lane(lane, &format!("the {connector} connector")) {
+                    Ok(()) => crate::connectors::forward(&ctx.db, ctx.secrets.as_ref(), &agent, &familiar, &connector, message).await,
+                    Err(e) => Err(e),
+                };
+                match forwarded {
                     Ok(messages) => json!({ "ok": true, "messages": messages }),
                     Err(error) => json!({ "ok": false, "error": error }),
                 }
@@ -660,7 +669,9 @@ async fn handle_connection(stream: UnixStream, ctx: Arc<Context>) {
                 // A familiar answering in a side conversation calls as "familiar~chat".
                 let (caller, lane) = crate::side::split(&request.agent);
                 let caller = caller.to_string();
-                let checked = crate::helpers::check_lane(&ctx.db, lane, &request.tool).and_then(|()| crate::rooms::check_lane(lane, &request.tool));
+                let checked = crate::helpers::check_lane(&ctx.db, lane, &request.tool)
+                    .and_then(|()| crate::rooms::check_lane(lane, &request.tool))
+                    .and_then(|()| crate::checkins::check_lane(lane, &request.tool));
                 let result = if let Err(e) = checked {
                     Err(e)
                 } else if crate::helpers::TOOL_NAMES.contains(&request.tool.as_str()) {
