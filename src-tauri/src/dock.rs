@@ -156,11 +156,22 @@ fn work_area(app: &AppHandle, dock: &WebviewWindow) -> Result<Area, String> {
     })
 }
 
+/// Whether the main window's page is listening for `open_agent`, and the familiar to open once it is.
+struct MainPage {
+    ready: bool,
+    pending: Option<String>,
+}
+
+static MAIN_PAGE: Mutex<MainPage> = Mutex::new(MainPage { ready: false, pending: None });
+
 pub fn show_main(app: &AppHandle, agent_id: Option<String>) -> Result<(), String> {
     let main = match app.get_webview_window("main") {
         Some(main) => main,
         // Gone after a close with nothing to keep it, while a hidden dock or Quick Ask kept Grimoire running.
         None => {
+            if let Ok(mut page) = MAIN_PAGE.lock() {
+                page.ready = false;
+            }
             let config = app.config().app.windows.iter().find(|w| w.label == "main").ok_or("The Grimoire window is missing.")?;
             WebviewWindowBuilder::from_config(app, config).and_then(|b| b.build()).map_err(|e| e.to_string())?
         }
@@ -169,10 +180,40 @@ pub fn show_main(app: &AppHandle, agent_id: Option<String>) -> Result<(), String
     main.show().map_err(|e| e.to_string())?;
     let _ = main.unminimize();
     main.set_focus().map_err(|e| e.to_string())?;
+    restore_dock(app);
     if let Some(agent_id) = agent_id {
-        main.emit("open_agent", agent_id).map_err(|e| e.to_string())?;
+        // A page still loading would miss the event, so it picks the familiar up from `main_ready`.
+        let mut page = MAIN_PAGE.lock().map_err(|_| "window state poisoned")?;
+        if page.ready {
+            main.emit("open_agent", agent_id).map_err(|e| e.to_string())?;
+        } else {
+            page.pending = Some(agent_id);
+        }
     }
     Ok(())
+}
+
+/// Puts a saved dock back on the screen edge, the first time the main window shows.
+fn restore_dock(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else { return };
+    if state.dock.edge().is_some() {
+        return;
+    }
+    let saved = state.db.setting(crate::DOCK_EDGE).ok().flatten().and_then(|e| Edge::parse(&e));
+    if saved.is_some() {
+        if let Err(e) = state.dock.set_edge(app, saved) {
+            eprintln!("Couldn't bring the dock back: {e}");
+        }
+    }
+}
+
+/// The main window's page is listening for `open_agent`. Returns the familiar it should open, if a
+/// click came in while it was loading.
+#[tauri::command]
+pub fn main_ready() -> Option<String> {
+    let mut page = MAIN_PAGE.lock().ok()?;
+    page.ready = true;
+    page.pending.take()
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@
 
 use crate::db::Db;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -25,15 +26,25 @@ pub struct Background {
     awake: Mutex<Option<Child>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundSettings {
     pub run_in_background: bool,
     pub start_at_login: bool,
     pub keep_awake: bool,
+    /// Keep awake is on and `caffeinate` is running. False with `keep_awake` on means it couldn't start.
+    pub awake_holding: bool,
     /// This launch came from the login item, so background mode is on until Grimoire quits.
-    #[serde(default)]
     pub launched_in_background: bool,
+}
+
+/// One switch in Settings, General, Background.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Switch {
+    RunInBackground,
+    StartAtLogin,
+    KeepAwake,
 }
 
 pub fn launched_in_background(args: impl IntoIterator<Item = String>) -> bool {
@@ -44,9 +55,9 @@ fn setting_on(db: &Db, key: &str) -> bool {
     db.setting(key).ok().flatten().as_deref() == Some("on")
 }
 
-/// Sets up background mode for this launch. Returns true when the main window should stay hidden.
-pub fn install(app: &AppHandle, db: Arc<Db>) -> bool {
-    let launched = launched_in_background(std::env::args());
+/// Sets up background mode for this launch. `launched` is whether it started with `--background`;
+/// `run` already set the Dock icon for that before the app finished launching.
+pub fn install(app: &AppHandle, db: Arc<Db>, launched: bool) {
     let background = Background { db, launched, awake: Mutex::default() };
     if setting_on(&background.db, AWAKE_KEY) {
         if let Err(e) = background.set_awake(true) {
@@ -54,10 +65,6 @@ pub fn install(app: &AppHandle, db: Arc<Db>) -> bool {
         }
     }
     app.manage(background);
-    if launched {
-        set_dock_icon(app, false);
-    }
-    launched
 }
 
 /// Background mode is on: closing the window hides it, and the Dock icon goes with it.
@@ -118,11 +125,23 @@ impl Background {
         Ok(())
     }
 
+    fn holding(&self) -> bool {
+        self.awake.lock().is_ok_and(|mut a| a.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None))))
+    }
+
+    /// The saved switches and what's live. A keep-awake that died gets one restart here.
     fn settings(&self) -> BackgroundSettings {
+        let keep_awake = setting_on(&self.db, AWAKE_KEY);
+        if keep_awake && !self.holding() {
+            if let Err(e) = self.set_awake(true) {
+                eprintln!("Couldn't keep this Mac awake: {e}");
+            }
+        }
         BackgroundSettings {
             run_in_background: setting_on(&self.db, KEY),
             start_at_login: home().is_some_and(|h| agent_path(&h).exists()),
-            keep_awake: setting_on(&self.db, AWAKE_KEY),
+            keep_awake,
+            awake_holding: keep_awake && self.holding(),
             launched_in_background: self.launched,
         }
     }
@@ -137,35 +156,52 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute())
 }
 
-fn agent_path(home: &Path) -> PathBuf {
-    home.join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
+fn agent_dir(home: &Path) -> PathBuf {
+    home.join("Library/LaunchAgents")
 }
 
-/// What the login item runs. From an app bundle it goes through `open`, so the job ends at once and
-/// removing it later can't take a running Grimoire down with it. A bare binary, as in development,
-/// runs directly.
-fn program(exe: &Path) -> Vec<String> {
-    let bundle = exe.ancestors().nth(3).filter(|b| b.extension().is_some_and(|e| e == "app") && exe.parent().is_some_and(|p| p.ends_with("Contents/MacOS")));
-    match bundle {
-        Some(app) => vec!["/usr/bin/open".into(), "-g".into(), "-a".into(), app.display().to_string(), "--args".into(), ARG.into()],
-        None => vec![exe.display().to_string(), ARG.into()],
+fn agent_path(home: &Path) -> PathBuf {
+    agent_dir(home).join(format!("{LABEL}.plist"))
+}
+
+/// This app's bundle identifier, when it runs from an app bundle. A bare binary, as under
+/// `tauri dev`, has none.
+#[cfg(target_os = "macos")]
+fn bundle_id() -> Option<String> {
+    let bundle = objc2_foundation::NSBundle::mainBundle();
+    if !bundle.bundlePath().to_string().ends_with(".app") {
+        return None;
     }
+    bundle.bundleIdentifier().map(|id| id.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn bundle_id() -> Option<String> {
+    None
+}
+
+/// What the login item runs. It opens the app by bundle identifier, so moving or renaming
+/// Grimoire.app keeps it working, and the job ends at once, so unloading it can't take a running
+/// Grimoire down with it.
+fn program(bundle_id: &str) -> Vec<String> {
+    ["/usr/bin/open", "-g", "-b", bundle_id, "--args", ARG].map(String::from).to_vec()
 }
 
 fn xml_escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// The LaunchAgent: runs once when you log in, and only in a GUI session.
-fn plist(program: &[String]) -> String {
+/// A LaunchAgent that runs once when you log in, and only in a GUI session.
+fn plist(label: &str, program: &[String]) -> String {
     let args: String = program.iter().map(|a| format!("\t\t<string>{}</string>\n", xml_escape(a))).collect();
+    let label = xml_escape(label);
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\">
 <dict>
 \t<key>Label</key>
-\t<string>{LABEL}</string>
+\t<string>{label}</string>
 \t<key>ProgramArguments</key>
 \t<array>
 {args}\t</array>
@@ -179,12 +215,33 @@ fn plist(program: &[String]) -> String {
     )
 }
 
-fn write_agent(home: &Path, exe: &Path) -> Result<(), String> {
-    let path = agent_path(home);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't make {}: {e}", dir.display()))?;
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// Writes the login item through a temporary file in the same folder, so launchd never reads half a
+/// file. A symlinked folder or file could point anywhere, so it refuses those.
+fn write_agent(home: &Path, bundle_id: &str) -> Result<(), String> {
+    let dir = agent_dir(home);
+    if is_symlink(&dir) {
+        return Err(format!("{} is a symlink, so Grimoire won't write a login item there.", dir.display()));
     }
-    std::fs::write(&path, plist(&program(exe))).map_err(|e| format!("Couldn't write {}: {e}", path.display()))
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't make {}: {e}", dir.display()))?;
+    let path = agent_path(home);
+    if is_symlink(&path) {
+        return Err(format!("{} is a symlink, so Grimoire won't replace it.", path.display()));
+    }
+    let temp = dir.join(format!(".{LABEL}.{}.tmp", uuid::Uuid::new_v4()));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .and_then(|mut f| f.write_all(plist(LABEL, &program(bundle_id)).as_bytes()).and_then(|()| f.sync_all()))
+        .and_then(|()| std::fs::rename(&temp, &path));
+    written.map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        format!("Couldn't write {}: {e}", path.display())
+    })
 }
 
 fn remove_agent(home: &Path) -> Result<(), String> {
@@ -194,28 +251,41 @@ fn remove_agent(home: &Path) -> Result<(), String> {
     }
 }
 
+fn service(label: &str) -> String {
+    format!("gui/{}/{label}", unsafe { libc::getuid() })
+}
+
+fn launchctl(args: &[&str]) -> Result<std::process::Output, String> {
+    Command::new("/bin/launchctl").args(args).stdin(Stdio::null()).output().map_err(|e| format!("launchctl didn't run: {e}"))
+}
+
+fn loaded(label: &str) -> bool {
+    launchctl(&["print", &service(label)]).is_ok_and(|o| o.status.success())
+}
+
+/// Unloads a login item from this GUI session. One that isn't loaded counts as unloaded; one that
+/// stays loaded is an error.
+fn unload(label: &str) -> Result<(), String> {
+    let out = launchctl(&["bootout", &service(label)])?;
+    if out.status.success() || !loaded(label) {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    Err(format!("Couldn't unload the login item: {detail}"))
+}
+
 /// Turns the login item on or off. Turning it on only writes the file, which macOS loads at the next
 /// login; loading it now would run it, and `open` would bring this Grimoire's window up. Turning it
-/// off unloads it from this session too.
+/// off unloads it from this session first, and keeps the file if that fails.
 fn set_start_at_login(on: bool) -> Result<(), String> {
     let home = home().ok_or("HOME is not set.")?;
     if on {
-        let exe = std::env::current_exe().map_err(|e| format!("Couldn't find Grimoire's app: {e}"))?;
-        write_agent(&home, &exe)
+        let id = bundle_id().ok_or("Start at login works only from Grimoire.app, not a development build.")?;
+        write_agent(&home, &id)
     } else {
-        // Not loaded is fine; it was written this session, or never loaded.
-        let _ = launchctl(&["bootout", &service()]);
+        unload(LABEL)?;
         remove_agent(&home)
     }
-}
-
-/// The login item in this user's GUI session, as launchctl names it.
-fn service() -> String {
-    format!("gui/{}/{LABEL}", unsafe { libc::getuid() })
-}
-
-fn launchctl(args: &[&str]) -> bool {
-    Command::new("/bin/launchctl").args(args).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
 #[tauri::command]
@@ -223,18 +293,17 @@ pub fn background_settings(background: State<Background>) -> BackgroundSettings 
     background.settings()
 }
 
+/// Changes one switch and returns all of them as they now are.
 #[tauri::command]
-pub fn save_background_settings(background: State<Background>, settings: BackgroundSettings) -> Result<BackgroundSettings, String> {
-    let before = background.settings();
-    if settings.run_in_background != before.run_in_background {
-        background.db.set_setting(KEY, if settings.run_in_background { "on" } else { "off" })?;
-    }
-    if settings.start_at_login != before.start_at_login {
-        set_start_at_login(settings.start_at_login)?;
-    }
-    if settings.keep_awake != before.keep_awake {
-        background.set_awake(settings.keep_awake)?;
-        background.db.set_setting(AWAKE_KEY, if settings.keep_awake { "on" } else { "off" })?;
+pub fn set_background_switch(background: State<Background>, switch: Switch, on: bool) -> Result<BackgroundSettings, String> {
+    let value = if on { "on" } else { "off" };
+    match switch {
+        Switch::RunInBackground => background.db.set_setting(KEY, value)?,
+        Switch::StartAtLogin => set_start_at_login(on)?,
+        Switch::KeepAwake => {
+            background.db.set_setting(AWAKE_KEY, value)?;
+            background.set_awake(on)?;
+        }
     }
     Ok(background.settings())
 }
@@ -247,6 +316,10 @@ mod tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
+    fn temp_home() -> PathBuf {
+        std::env::temp_dir().join(format!("grimoire-bg-{}", uuid::Uuid::new_v4()))
+    }
+
     #[test]
     fn only_the_background_argument_starts_hidden() {
         assert!(launched_in_background(args(&["/Applications/Grimoire.app/Contents/MacOS/grimoire", "--background"])));
@@ -257,21 +330,15 @@ mod tests {
     }
 
     #[test]
-    fn a_bundle_launches_through_open_and_a_bare_binary_directly() {
-        assert_eq!(
-            program(Path::new("/Applications/Grimoire.app/Contents/MacOS/grimoire")),
-            args(&["/usr/bin/open", "-g", "-a", "/Applications/Grimoire.app", "--args", "--background"])
-        );
-        assert_eq!(program(Path::new("/tmp/build/grimoire")), args(&["/tmp/build/grimoire", "--background"]));
-        assert_eq!(program(Path::new("/tmp/Grimoire.app/grimoire")), args(&["/tmp/Grimoire.app/grimoire", "--background"]));
+    fn the_login_item_opens_the_app_by_bundle_id() {
+        assert_eq!(program("dev.talix.grimoire"), args(&["/usr/bin/open", "-g", "-b", "dev.talix.grimoire", "--args", "--background"]));
     }
 
     #[test]
     fn the_login_item_runs_once_in_a_gui_session() {
-        let text = plist(&args(&["/usr/bin/open", "-a", "/Users/me/Apps & Tools/Grimoire.app", "--args", "--background"]));
+        let text = plist(LABEL, &args(&["/bin/sh", "-c", "echo a & b > \"c\""]));
         assert!(text.contains("<key>Label</key>\n\t<string>dev.talix.grimoire.background</string>"));
-        assert!(text.contains("\t\t<string>/usr/bin/open</string>\n\t\t<string>-a</string>\n\t\t<string>/Users/me/Apps &amp; Tools/Grimoire.app</string>\n"));
-        assert!(text.contains("<string>--background</string>\n\t</array>"));
+        assert!(text.contains("\t\t<string>/bin/sh</string>\n\t\t<string>-c</string>\n\t\t<string>echo a &amp; b &gt; &quot;c&quot;</string>\n\t</array>"));
         assert!(text.contains("<key>RunAtLoad</key>\n\t<true/>"));
         assert!(text.contains("<key>LimitLoadToSessionType</key>\n\t<string>Aqua</string>"));
         assert!(!text.contains("KeepAlive"), "quitting Grimoire must not relaunch it");
@@ -279,11 +346,14 @@ mod tests {
 
     #[test]
     fn writes_and_removes_the_login_item_under_home() {
-        let home = std::env::temp_dir().join(format!("grimoire-bg-{}", uuid::Uuid::new_v4()));
+        let home = temp_home();
         let path = agent_path(&home);
         assert!(path.ends_with("Library/LaunchAgents/dev.talix.grimoire.background.plist"));
-        write_agent(&home, Path::new("/Applications/Grimoire.app/Contents/MacOS/grimoire")).unwrap();
-        assert!(std::fs::read_to_string(&path).unwrap().contains("<string>/Applications/Grimoire.app</string>"));
+        write_agent(&home, "dev.talix.grimoire").unwrap();
+        write_agent(&home, "dev.talix.grimoire").unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("<string>-b</string>\n\t\t<string>dev.talix.grimoire</string>"));
+        let left: Vec<_> = std::fs::read_dir(agent_dir(&home)).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left.len(), 1, "no temporary files left: {left:?}");
         if Path::new("/usr/bin/plutil").exists() {
             let lint = Command::new("/usr/bin/plutil").arg("-lint").arg(&path).output().unwrap();
             assert!(lint.status.success(), "{}", String::from_utf8_lossy(&lint.stdout));
@@ -294,24 +364,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// Loads a login item into this Mac's GUI session, so it stays out of CI. It runs `/usr/bin/true`.
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlinked_login_items() {
+        let home = temp_home();
+        let elsewhere = home.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::create_dir_all(home.join("Library")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, agent_dir(&home)).unwrap();
+        assert!(write_agent(&home, "dev.talix.grimoire").unwrap_err().contains("symlink"));
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+
+        std::fs::remove_file(agent_dir(&home)).unwrap();
+        std::fs::create_dir_all(agent_dir(&home)).unwrap();
+        let target = elsewhere.join("target.plist");
+        std::fs::write(&target, "mine").unwrap();
+        std::os::unix::fs::symlink(&target, agent_path(&home)).unwrap();
+        assert!(write_agent(&home, "dev.talix.grimoire").unwrap_err().contains("symlink"));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Unloads a test login item even when an assertion fails.
+    struct Loaded(String);
+
+    impl Drop for Loaded {
+        fn drop(&mut self) {
+            let _ = launchctl(&["bootout", &service(&self.0)]);
+        }
+    }
+
+    /// Loads a login item into this Mac's GUI session, so it stays out of CI. It has its own label
+    /// and only touches a file in a temp folder.
     #[test]
     #[ignore]
-    fn launchd_loads_and_unloads_the_login_item() {
-        let home = std::env::temp_dir().join(format!("grimoire-bg-{}", uuid::Uuid::new_v4()));
-        write_agent(&home, Path::new("/usr/bin/true")).unwrap();
+    fn launchd_runs_and_unloads_a_login_item() {
+        let home = temp_home();
+        let dir = agent_dir(&home);
+        std::fs::create_dir_all(&dir).unwrap();
+        let label = format!("dev.talix.grimoire.test.{}", uuid::Uuid::new_v4().simple());
+        let marker = home.join("ran");
+        let path = dir.join(format!("{label}.plist"));
+        std::fs::write(&path, plist(&label, &args(&["/usr/bin/touch", &marker.display().to_string()]))).unwrap();
         let domain = format!("gui/{}", unsafe { libc::getuid() });
-        assert!(launchctl(&["bootstrap", &domain, &agent_path(&home).display().to_string()]), "launchd refused the plist");
-        assert!(launchctl(&["print", &service()]));
-        assert!(launchctl(&["bootout", &service()]));
-        assert!(!launchctl(&["print", &service()]));
-        remove_agent(&home).unwrap();
+        let guard = Loaded(label.clone());
+        let out = launchctl(&["bootstrap", &domain, &path.display().to_string()]).unwrap();
+        assert!(out.status.success(), "launchd refused the plist: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(loaded(&label));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(marker.exists(), "the login item never ran");
+        unload(&label).unwrap();
+        assert!(!loaded(&label));
+        unload(&label).expect("unloading one that isn't loaded is fine");
+        drop(guard);
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn keeps_the_system_awake_for_this_process_only() {
         assert_eq!(caffeinate_args(4242), ["-i", "-w", "4242"]);
+    }
+
+    #[test]
+    fn keep_awake_reports_whether_caffeinate_holds() {
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let background = Background { db: db.clone(), launched: false, awake: Mutex::default() };
+        assert!(!background.holding());
+        // A caffeinate that already exited holds nothing.
+        *background.awake.lock().unwrap() = Some(Command::new("/usr/bin/true").spawn().unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!background.holding());
+        background.set_awake(false).unwrap();
+        assert!(background.awake.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn switches_parse_from_the_window() {
+        assert_eq!(serde_json::from_str::<Switch>("\"startAtLogin\"").unwrap(), Switch::StartAtLogin);
+        assert!(serde_json::from_str::<Switch>("\"everything\"").is_err());
     }
 
     #[test]
