@@ -472,7 +472,7 @@ else, groups, channels, forwarded messages, and other bots. "Unpair" forgets you
 "Remove token" forgets the bot.
 
 - `/familiars` shows a button for each familiar on this Mac. Tap one, then write to it. Your messages
-  show "From Telegram" in its chat, and its reply comes back to Telegram with its name in front,
+  show "Via Telegram" in its chat, and its reply comes back to Telegram with its name in front,
   split into parts when it's longer than Telegram allows.
 - A familiar's inbox questions arrive with a button for each option, and drafts arrive with "Mark
   sent" and "Discard". Only questions and drafts that open after you pair are sent.

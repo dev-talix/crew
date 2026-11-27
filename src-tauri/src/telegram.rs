@@ -18,14 +18,16 @@ use crate::runtime::TurnOutcome;
 use crate::vault::SecretStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::time::Instant;
 
 pub const API: &str = "https://api.telegram.org";
-/// The source label on messages sent from Telegram, shown under them in the chat.
-pub const SOURCE: &str = "From Telegram";
+/// The source label on messages sent from Telegram, shown under them in the chat. Phones label theirs
+/// "From <name>", so a phone can't take this one.
+pub const SOURCE: &str = "Via Telegram";
 pub const CHANGED: &str = "telegram_changed";
 const TOKEN_KEY: &str = "telegram:bot";
 /// The settings key for `Saved`, stored as JSON. The token is never in it.
@@ -105,6 +107,11 @@ pub struct Telegram {
     /// Held while the saved state is read, changed, and written.
     saved_lock: Mutex<()>,
     poller: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// Bumped whenever the poll loop stops, so a loop that was mid-request drops what it got.
+    generation: AtomicU64,
+    /// Turns sent from the paired chat that haven't ended, by familiar. Cleared when the owner
+    /// changes, so a reply never reaches someone who didn't ask.
+    pending: Mutex<HashMap<String, usize>>,
     /// Open questions and drafts already in the chat, so each goes out once.
     shown: Mutex<HashSet<String>>,
     /// One message at a time, so a long reply's parts arrive in order.
@@ -256,6 +263,8 @@ impl Telegram {
             error: Mutex::new(None),
             saved_lock: Mutex::new(()),
             poller: Mutex::new(None),
+            generation: AtomicU64::new(0),
+            pending: Mutex::new(HashMap::new()),
             shown: Mutex::new(HashSet::new()),
             sending: tokio::sync::Mutex::new(()),
         };
@@ -332,6 +341,8 @@ impl Telegram {
         let me = self.call_with(token, "getMe", json!({})).await?;
         let bot = me["username"].as_str().filter(|n| valid_username(n)).map(String::from);
         self.secrets.set(TOKEN_KEY, token).map_err(|e| format!("Couldn't save the token in the Keychain: {e}"))?;
+        // The old bot's loop stops before anything about the new one is saved.
+        self.stop();
         let same_bot = self.token().is_some_and(|old| old.split(':').next() == token.split(':').next());
         *self.token.lock().map_err(|_| POISONED)? = Some(token.to_string());
         self.change(|s| {
@@ -343,6 +354,9 @@ impl Telegram {
                 s.offset = 0;
             }
         })?;
+        if !same_bot {
+            self.forget_pending();
+        }
         let commands = json!({ "commands": [{ "command": "familiars", "description": "Pick a familiar to talk to" }] });
         if let Err(e) = self.call("setMyCommands", commands).await {
             eprintln!("Couldn't set the Telegram bot's commands: {e}");
@@ -354,8 +368,9 @@ impl Telegram {
     }
 
     pub fn forget_token(self: &Arc<Self>) -> Result<TelegramStatus, String> {
+        self.stop();
         *self.token.lock().map_err(|_| POISONED)? = None;
-        self.restart();
+        self.forget_pending();
         *self.pairing.lock().map_err(|_| POISONED)? = None;
         let deleted = self.secrets.delete(TOKEN_KEY);
         self.change(|s| *s = Saved { enabled: s.enabled, ..Saved::default() })?;
@@ -366,6 +381,7 @@ impl Telegram {
     }
 
     pub fn set_enabled(self: &Arc<Self>, enabled: bool) -> Result<TelegramStatus, String> {
+        self.stop();
         self.change(|s| s.enabled = enabled)?;
         if !enabled {
             *self.pairing.lock().map_err(|_| POISONED)? = None;
@@ -381,18 +397,45 @@ impl Telegram {
             s.owner = None;
             s.current = None;
         })?;
+        self.forget_pending();
         self.actions.changed();
         self.status()
     }
 
+    fn forget_pending(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.clear();
+        }
+    }
+
+    /// Whether a turn sent from the paired chat just ended for `agent_id`, counting it off.
+    fn take_pending(&self, agent_id: &str) -> bool {
+        let Ok(mut pending) = self.pending.lock() else { return false };
+        let Some(count) = pending.get_mut(agent_id) else { return false };
+        *count -= 1;
+        if *count == 0 {
+            pending.remove(agent_id);
+        }
+        true
+    }
+
+    /// Stops the poll loop. One that is waiting on Telegram drops whatever comes back.
+    fn stop(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut poller) = self.poller.lock() {
+            if let Some(old) = poller.take() {
+                old.abort();
+            }
+        }
+    }
+
     /// Stops the poll loop and starts a new one while Telegram is on and has a token.
     fn restart(self: &Arc<Self>) {
+        self.stop();
         let Ok(mut poller) = self.poller.lock() else { return };
-        if let Some(old) = poller.take() {
-            old.abort();
-        }
         if self.saved().enabled && self.token().is_some() {
-            *poller = Some(tauri::async_runtime::spawn(self.clone().poll()));
+            let generation = self.generation.load(Ordering::SeqCst);
+            *poller = Some(tauri::async_runtime::spawn(self.clone().poll(generation)));
         }
     }
 
@@ -450,6 +493,7 @@ impl Telegram {
             eprintln!("Couldn't save the Telegram pairing: {e}");
             return;
         }
+        self.forget_pending();
         self.actions.changed();
         self.say(chat, &format!("Paired with Grimoire. {HELP}"), None).await;
     }
@@ -464,22 +508,24 @@ impl Telegram {
     async fn call_with(&self, token: &str, method: &str, body: Value) -> Result<Value, String> {
         let url = format!("{}/bot{token}/{method}", self.api);
         let headers = [("Content-Type", "application/json".to_string())];
-        let answer = crate::connectors::fetch("POST", &url, &headers, Some(&body.to_string())).await.map_err(|e| e.replace(token, "<token>"))?;
+        // Neither curl's error nor Telegram's description may carry the token back out.
+        let redact = |e: String| e.replace(token, "<token>");
+        let answer = crate::connectors::fetch("POST", &url, &headers, Some(&body.to_string())).await.map_err(redact)?;
         let reply: Value = serde_json::from_str(&answer.body).map_err(|_| format!("Telegram sent an unreadable reply (HTTP {}).", answer.status))?;
         if reply["ok"] == json!(true) {
             return Ok(reply["result"].clone());
         }
-        Err(match reply["error_code"].as_i64() {
+        Err(redact(match reply["error_code"].as_i64() {
             Some(401 | 404) => "Telegram didn't accept the bot token. Copy it again from @BotFather.".into(),
             Some(409) => "Something else is reading this bot's messages, like a webhook or another app. Stop it, or make a new bot for Grimoire.".into(),
             _ => format!("Telegram said: {}", reply["description"].as_str().unwrap_or("something went wrong")),
-        })
+        }))
     }
 
-    async fn poll(self: Arc<Self>) {
+    async fn poll(self: Arc<Self>, generation: u64) {
         let mut wait = Duration::from_secs(1);
         loop {
-            match self.poll_once().await {
+            match self.poll_as(generation).await {
                 Ok(()) => {
                     self.set_error(None);
                     wait = Duration::from_secs(1);
@@ -493,17 +539,27 @@ impl Telegram {
         }
     }
 
+    #[cfg(test)]
     async fn poll_once(&self) -> Result<(), String> {
+        self.poll_as(self.generation.load(Ordering::SeqCst)).await
+    }
+
+    /// One getUpdates call for the poll loop of `generation`. A stopped loop acts on nothing more.
+    async fn poll_as(&self, generation: u64) -> Result<(), String> {
         let offset = self.saved().offset;
         let mut body = json!({ "timeout": POLL_SECONDS, "allowed_updates": ["message", "callback_query"] });
         if offset > 0 {
             body["offset"] = json!(offset);
         }
         let updates = self.call("getUpdates", body).await?.as_array().cloned().unwrap_or_default();
-        let Some(last) = updates.iter().filter_map(|u| u["update_id"].as_i64()).max() else { return Ok(()) };
-        // Saved before acting, so a crash part way through skips the rest instead of doing them twice.
-        self.change(|s| s.offset = last + 1)?;
         for update in &updates {
+            if self.generation.load(Ordering::SeqCst) != generation {
+                return Ok(());
+            }
+            let Some(id) = update["update_id"].as_i64() else { continue };
+            // Saved before acting, so a crash mid-update skips it instead of doing it twice. Updates
+            // after it stay unconfirmed and come back next time.
+            self.change(|s| s.offset = s.offset.max(id + 1))?;
             if let Some(message) = update.get("message") {
                 self.on_message(message).await;
             } else if let Some(press) = update.get("callback_query") {
@@ -551,13 +607,18 @@ impl Telegram {
         if text.chars().count() > MAX_TEXT_CHARS {
             return Err(format!("Keep a message under {MAX_TEXT_CHARS} characters."));
         }
-        self.actions.send(&agent.id, text.to_string(), SOURCE).map(|_| ())
+        self.actions.send(&agent.id, text.to_string(), SOURCE)?;
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending.entry(agent.id).or_default() += 1;
+        }
+        Ok(())
     }
 
     async fn show_familiars(&self, chat: i64, current: Option<&str>) {
         let agents: Vec<Agent> = self.db.list_agents().unwrap_or_default().into_iter().filter(|a| link::valid_id(&a.id)).take(MAX_BUTTONS).collect();
         if agents.is_empty() {
-            return self.say(chat, "There are no familiars on this Mac yet.", None).await;
+            self.say(chat, "There are no familiars on this Mac yet.", None).await;
+            return;
         }
         let rows = agents
             .iter()
@@ -625,8 +686,9 @@ impl Telegram {
 
     // ----- To the chat -----
 
-    /// Sends text in as many messages as it takes, with the buttons on the last one.
-    async fn say(&self, chat: i64, text: &str, buttons: Option<Value>) {
+    /// Sends text in as many messages as it takes, with the buttons on the last one. False when
+    /// Telegram refused a part.
+    async fn say(&self, chat: i64, text: &str, buttons: Option<Value>) -> bool {
         let _turn = self.sending.lock().await;
         let parts = split(text);
         let last = parts.len() - 1;
@@ -637,14 +699,16 @@ impl Telegram {
             }
             if let Err(e) = self.call("sendMessage", body).await {
                 eprintln!("Couldn't send a Telegram message: {e}");
-                return;
+                return false;
             }
         }
+        true
     }
 
-    async fn tell_owner(&self, text: &str, buttons: Option<Value>) {
-        if let Some(chat) = self.chat() {
-            self.say(chat, text, buttons).await;
+    async fn tell_owner(&self, text: &str, buttons: Option<Value>) -> bool {
+        match self.chat() {
+            Some(chat) => self.say(chat, text, buttons).await,
+            None => false,
         }
     }
 
@@ -665,13 +729,17 @@ impl Telegram {
         if self.chat().is_none() {
             return;
         }
-        for question in questions {
-            let (text, buttons) = question_message(&self.name(&question.agent_id), &question);
-            self.tell_owner(&text, Some(buttons)).await;
-        }
-        for draft in drafts {
-            let (text, buttons) = draft_message(&self.name(&draft.agent_id), &draft);
-            self.tell_owner(&text, Some(buttons)).await;
+        let messages = questions
+            .iter()
+            .map(|q| (format!("q:{}", q.id), question_message(&self.name(&q.agent_id), q)))
+            .chain(drafts.iter().map(|d| (format!("d:{}", d.id), draft_message(&self.name(&d.agent_id), d))));
+        for (key, (text, buttons)) in messages.collect::<Vec<_>>() {
+            // One that didn't get through goes again with the next change to the inbox or drafts.
+            if !self.tell_owner(&text, Some(buttons)).await {
+                if let Ok(mut shown) = self.shown.lock() {
+                    shown.remove(&key);
+                }
+            }
         }
     }
 
@@ -703,7 +771,9 @@ fn running() -> Result<&'static Arc<Telegram>, String> {
 
 fn tell_owner(text: Option<String>) {
     let (Some(telegram), Some(text)) = (TELEGRAM.get().cloned(), text) else { return };
-    tauri::async_runtime::spawn(async move { telegram.tell_owner(&text, None).await });
+    tauri::async_runtime::spawn(async move {
+        telegram.tell_owner(&text, None).await;
+    });
 }
 
 /// A turn ended. A turn Telegram started sends its reply back there.
@@ -711,7 +781,7 @@ pub fn turn_ended(agent_id: &str, source: Option<&str>, outcome: &TurnOutcome) {
     if source != Some(SOURCE) {
         return;
     }
-    tell_owner(TELEGRAM.get().map(|t| reply_text(&t.name(agent_id), outcome)));
+    tell_owner(TELEGRAM.get().filter(|t| t.take_pending(agent_id)).map(|t| reply_text(&t.name(agent_id), outcome)));
 }
 
 pub fn approval_requested(request: &Request) {
@@ -833,6 +903,8 @@ mod tests {
     struct FakeApi {
         calls: Arc<Mutex<Vec<(String, Value)>>>,
         updates: Arc<Mutex<VecDeque<Value>>>,
+        /// Refuses sendMessage while set.
+        refuse_sends: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl FakeApi {
@@ -856,6 +928,9 @@ mod tests {
                             match method.as_str() {
                                 "getUpdates" => json!({ "ok": true, "result": api.updates.lock().unwrap().drain(..).collect::<Vec<_>>() }),
                                 "getMe" => json!({ "ok": true, "result": { "id": 123456, "is_bot": true, "username": "grimoire_test_bot" } }),
+                                "sendMessage" if api.refuse_sends.load(Ordering::SeqCst) => json!({ "ok": false, "error_code": 429, "description": "Too Many Requests" }),
+                                // A server that echoes the path back, token and all.
+                                "echo" => json!({ "ok": false, "error_code": 400, "description": format!("Bad request for {path}") }),
                                 _ => json!({ "ok": true, "result": true }),
                             }
                         };
@@ -1179,5 +1254,56 @@ mod tests {
         assert!(s.actions.sent.lock().unwrap().is_empty());
         assert!(s.api.texts().is_empty());
         assert_eq!(s.telegram.chat(), None);
+    }
+
+    #[tokio::test]
+    async fn a_reply_reaches_only_the_owner_who_asked() {
+        let s = setup().await;
+        familiar(&s.db, "ada", "Ada");
+        paired(&s).await;
+        s.telegram.change(|saved| saved.current = Some("ada".into())).unwrap();
+        s.api.queue([message(2, OWNER, private(OWNER), "one"), message(3, OWNER, private(OWNER), "two")]);
+        s.telegram.poll_once().await.unwrap();
+        assert!(s.telegram.take_pending("ada") && s.telegram.take_pending("ada"));
+        assert!(!s.telegram.take_pending("ada"), "a turn that didn't come from Telegram stays on the Mac");
+        s.api.queue([message(4, OWNER, private(OWNER), "three")]);
+        s.telegram.poll_once().await.unwrap();
+        s.telegram.unpair().unwrap();
+        assert!(!s.telegram.take_pending("ada"), "unpairing drops replies still on their way");
+    }
+
+    #[tokio::test]
+    async fn a_stopped_poll_loop_acts_on_nothing_it_was_waiting_for() {
+        let s = setup().await;
+        familiar(&s.db, "ada", "Ada");
+        paired(&s).await;
+        s.telegram.change(|saved| saved.current = Some("ada".into())).unwrap();
+        let old = s.telegram.generation.load(Ordering::SeqCst);
+        s.telegram.stop();
+        s.api.queue([message(5, OWNER, private(OWNER), "late")]);
+        s.telegram.poll_as(old).await.unwrap();
+        assert!(s.actions.sent.lock().unwrap().is_empty());
+        assert_eq!(s.telegram.saved().offset, 2, "the update stays unconfirmed for the next loop");
+    }
+
+    #[tokio::test]
+    async fn a_push_telegram_refused_goes_again_with_the_next_change() {
+        let s = setup().await;
+        familiar(&s.db, "ada", "Ada");
+        paired(&s).await;
+        crate::inbox::call_tool(&s.db, "ada", "ask_person", &json!({ "question": "Ship it?", "options": ["Ship", "Wait"], "recommended": "Ship" })).unwrap();
+        s.api.refuse_sends.store(true, Ordering::SeqCst);
+        s.telegram.push_inbox().await;
+        s.api.refuse_sends.store(false, Ordering::SeqCst);
+        s.telegram.push_inbox().await;
+        s.telegram.push_inbox().await;
+        assert_eq!(s.api.texts(), ["Ada asks: Ship it?", "Ada asks: Ship it?"], "refused once, then sent once");
+    }
+
+    #[tokio::test]
+    async fn errors_never_carry_the_token() {
+        let s = setup().await;
+        let error = s.telegram.call("echo", json!({})).await.unwrap_err();
+        assert!(error.contains("<token>") && !error.contains(TOKEN), "{error}");
     }
 }
