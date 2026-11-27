@@ -47,6 +47,15 @@ export function suggestConnectors(appNames: string[], catalog: CatalogEntry[]): 
   return found;
 }
 
+/** Catalog entries whose name, description, or app names contain every word of `query`. */
+export function filterCatalog(catalog: CatalogEntry[], query: string): CatalogEntry[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  return catalog.filter((e) => {
+    const text = [e.name, e.description, ...e.apps].join(" ").toLowerCase();
+    return words.every((w) => text.includes(w));
+  });
+}
+
 /** The line under a connector's name. `names` maps familiar ids to names. */
 export function connectorStatus(connector: Connector, names: Record<string, string>): string {
   if (!connector.auth) return "Not signed in";
