@@ -45,7 +45,6 @@
   gap: 10px;
 }
 
-.skill-add-form textarea,
 .skill-add-form .field {
   width: 100%;
 }
@@ -97,11 +96,15 @@
 }
 
 /* Template skills in the import review. */
-.template-skill-name {
+.template-skill-name,
+.template-skill-description {
   width: 100%;
-  font: 500 13px/1.4 var(--mono);
+}
+
+.template-skill-name {
+  font-family: var(--mono);
 }
 
 .template-skill-description {
-  width: 100%;
+  font-weight: 400;
 }

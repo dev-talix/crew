@@ -316,8 +316,8 @@ function TemplateReview(props: { template: MarketTemplate; onBack: () => void; o
                   <li class={["list-row template-row", { off: !row().include }]}>
                     <input type="checkbox" checked={row().include} aria-label="Include" onChange={(e) => editSkill(row().id, { include: e.currentTarget.checked })} />
                     <div class="list-main">
-                      <input class="template-skill-name" value={row().name} maxlength={64} aria-label="Skill name" spellcheck={false} onInput={(e) => editSkill(row().id, { name: e.currentTarget.value })} />
-                      <input class="template-skill-description" value={row().description} maxlength={1024} aria-label="Skill description" onInput={(e) => editSkill(row().id, { description: e.currentTarget.value })} />
+                      <input class="template-ritual-name template-skill-name" value={row().name} maxlength={64} aria-label="Skill name" spellcheck={false} onInput={(e) => editSkill(row().id, { name: e.currentTarget.value })} />
+                      <input class="template-ritual-name template-skill-description" value={row().description} maxlength={1024} aria-label="Skill description" onInput={(e) => editSkill(row().id, { description: e.currentTarget.value })} />
                       <textarea rows={3} value={row().body} aria-label="Skill instructions" onInput={(e) => editSkill(row().id, { body: e.currentTarget.value })} />
                       <Show when={row().include && skillRowProblem(row())}>{(problem) => <span class="template-warn">{problem()}</span>}</Show>
                     </div>

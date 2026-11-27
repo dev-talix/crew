@@ -139,14 +139,16 @@ export default function SkillsPage(props: { agents: Agent[] }) {
                 void startPreview({ kind: "text", text: text() });
               }}
             >
-              <textarea
-                rows={8}
-                value={text()}
-                onInput={(e) => setText(e.currentTarget.value)}
-                aria-label="SKILL.md text"
-                placeholder={"---\nname: weekly-report\ndescription: Writes the weekly report. Use when asked for it.\n---\n\n1. Collect the week's merged pull requests.\n2. ..."}
-                spellcheck={false}
-              />
+              <label class="field">
+                <span>SKILL.md</span>
+                <textarea
+                  rows={8}
+                  value={text()}
+                  onInput={(e) => setText(e.currentTarget.value)}
+                  placeholder={"---\nname: weekly-report\ndescription: Writes the weekly report. Use when asked for it.\n---\n\n1. Collect the week's merged pull requests.\n2. ..."}
+                  spellcheck={false}
+                />
+              </label>
               <button type="submit" class="ghost" disabled={busy() || !text().trim()}>
                 Preview
               </button>
