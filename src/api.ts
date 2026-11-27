@@ -13,6 +13,15 @@ import type { Ledger } from "./ledgers";
 export type Provider = "codex" | "claude";
 export type Access = "workspace" | "full";
 
+/** Background mode, for an always-on Mac. */
+export interface BackgroundSettings {
+  runInBackground: boolean;
+  startAtLogin: boolean;
+  keepAwake: boolean;
+  /** This launch came from the login item. */
+  launchedInBackground: boolean;
+}
+
 export const PROVIDER_NAMES: Record<Provider, string> = { codex: "Codex", claude: "Claude" };
 
 export interface Agent {
@@ -747,6 +756,8 @@ export const api = {
   saveNotificationSettings: (prefs: NotificationPrefs) => invoke<NotificationPrefs>("save_notification_settings", { prefs }),
   menuBarVisible: () => invoke<boolean>("menu_bar_visible"),
   setMenuBarVisible: (visible: boolean) => invoke<boolean>("set_menu_bar_visible", { visible }),
+  backgroundSettings: () => invoke<BackgroundSettings>("background_settings"),
+  saveBackgroundSettings: (settings: BackgroundSettings) => invoke<BackgroundSettings>("save_background_settings", { settings }),
   /** Tells the menu bar which familiar's chat the main window shows. */
   setOpenAgent: (agentId: string | null) => invoke<void>("set_open_agent", { agentId }),
   listBudgets: () => invoke<Budgets.BudgetStatus[]>("list_budgets"),

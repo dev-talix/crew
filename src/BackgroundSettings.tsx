@@ -1,0 +1,71 @@
+import { createSignal, For, Show } from "solid-js";
+import { api, errorText, type BackgroundSettings } from "./api";
+import { Toggle } from "./ui";
+
+const ROWS: { key: Exclude<keyof BackgroundSettings, "launchedInBackground">; title: string; detail: string }[] = [
+  {
+    key: "runInBackground",
+    title: "Run in the background",
+    detail: "Closing the window keeps Grimoire running without a Dock icon. Open Grimoire again, or use the menu bar, to bring the window back.",
+  },
+  {
+    key: "startAtLogin",
+    title: "Start at login",
+    detail: "Opens Grimoire in the background, with no window, when you log in to this Mac.",
+  },
+  {
+    key: "keepAwake",
+    title: "Keep this Mac awake while Grimoire runs",
+    detail: "Stops the Mac from sleeping on its own so rituals and linked Macs keep working. The display can still sleep.",
+  },
+];
+
+/** Settings, General: run Grimoire on an always-on Mac with no window. */
+export function BackgroundSection() {
+  const [settings, setSettings] = createSignal<BackgroundSettings>({
+    runInBackground: false,
+    startAtLogin: false,
+    keepAwake: false,
+    launchedInBackground: false,
+  });
+  const [error, setError] = createSignal("");
+  api.backgroundSettings().then(setSettings, (e) => setError(errorText(e)));
+
+  const change = async (patch: Partial<BackgroundSettings>) => {
+    const before = settings();
+    setSettings({ ...before, ...patch });
+    setError("");
+    try {
+      setSettings(await api.saveBackgroundSettings({ ...before, ...patch }));
+    } catch (e) {
+      setError(errorText(e));
+      await api.backgroundSettings().then(setSettings, () => setSettings(before));
+    }
+  };
+
+  return (
+    <>
+      <h2 class="section-title">Background</h2>
+      <div class="list">
+        <For each={ROWS}>
+          {(row) => (
+            <div class="list-row settings-row">
+              <div class="list-main">
+                <div class="list-title">{row.title}</div>
+                <p class="settings-detail">{row.detail}</p>
+              </div>
+              <Toggle label={row.title} checked={settings()[row.key]} onChange={(on) => void change({ [row.key]: on })} />
+            </div>
+          )}
+        </For>
+      </div>
+      <p class="hint settings-footnote">
+        For a Mac mini or Mac Studio that stays on. It needs a logged-in macOS session.
+        <Show when={settings().launchedInBackground}> Grimoire started in the background at login, so closing the window keeps it running until you quit.</Show>
+      </p>
+      <Show when={error()}>
+        <div class="error-box settings-error">{error()}</div>
+      </Show>
+    </>
+  );
+}
