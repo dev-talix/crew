@@ -18,7 +18,7 @@ use crate::runtime::TurnOutcome;
 use crate::vault::SecretStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -109,9 +109,9 @@ pub struct Telegram {
     poller: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     /// Bumped whenever the poll loop stops, so a loop that was mid-request drops what it got.
     generation: AtomicU64,
-    /// For each familiar, the pairing (its `paired_at`) behind each Telegram turn not yet ended, in
-    /// the order the runtime runs them. A reply goes out only to the pairing that asked for it.
-    pending: Mutex<HashMap<String, VecDeque<i64>>>,
+    /// The pairing (its `paired_at`) behind each message sent from Telegram whose turn hasn't ended,
+    /// by message id. A reply goes out only to the pairing that asked for it.
+    pending: Mutex<HashMap<i64, i64>>,
     /// Open questions and drafts already in the chat, so each goes out once.
     shown: Mutex<HashSet<String>>,
     /// One message at a time, so a long reply's parts arrive in order.
@@ -394,23 +394,24 @@ impl Telegram {
             s.owner = None;
             s.current = None;
         })?;
+        self.forget_pending();
         self.actions.changed();
         self.status()
     }
 
-    /// Counts off a Telegram turn that ended for `agent_id`, and says whether its reply should go out:
-    /// only while the pairing that sent it is still the one paired.
-    fn reply_due(&self, agent_id: &str) -> bool {
-        let asked = {
-            let Ok(mut pending) = self.pending.lock() else { return false };
-            let Some(queue) = pending.get_mut(agent_id) else { return false };
-            let asked = queue.pop_front();
-            if queue.is_empty() {
-                pending.remove(agent_id);
-            }
-            asked
-        };
+    /// Whether the reply to `message_id`'s turn should go out: only when Telegram sent that message and
+    /// the pairing that sent it is still the one paired.
+    fn reply_due(&self, message_id: i64) -> bool {
+        let asked = self.pending.lock().ok().and_then(|mut pending| pending.remove(&message_id));
         asked.is_some() && asked == self.saved().owner.map(|o| o.paired_at)
+    }
+
+    /// Drops replies still owed to a pairing that's gone, and the entries of turns that were stopped
+    /// before they ran.
+    fn forget_pending(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.clear();
+        }
     }
 
     /// Stops the poll loop. One that is waiting on Telegram drops whatever comes back.
@@ -491,6 +492,7 @@ impl Telegram {
         }
         // What's open now stays on the Mac, including pushes a past pairing never got.
         self.unseen();
+        self.forget_pending();
         self.actions.changed();
         self.say(chat, &format!("Paired with Grimoire. {HELP}"), None).await;
     }
@@ -612,19 +614,10 @@ impl Telegram {
         if text.chars().count() > MAX_TEXT_CHARS {
             return Err(format!("Keep a message under {MAX_TEXT_CHARS} characters."));
         }
-        // Noted before sending, since a turn that can't start may end before send returns.
-        let note = |add: bool| {
-            if let Ok(mut pending) = self.pending.lock() {
-                let queue = pending.entry(agent.id.clone()).or_default();
-                if add {
-                    queue.push_back(owner.paired_at);
-                } else {
-                    queue.pop_back();
-                }
-            }
-        };
-        note(true);
-        self.actions.send(&agent.id, text.to_string(), SOURCE).inspect_err(|_| note(false))?;
+        // Held across the send, so a turn that ends at once still finds its entry when it looks.
+        let mut pending = self.pending.lock().map_err(|_| POISONED)?;
+        let message = self.actions.send(&agent.id, text.to_string(), SOURCE)?;
+        pending.insert(message.id, owner.paired_at);
         Ok(())
     }
 
@@ -790,12 +783,9 @@ fn tell_owner(text: Option<String>) {
     });
 }
 
-/// A turn ended. A turn Telegram started sends its reply back there.
-pub fn turn_ended(agent_id: &str, source: Option<&str>, outcome: &TurnOutcome) {
-    if source != Some(SOURCE) {
-        return;
-    }
-    tell_owner(TELEGRAM.get().filter(|t| t.reply_due(agent_id)).map(|t| reply_text(&t.name(agent_id), outcome)));
+/// A turn ended. A turn a Telegram message started sends its reply back there.
+pub fn turn_ended(agent_id: &str, message_id: i64, outcome: &TurnOutcome) {
+    tell_owner(TELEGRAM.get().filter(|t| t.reply_due(message_id)).map(|t| reply_text(&t.name(agent_id), outcome)));
 }
 
 pub fn approval_requested(request: &Request) {
@@ -889,8 +879,9 @@ mod tests {
             Vec::new()
         }
         fn send(&self, agent_id: &str, text: String, source: &str) -> Result<Message, String> {
-            self.sent.lock().unwrap().push((agent_id.into(), text.clone(), source.into()));
-            Ok(Message { id: 1, agent_id: agent_id.into(), role: "user".into(), text, status: "done".into(), source: Some(source.into()), created_at: 0, updated_at: None, attachments: Vec::new() })
+            let mut sent = self.sent.lock().unwrap();
+            sent.push((agent_id.into(), text.clone(), source.into()));
+            Ok(Message { id: sent.len() as i64, agent_id: agent_id.into(), role: "user".into(), text, status: "done".into(), source: Some(source.into()), created_at: 0, updated_at: None, attachments: Vec::new() })
         }
         fn approvals(&self) -> Vec<Request> {
             Vec::new()
@@ -1278,23 +1269,23 @@ mod tests {
         s.telegram.change(|saved| saved.current = Some("ada".into())).unwrap();
         s.api.queue([message(2, OWNER, private(OWNER), "one"), message(3, OWNER, private(OWNER), "two")]);
         s.telegram.poll_once().await.unwrap();
-        assert!(s.telegram.reply_due("ada") && s.telegram.reply_due("ada"));
-        assert!(!s.telegram.reply_due("ada"), "a turn that didn't come from Telegram stays on the Mac");
+        assert!(s.telegram.reply_due(2), "message 2's reply goes out, even before message 1's");
+        assert!(s.telegram.reply_due(1));
+        assert!(!s.telegram.reply_due(1) && !s.telegram.reply_due(99), "a turn that didn't come from Telegram stays on the Mac");
 
         // A turn from the old pairing still running when the owner pairs again doesn't reach the new
-        // pairing, and doesn't use up the new pairing's turn.
+        // pairing, and doesn't take the new pairing's reply.
         s.api.queue([message(4, OWNER, private(OWNER), "old")]);
         s.telegram.poll_once().await.unwrap();
         s.telegram.unpair().unwrap();
-        tokio::time::sleep(Duration::from_millis(2)).await;
         let code = s.telegram.start_pairing().unwrap().code;
         s.api.queue([message(5, OWNER, private(OWNER), &format!("/start {code}"))]);
         s.telegram.poll_once().await.unwrap();
         s.telegram.change(|saved| saved.current = Some("ada".into())).unwrap();
         s.api.queue([message(6, OWNER, private(OWNER), "new")]);
         s.telegram.poll_once().await.unwrap();
-        assert!(!s.telegram.reply_due("ada"), "the old turn ends first and stays quiet");
-        assert!(s.telegram.reply_due("ada"), "the new turn's reply goes out");
+        assert!(!s.telegram.reply_due(3), "the old turn ends and stays quiet");
+        assert!(s.telegram.reply_due(4), "the new turn's reply goes out");
     }
 
     #[tokio::test]

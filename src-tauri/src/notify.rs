@@ -209,7 +209,6 @@ fn send(app: &AppHandle, kind: Kind, make: impl FnOnce(&Notifier) -> Option<Note
 
 /// A familiar's turn ended. Spell steps stay quiet; the spell says when it ends.
 pub fn turn_ended(app: &AppHandle, agent_id: &str, source: Option<&str>, outcome: &TurnOutcome) {
-    crate::telegram::turn_ended(agent_id, source, outcome);
     if crate::runtime::origin_of(source) == "spell" {
         return;
     }

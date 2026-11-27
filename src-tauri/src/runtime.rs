@@ -355,6 +355,7 @@ impl Runtime {
         tauri::async_runtime::spawn(async move {
             let outcome = runtime.run_turn(&agent_id, &job.text, job.source.as_deref(), &job.attachments).await;
             crate::notify::turn_ended(&runtime.app, &agent_id, job.source.as_deref(), &outcome);
+            crate::telegram::turn_ended(&agent_id, job.message_id, &outcome);
             if let Some(reply) = job.reply {
                 let _ = reply.send(outcome);
             }
