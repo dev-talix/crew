@@ -11,7 +11,7 @@ import { ExportButton } from "./ImportExport";
 import TemplateImport from "./TemplateImport";
 import { followUntouched } from "./panel";
 import { toggleId, type Connector } from "./connectors";
-import type { Skill } from "./skills";
+import { applySkillChanges, skillChanges, type Skill } from "./skills";
 import "./connectors.css";
 import { CheckInsField } from "./CheckInSettings";
 import { sameSettings, settingsOf, type CheckInSettings, type CheckInStatus } from "./checkins";
@@ -153,11 +153,13 @@ export default function AgentForm(props: {
   const checkinValue = () => checkins() ?? (checkinStatus() ? settingsOf(checkinStatus()!) : null);
   const [skills, setSkills] = createSignal<Skill[]>([]);
   const [skillsOn, setSkillsOn] = createSignal<string[]>([]);
+  // What was on when the form opened, so saving sends only the switches the person flipped.
+  let skillsAtOpen: string[] = [];
   onSettled(() => {
     api.skillLibrary().then((list) => {
       setSkills(list);
       const id = props.agent?.id;
-      if (id) setSkillsOn(list.filter((s) => s.agents.includes(id)).map((s) => s.name));
+      if (id) setSkillsOn((skillsAtOpen = list.filter((s) => s.agents.includes(id)).map((s) => s.name)));
     }, () => undefined);
   });
   // Connectors go through the tool socket on this Mac, so familiars elsewhere can't use them yet.
@@ -232,9 +234,11 @@ export default function AgentForm(props: {
         const apps = api.setAgentMacApps(saved.id, macApps().filter((a) => a.on).map((a) => a.id));
         await (editing ? apps : apps.catch(() => undefined));
       }
-      // Skill folders live on this Mac too.
-      if (connectorsHere() && skills().length > 0) {
-        const assigned = api.setAgentSkills(saved.id, skillsOn());
+      // Skill folders live on this Mac too. A familiar can save a skill while this form is open, so
+      // the flipped switches apply to what's on now, not to the list from when the form opened.
+      const changed = skillChanges(skillsAtOpen, skillsOn());
+      if (connectorsHere() && (changed.on.length || changed.off.length)) {
+        const assigned = api.skillLibrary().then((list) => api.setAgentSkills(saved.id, applySkillChanges(list.filter((s) => s.agents.includes(saved.id)).map((s) => s.name), changed)));
         await (editing ? assigned : assigned.catch(() => undefined));
       }
       if (!editing && saved.setupPending) {

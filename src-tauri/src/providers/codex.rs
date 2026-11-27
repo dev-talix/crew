@@ -91,6 +91,9 @@ pub struct Codex {
     idle: Arc<IdleTimer>,
     /// The other Mac this app server runs on, for familiars there. None runs it here.
     host: Option<String>,
+    /// Turn starts take turns from working out skills to `turn/start`, so Codex never rescans the
+    /// shared skill root between a thread getting its list of skills to turn off and its turn.
+    turn_gate: tokio::sync::Mutex<()>,
 }
 
 /// "untrusted" makes Codex ask before commands it doesn't know are safe, so Grimoire's rules see them.
@@ -207,8 +210,12 @@ impl Codex {
         let process = self.ensure_process(&agent.workspace).await?;
         self.idle.cancel();
         let key = lane.map_or(&agent.id, |l| &l.key);
+        let _gate = self.turn_gate.lock().await;
         // Skills live on this Mac, so only a local app server gets the shared skill root.
-        let skills = if self.host.is_none() { crate::skills::codex(agent) } else { None };
+        let skills = match self.host {
+            None => crate::skills::codex(agent).inspect_err(|_| self.arm_idle_if_unused(&process))?,
+            Some(_) => None,
+        };
         if let Some(skills) = &skills {
             share_skill_root(&process, skills).await;
         }

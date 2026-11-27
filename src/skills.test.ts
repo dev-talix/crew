@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { enabledLabel, nameFrom, skillRowProblem, sourceLabel, templateSkills, validName, type Skill } from "./skills";
+import { applySkillChanges, enabledLabel, skillChanges, nameFrom, skillRowProblem, sourceLabel, templateSkills, validName, type Skill } from "./skills";
 
 const skill = (over: Partial<Skill>): Skill => ({
   name: "brief",
@@ -53,4 +53,11 @@ describe("templateSkills", () => {
     expect(skillRowProblem({ ...row, description: "x".repeat(1025) })).toContain("1024");
     expect(skillRowProblem({ ...row, body: "" })).toContain("instructions");
   });
+});
+
+test("saving familiar settings applies only the flipped switches", () => {
+  const changes = skillChanges(["a", "b"], ["b", "c"]);
+  expect(changes).toEqual({ on: ["c"], off: ["a"] });
+  // "fresh" was saved by the familiar while the form was open; it stays on.
+  expect(applySkillChanges(["a", "b", "fresh"], changes)).toEqual(["b", "fresh", "c"]);
 });

@@ -475,6 +475,10 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
     let full_access = file.familiars.iter().any(|f| f.access == Access::Full);
+    // Names this file gives to more than one familiar, which a skill's owner or assignment can't name safely.
+    let mut seen_names = std::collections::HashSet::new();
+    let shared_names: std::collections::HashSet<String> = file.familiars.iter().map(|f| f.name.trim().to_lowercase()).filter(|n| !seen_names.insert(n.clone())).collect();
+    let ambiguous = |name: &str| shared_names.contains(&name.trim().to_lowercase());
     // Familiars first, so everything else can point at them.
     let mut taken: Vec<String> = existing.iter().map(|a| a.name.clone()).collect();
     let mut familiars = Vec::new();
@@ -740,10 +744,17 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
         let mut line = item("skill", &doc.name, &front.name, final_name.clone());
         if line.conflict {
             line.notes.push(format!("You already have a skill named {}, so this one becomes {final_name}.", front.name));
-            files[0].text = skills::renamed(&files[0].text, &final_name);
+            if let Err(why) = skills::rename_main(&mut files, &final_name) {
+                items.push(skipped("skill", &doc.name, why));
+                continue;
+            }
         }
         let mut agents = Vec::new();
         for familiar in &doc.familiars {
+            if ambiguous(familiar) {
+                line.notes.push(format!("Off for every {familiar}: more than one familiar in the file has that name."));
+                continue;
+            }
             match resolve(familiar) {
                 Some((id, final_familiar, true)) => {
                     line.notes.push(format!("On for the imported {final_familiar}."));
@@ -762,7 +773,7 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
             files,
             source: doc.source,
             origin: doc.origin,
-            created_by: doc.created_by.as_deref().and_then(&resolve).map(|(id, _, _)| id),
+            created_by: doc.created_by.as_deref().filter(|name| !ambiguous(name)).and_then(&resolve).map(|(id, _, _)| id),
             agents,
         });
     }
@@ -1408,6 +1419,18 @@ mod tests {
         apply(&db, &themes, &p).unwrap();
         assert!(skills::list_in(&db, root).unwrap().iter().find(|s| s.name == "lonely-skill").unwrap().agents.is_empty());
         assert!(!root.join("evil").exists() && !root.join("skills/escape").exists());
+
+        // Two familiars with one name: the skill can't tell them apart, so it gets no owner and stays off.
+        let mut twins = GrimoireFile::new(Kind::Backup);
+        for _ in 0..2 {
+            twins.familiars.push(familiar_doc(&db, &db.get_agent("r").unwrap().unwrap(), false).unwrap());
+        }
+        twins.skills.push(SkillDoc { name: "twin-skill".into(), files: vec![main("twin-skill")], source: "familiar".into(), origin: None, created_by: Some("Researcher".into()), familiars: vec!["Researcher".into()] });
+        let p = plan(&db, &themes, twins, &home, false).unwrap();
+        assert!(p.preview.items.iter().find(|i| i.name == "twin-skill").unwrap().notes.iter().any(|n| n.contains("more than one familiar")));
+        apply(&db, &themes, &p).unwrap();
+        let twin = skills::list_in(&db, root).unwrap().into_iter().find(|s| s.name == "twin-skill").unwrap();
+        assert!(twin.created_by.is_none() && twin.agents.is_empty());
         std::fs::remove_dir_all(themes).unwrap();
         std::fs::remove_dir_all(home).unwrap();
     }

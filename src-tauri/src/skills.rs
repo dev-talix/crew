@@ -17,7 +17,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 
@@ -37,6 +37,12 @@ const MAX_LISTINGS: usize = 20;
 
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
 static DB: OnceLock<Arc<Db>> = OnceLock::new();
+/// Changes to the library take turns, so an ownership check and the write after it see the same skill.
+static WRITING: Mutex<()> = Mutex::new(());
+
+fn writing() -> MutexGuard<'static, ()> {
+    WRITING.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Sets the data folder and the database the CLI launchers read enabled skills from.
 pub fn install(db: Arc<Db>, data_dir: &Path) {
@@ -175,8 +181,10 @@ fn scalars(lines: &[(usize, &str)]) -> Vec<(String, String)> {
         let more: Vec<&str> = lines[start..i].iter().map(|(_, l)| *l).collect();
         let value = if rest.starts_with('|') || rest.starts_with('>') {
             let folded = rest.starts_with('>');
-            let indent = more.iter().find(|l| !l.trim().is_empty()).map_or(0, |l| l.len() - l.trim_start().len());
-            let body: Vec<&str> = more.iter().map(|l| if l.len() >= indent { &l[indent..] } else { l.trim_start() }).collect();
+            // Indents are ASCII spaces and tabs, so these byte offsets fall between characters.
+            let lead = |l: &str| l.len() - l.trim_start_matches([' ', '\t']).len();
+            let indent = more.iter().find(|l| !l.trim().is_empty()).map_or(0, |l| lead(l));
+            let body: Vec<&str> = more.iter().map(|l| &l[lead(l).min(indent)..]).collect();
             if folded {
                 body.split(|l| l.trim().is_empty()).map(|para| para.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join("\n").trim().to_string()
             } else {
@@ -269,9 +277,20 @@ pub fn compose(name: &str, description: &str, body: &str) -> String {
 
 /// `text` with its frontmatter's name changed to `name`, for an import that had to rename it.
 pub fn renamed(text: &str, name: &str) -> String {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let Ok((lines, _)) = header_lines(text) else { return text.to_string() };
     let Some(&(at, line)) = lines.iter().find(|(_, l)| l.split_once(':').is_some_and(|(k, _)| k == "name")) else { return text.to_string() };
     format!("{}name: {name}{}", &text[..at], &text[at + line.len()..])
+}
+
+/// Renames the SKILL.md at the top of `files` (see `check_files`) and checks it took.
+pub fn rename_main(files: &mut [SkillFile], name: &str) -> Result<(), String> {
+    let main = files.first_mut().filter(|f| f.path == MAIN_FILE).ok_or("A skill needs a SKILL.md file at the top of its folder.")?;
+    main.text = renamed(&main.text, name);
+    if parse(&main.text)?.name != name {
+        return Err(format!("Grimoire couldn't rename this skill to {name}. Change the name: line in its SKILL.md and try again."));
+    }
+    Ok(())
 }
 
 /// A name made from free text, like a Grok template skill's title: "Haggle setup!" becomes haggle-setup.
@@ -329,6 +348,8 @@ fn check_path(path: &str) -> Result<(), String> {
         || path.contains('\\')
         || path.chars().any(char::is_control)
         || parts.len() > MAX_DEPTH
+        // One spelling per file, so "a/./b" and "a//b" can't stand in for "a/b".
+        || parts.iter().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/") != path
         || parts.iter().any(|c| !matches!(c, Component::Normal(name) if !name.to_string_lossy().starts_with('.')));
     if bad { Err(format!("\"{path}\" can't be a file in a skill.")) } else { Ok(()) }
 }
@@ -361,6 +382,16 @@ pub fn check_files(files: &mut Vec<SkillFile>) -> Result<Frontmatter, String> {
     Ok(front)
 }
 
+/// Reads at most one byte past the file cap, without following a link swapped in since the check.
+fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// Reads the text files of a skill folder: SKILL.md and what sits beside it. Hidden files, links,
 /// and files that aren't text are left out, each with a note.
 pub fn read_folder(dir: &Path) -> Result<(Vec<SkillFile>, Vec<String>), String> {
@@ -390,10 +421,15 @@ pub fn read_folder(dir: &Path) -> Result<(Vec<SkillFile>, Vec<String>), String> 
                 } else {
                     notes.push(format!("Leaves out {path}: it's nested too deep."));
                 }
+            } else if !meta.is_file() {
+                notes.push(format!("Leaves out {path}: it isn't a regular file."));
             } else if meta.len() > MAX_FILE_BYTES as u64 {
                 return Err(format!("{path} is over {} KB, the most a skill file can be.", MAX_FILE_BYTES / 1024));
             } else {
-                let bytes = std::fs::read(entry.path()).map_err(|e| format!("Could not read {path}: {e}"))?;
+                let bytes = read_capped(&entry.path()).map_err(|e| format!("Could not read {path}: {e}"))?;
+                if bytes.len() > MAX_FILE_BYTES {
+                    return Err(format!("{path} is over {} KB, the most a skill file can be.", MAX_FILE_BYTES / 1024));
+                }
                 match String::from_utf8(bytes) {
                     Ok(text) => files.push(SkillFile { path, text }),
                     Err(_) => notes.push(format!("Leaves out {path}: Grimoire only brings text files.")),
@@ -588,6 +624,7 @@ pub fn write_imported(skills: &[NewSkill]) -> Result<Vec<PathBuf>, String> {
         return Ok(Vec::new());
     }
     let root = root()?;
+    let _writing = writing();
     let mut made = Vec::new();
     for skill in skills {
         match write_folder(root, &skill.name, &skill.files) {
@@ -623,7 +660,7 @@ pub fn preview_in(db: &Db, root: &Path, mut files: Vec<SkillFile>, mut notes: Ve
     let name = unique_name(&front.name, &mut taken_names(db, root)?);
     if name != front.name {
         notes.push(format!("You already have a skill named {}, so this one becomes {name}.", front.name));
-        files[0].text = renamed(&files[0].text, &name);
+        rename_main(&mut files, &name)?;
     }
     Ok(Preview { name, description: front.description, files, notes, source: source.to_string(), origin })
 }
@@ -631,6 +668,7 @@ pub fn preview_in(db: &Db, root: &Path, mut files: Vec<SkillFile>, mut notes: Ve
 /// Saves a previewed skill, turned off for every familiar. The files are checked again, since they
 /// come back from the window.
 pub fn add_in(db: &Db, root: &Path, preview: Preview) -> Result<Skill, String> {
+    let _writing = writing();
     if !matches!(preview.source.as_str(), "you" | "folder" | "url") {
         return Err("Skills added in Settings come from pasted text, a folder, or a URL.".into());
     }
@@ -646,6 +684,7 @@ pub fn add_in(db: &Db, root: &Path, preview: Preview) -> Result<Skill, String> {
 
 pub fn delete_in(db: &Db, root: &Path, name: &str) -> Result<(), String> {
     check_name(name)?;
+    let _writing = writing();
     db.with(|c| c.execute("DELETE FROM skills WHERE name = ?1", params![name]).map(|_| ()))?;
     let folder = library(root).join(name);
     if folder.exists() {
@@ -657,6 +696,7 @@ pub fn delete_in(db: &Db, root: &Path, name: &str) -> Result<(), String> {
 
 /// Turns on exactly `names` for the familiar `agent_id`.
 pub fn set_for_agent_in(db: &Db, root: &Path, agent_id: &str, names: &[String]) -> Result<(), String> {
+    let _writing = writing();
     let agent = db.get_agent(agent_id)?.ok_or("That familiar no longer exists.")?;
     if agent.host.is_some() && !names.is_empty() {
         return Err("Skills live on this Mac, so a familiar on another Mac can't use them yet.".into());
@@ -679,6 +719,7 @@ pub fn set_for_agent_in(db: &Db, root: &Path, agent_id: &str, names: &[String]) 
 
 /// `create_skill`: saves a skill credited to `caller` and turns it on for that familiar only.
 pub fn create_in(db: &Db, root: &Path, caller: &str, name: &str, description: &str, body: &str) -> Result<(), String> {
+    let _writing = writing();
     check_name(name)?;
     check_description(description)?;
     if body.trim().is_empty() {
@@ -696,6 +737,7 @@ pub fn create_in(db: &Db, root: &Path, caller: &str, name: &str, description: &s
 
 /// `update_skill`: changes the description or body of a skill `caller` made, and no one else's.
 pub fn update_in(db: &Db, root: &Path, caller: &str, name: &str, description: Option<&str>, body: Option<&str>) -> Result<(), String> {
+    let _writing = writing();
     let row = row(db, name)?.ok_or_else(|| format!("No skill is called {name}. Use list_skills to see them."))?;
     if row.created_by.as_deref() != Some(caller) {
         return Err(format!("You didn't make {name}, so you can't change it. Save your own version with create_skill under another name."));
@@ -722,22 +764,33 @@ pub fn update_in(db: &Db, root: &Path, caller: &str, name: &str, description: Op
 
 // ---- Delivery ----
 
-/// Makes `dir` hold exactly a symlink per name in `wanted`, each to that skill's library folder.
-fn link_exactly(dir: &Path, library: &Path, wanted: &[String]) -> std::io::Result<()> {
+/// Makes `dir` hold a symlink per name in `wanted`, each to that skill's library folder, and removes
+/// the other links. Only links and files go; a real folder someone put there stays. With `add` false
+/// it only removes, for folders whose readers must see additions at a moment of their choosing.
+fn link_exactly(dir: &Path, library: &Path, wanted: &[String], add: bool) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     for entry in std::fs::read_dir(dir)?.filter_map(Result::ok) {
         let name = entry.file_name().to_string_lossy().into_owned();
         let target = library.join(&name);
         let keep = wanted.contains(&name) && std::fs::read_link(entry.path()).is_ok_and(|t| t == target);
-        if !keep {
-            let meta = entry.path().symlink_metadata()?;
-            if meta.is_dir() { std::fs::remove_dir_all(entry.path())? } else { std::fs::remove_file(entry.path())? }
+        let Ok(meta) = entry.path().symlink_metadata() else { continue };
+        if !keep && !meta.is_dir() {
+            match std::fs::remove_file(entry.path()) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
         }
+    }
+    if !add {
+        return Ok(());
     }
     for name in wanted {
         let link = dir.join(name);
         if link.symlink_metadata().is_err() {
-            std::os::unix::fs::symlink(library.join(name), link)?;
+            match std::os::unix::fs::symlink(library.join(name), link) {
+                Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+                _ => {}
+            }
         }
     }
     Ok(())
@@ -757,7 +810,7 @@ fn claude_plugin_in(db: &Db, root: &Path, agent: &Agent) -> Result<Option<PathBu
         return Ok(None);
     }
     let io = || -> std::io::Result<()> {
-        link_exactly(&dir.join("skills"), &library(root), &names)?;
+        link_exactly(&dir.join("skills"), &library(root), &names, true)?;
         let manifest = dir.join(".claude-plugin").join("plugin.json");
         if !manifest.exists() {
             std::fs::create_dir_all(manifest.parent().unwrap_or(&dir))?;
@@ -795,7 +848,7 @@ fn codex_in(db: &Db, root: &Path, agent: &Agent) -> Result<Option<CodexSkills>, 
     }
     let shared = shared_names(db)?;
     let dir = codex_root(root);
-    link_exactly(&dir, &library(root), &shared).map_err(|e| format!("Could not set up skills in {}: {e}", dir.display()))?;
+    link_exactly(&dir, &library(root), &shared, true).map_err(|e| format!("Could not set up skills in {}: {e}", dir.display()))?;
     let mine = enabled_names(db, &agent.id)?;
     // Codex reports skills by their real path, so name the library file, not the link.
     let disabled = shared
@@ -806,8 +859,12 @@ fn codex_in(db: &Db, root: &Path, agent: &Agent) -> Result<Option<CodexSkills>, 
             std::fs::canonicalize(&path).unwrap_or(path)
         })
         .collect();
-    let stamps: Vec<String> = rows(db)?.into_iter().filter(|r| mine.contains(&r.name)).map(|r| format!("{}@{}", r.name, r.updated_at)).collect();
-    Ok(Some(CodexSkills { root: dir, root_signature: shared.join(","), disabled, signature: format!("{}|{}", shared.join(","), stamps.join(",")) }))
+    let stamp = |r: &Row| format!("{}@{}", r.name, r.updated_at);
+    let rows = rows(db)?;
+    // An edited skill changes the root's signature too: Codex only reads changed files on a rescan.
+    let root_signature = rows.iter().filter(|r| shared.contains(&r.name)).map(stamp).collect::<Vec<_>>().join(",");
+    let mine_stamps = rows.iter().filter(|r| mine.contains(&r.name)).map(stamp).collect::<Vec<_>>().join(",");
+    Ok(Some(CodexSkills { root: dir, signature: format!("{root_signature}|{mine_stamps}"), root_signature, disabled }))
 }
 
 /// Changes when the skills `agent` has on change, so its Claude process restarts and loads them.
@@ -831,19 +888,19 @@ pub fn claude_signature(agent: &Agent) -> String {
 /// The `--plugin-dir` for a Claude familiar with skills on.
 pub fn claude_plugin(agent: &Agent) -> Option<PathBuf> {
     let (db, root) = installed()?;
+    let _writing = writing();
     claude_plugin_in(db, root, agent).unwrap_or_else(|e| {
         eprintln!("Skills are off for this turn: {e}");
         None
     })
 }
 
-/// The skill setup for a Codex familiar's thread.
-pub fn codex(agent: &Agent) -> Option<CodexSkills> {
-    let (db, root) = installed()?;
-    codex_in(db, root, agent).unwrap_or_else(|e| {
-        eprintln!("Skills are off for this turn: {e}");
-        None
-    })
+/// The skill setup for a Codex familiar's thread. An error fails the turn: the shared root may hold
+/// skills this familiar must not see, and only the setup knows which.
+pub fn codex(agent: &Agent) -> Result<Option<CodexSkills>, String> {
+    let Some((db, root)) = installed() else { return Ok(None) };
+    let _writing = writing();
+    codex_in(db, root, agent).map_err(|e| format!("Grimoire couldn't set up skills for this turn: {e}"))
 }
 
 /// Brings every delivery folder in line with the database: removes skills turned off or deleted, and
@@ -862,8 +919,10 @@ pub fn sync_in(db: &Db, root: &Path) {
                 }
             }
         }
+        // Only removals here. Codex threads must see an added skill only when a turn start adds it,
+        // alongside the config that turns it off for everyone else (see codex_in).
         let dir = codex_root(root);
-        link_exactly(&dir, &library(root), &shared_names(db)?).map_err(|e| e.to_string())
+        link_exactly(&dir, &library(root), &shared_names(db)?, false).map_err(|e| e.to_string())
     };
     if let Err(e) = run() {
         eprintln!("Couldn't update skill folders: {e}");
@@ -1017,7 +1076,8 @@ async fn get(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
     let host = tauri::Url::parse(url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_else(|| "GitHub".into());
     // --disable skips any ~/.curlrc, as in connectors.rs.
     let output = tokio::process::Command::new("/usr/bin/curl")
-        .args(["--disable", "-sS", "--proto", "=https", "--proto-redir", "=https", "-L", "--max-redirs", "3", "--max-time", "20"])
+        // No redirects: each URL is checked before it's fetched, and a redirect could leave GitHub.
+        .args(["--disable", "-sS", "--proto", "=https", "--max-time", "20"])
         .args(["--max-filesize", &max_bytes.to_string(), "-w", "\n%{http_code}", "-H", "User-Agent: Grimoire", url])
         .kill_on_drop(true)
         .output()
@@ -1035,12 +1095,15 @@ async fn get(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
         "200" => Ok(body),
         "404" => Err(format!("{host} has nothing at {url}. Check the link, and that the repository is public.")),
         "403" | "429" => Err("GitHub is limiting requests from this Mac. Try again in a few minutes.".into()),
+        s if s.starts_with('3') => Err(format!("{host} moved that to another address. Open the link in a browser and paste where it ends up.")),
         other => Err(format!("{host} answered with status {other}.")),
     }
 }
 
 fn raw_host_ok(url: &str) -> bool {
-    tauri::Url::parse(url).is_ok_and(|u| u.scheme() == "https" && u.host_str() == Some("raw.githubusercontent.com"))
+    tauri::Url::parse(url).is_ok_and(|u| {
+        u.scheme() == "https" && u.host_str() == Some("raw.githubusercontent.com") && u.username().is_empty() && u.password().is_none() && u.port().is_none()
+    })
 }
 
 /// Downloads a skill from GitHub: one SKILL.md, or a folder's text files.
@@ -1412,6 +1475,57 @@ mod tests {
     }
 
     #[test]
+    fn review_fixes_hold() {
+        // A block value with an explicit indent and a wide character neither panics nor misreads.
+        let wide = parse("---\nname: wide\ndescription: |2\n    \u{e9}t\u{e9} notes\n  m\u{e9}lange\n---\n").unwrap();
+        assert_eq!(wide.description, "\u{e9}t\u{e9} notes\nm\u{e9}lange", "values are trimmed");
+        assert!(parse("---\nname: w\ndescription: >\n  \u{3000}x\n \u{e9}\n---\n").is_ok());
+        // A SKILL.md that starts with a byte order mark still renames.
+        let mut bom = vec![SkillFile { path: MAIN_FILE.into(), text: format!("\u{feff}{}", md("report", "d")) }];
+        check_files(&mut bom).unwrap();
+        rename_main(&mut bom, "report-2").unwrap();
+        assert_eq!(parse(&bom[0].text).unwrap().name, "report-2");
+        // One spelling per path.
+        for twin in ["refs/./guide.md", "refs//guide.md", "refs/guide.md/"] {
+            let mut files = vec![SkillFile { path: MAIN_FILE.into(), text: md("ok", "d") }, SkillFile { path: twin.into(), text: String::new() }];
+            assert!(check_files(&mut files).is_err(), "{twin}");
+        }
+        // Download links must be plain raw.githubusercontent.com links.
+        assert!(raw_host_ok("https://raw.githubusercontent.com/a/b/main/x.md"));
+        for bad in ["https://raw.githubusercontent.com:444/a", "https://u:p@raw.githubusercontent.com/a", "http://raw.githubusercontent.com/a", "https://evil.example/a"] {
+            assert!(!raw_host_ok(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn folder_imports_skip_pipes() {
+        let dir = temp_root();
+        std::fs::write(dir.join(MAIN_FILE), md("piped", "d")).unwrap();
+        let fifo = std::ffi::CString::new(dir.join("pipe").to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let (files, notes) = read_folder(&dir).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(notes.iter().any(|n| n.contains("pipe")), "{notes:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_codex_root_gains_skills_only_at_a_turn_start() {
+        let (db, root) = setup();
+        add_in(&db, &root, preview_in(&db, &root, vec![SkillFile { path: MAIN_FILE.into(), text: md("late", "d") }], vec![], "you", None).unwrap()).unwrap();
+        // Turning it on for Ada updates Ada's plugin folder, but not the root Bo's threads scan.
+        set_for_agent_in(&db, &root, "ada", &["late".into()]).unwrap();
+        assert!(!codex_root(&root).join("late").exists());
+        let bo = db.get_agent("bo").unwrap().unwrap();
+        let first = codex_in(&db, &root, &bo).unwrap().unwrap();
+        assert!(codex_root(&root).join("late").exists() && first.disabled.len() == 1, "the turn start adds it with Bo's list turning it off");
+        // Editing a shared skill changes the root's signature, so Codex rescans it.
+        db.with(|c| c.execute("UPDATE skills SET updated_at = updated_at + 1 WHERE name = 'late'", [])).unwrap();
+        assert_ne!(codex_in(&db, &root, &bo).unwrap().unwrap().root_signature, first.root_signature);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn reads_github_links_only() {
         assert_eq!(
             parse_remote("https://github.com/anthropics/skills/tree/main/skills/pdf").unwrap(),
@@ -1442,6 +1556,8 @@ mod tests {
 
     /// Turns on one skill, asks for what it and a skill that's off say, then turns the second on and
     /// asks again in the same chat. Returns both replies.
+    /// Run each live test on its own (`cargo test -- --ignored --exact <name>`): `install` sets the
+    /// database once per process, so two in one run read the first one's.
     async fn live_skills(provider: Provider, model: &str) -> (String, String) {
         use crate::providers::{claude::Claude, codex::Codex, ProviderEvent};
         let root = test_root();
