@@ -9,6 +9,7 @@ import type * as Transfer from "./transfer";
 import type * as Templates from "./templates";
 import type * as Connectors from "./connectors";
 import type { Ledger } from "./ledgers";
+import type { CheckInRun, CheckInSettings, CheckInStatus } from "./checkins";
 
 export type Provider = "codex" | "claude";
 export type Access = "workspace" | "full";
@@ -839,6 +840,10 @@ export const api = {
   browserControl: (agentId: string, person: boolean) => invoke<BrowserStatus>("browser_control", { agentId, person }),
   browserNavigate: (agentId: string, url: string) => invoke<void>("browser_navigate", { agentId, url }),
   browserInput: (agentId: string, input: BrowserInput) => invoke<void>("browser_input", { agentId, input }),
+  getCheckins: (agentId: string) => invoke<CheckInStatus>("get_checkins", { agentId }),
+  saveCheckins: (agentId: string, settings: CheckInSettings) => invoke<CheckInStatus>("save_checkins", { agentId, settings }),
+  /** Recent check-ins that left something for the person, newest first. */
+  listCheckins: (agentId: string) => invoke<CheckInRun[]>("list_checkins", { agentId }),
 };
 
 export interface InboxOption {
@@ -898,7 +903,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload" | "companion_changed" | "browser_changed" | "browser_frame" | "connectors_changed" | "rooms_changed" | "room_message" | "room_delta" | "room_floor" | "telegram_changed",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload" | "companion_changed" | "browser_changed" | "browser_frame" | "connectors_changed" | "rooms_changed" | "room_message" | "room_delta" | "room_floor" | "telegram_changed" | "checkins_changed",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

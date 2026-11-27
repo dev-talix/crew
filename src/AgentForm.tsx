@@ -12,6 +12,8 @@ import TemplateImport from "./TemplateImport";
 import { followUntouched } from "./panel";
 import { toggleId, type Connector } from "./connectors";
 import "./connectors.css";
+import { CheckInsField } from "./CheckInSettings";
+import { sameSettings, settingsOf, type CheckInSettings, type CheckInStatus } from "./checkins";
 
 const ACCESS_HELP: Record<Provider, Record<Access, string>> = {
   codex: {
@@ -138,6 +140,16 @@ export default function AgentForm(props: {
       if (id) setEnabled(list.filter((c) => c.agents.includes(id)).map((c) => c.id));
     }, () => undefined);
   });
+  const [checkins, setCheckins] = createSignal<CheckInSettings | null>(null);
+  const [checkinStatus, setCheckinStatus] = createSignal<CheckInStatus | null>(null);
+  const loadCheckins = () => {
+    const id = props.agent?.id;
+    if (id && connectorsHere()) api.getCheckins(id).then(setCheckinStatus, () => undefined);
+  };
+  onSettled(loadCheckins);
+  onMountAsync(async (keep) => keep(await onEvent("checkins_changed", loadCheckins)));
+  // The form's copy starts from the saved settings and keeps the person's edits after a reload.
+  const checkinValue = () => checkins() ?? (checkinStatus() ? settingsOf(checkinStatus()!) : null);
   // Connectors go through the tool socket on this Mac, so familiars elsewhere can't use them yet.
   const connectorsHere = () => !linkedMac() && !remote() && !props.agent?.host && !props.agent?.home;
   let confirmTimer: number | undefined;
@@ -194,6 +206,12 @@ export default function AgentForm(props: {
         // A new familiar exists by now; failing here would invite a second Summon and a duplicate.
         // Its connectors can be turned on again in its settings.
         await (editing ? assigned : assigned.catch(() => undefined));
+      }
+      const edited = checkins();
+      const status = checkinStatus();
+      if (editing && edited && status && !sameSettings(edited, settingsOf(status))) {
+        setCheckinStatus(await api.saveCheckins(saved.id, edited));
+        setCheckins(null);
       }
       if (!editing && saved.setupPending) {
         setSavedPending(saved);
@@ -403,6 +421,10 @@ export default function AgentForm(props: {
                 </div>
               </Show>
             </div>
+          </Show>
+
+          <Show when={editing && checkinValue()}>
+            {(value) => <CheckInsField agent={props.agent!} value={value()} status={checkinStatus()} onChange={setCheckins} />}
           </Show>
 
           <div class="field wide">
