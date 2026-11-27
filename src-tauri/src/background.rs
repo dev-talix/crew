@@ -219,13 +219,21 @@ fn is_symlink(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
+/// The LaunchAgents folder, refused when it or ~/Library is a symlink, since either could point anywhere.
+fn checked_agent_dir(home: &Path) -> Result<PathBuf, String> {
+    let dir = agent_dir(home);
+    for path in [home.join("Library"), dir.clone()] {
+        if is_symlink(&path) {
+            return Err(format!("{} is a symlink, so Grimoire won't touch login items there.", path.display()));
+        }
+    }
+    Ok(dir)
+}
+
 /// Writes the login item through a temporary file in the same folder, so launchd never reads half a
 /// file. A symlinked folder or file could point anywhere, so it refuses those.
 fn write_agent(home: &Path, bundle_id: &str) -> Result<(), String> {
-    let dir = agent_dir(home);
-    if is_symlink(&dir) {
-        return Err(format!("{} is a symlink, so Grimoire won't write a login item there.", dir.display()));
-    }
+    let dir = checked_agent_dir(home)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't make {}: {e}", dir.display()))?;
     let path = agent_path(home);
     if is_symlink(&path) {
@@ -245,6 +253,7 @@ fn write_agent(home: &Path, bundle_id: &str) -> Result<(), String> {
 }
 
 fn remove_agent(home: &Path) -> Result<(), String> {
+    checked_agent_dir(home)?;
     match std::fs::remove_file(agent_path(home)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("Couldn't remove the login item: {e}")),
         _ => Ok(()),
@@ -259,15 +268,25 @@ fn launchctl(args: &[&str]) -> Result<std::process::Output, String> {
     Command::new("/bin/launchctl").args(args).stdin(Stdio::null()).output().map_err(|e| format!("launchctl didn't run: {e}"))
 }
 
+/// launchctl's exit code when the service isn't loaded in the domain.
+const NO_SUCH_SERVICE: i32 = 113;
+
+#[cfg(test)]
 fn loaded(label: &str) -> bool {
     launchctl(&["print", &service(label)]).is_ok_and(|o| o.status.success())
+}
+
+/// Whether launchctl confirms the service isn't loaded. Any other answer, like a missing domain,
+/// isn't proof.
+fn absent(label: &str) -> Result<bool, String> {
+    Ok(launchctl(&["print", &service(label)])?.status.code() == Some(NO_SUCH_SERVICE))
 }
 
 /// Unloads a login item from this GUI session. One that isn't loaded counts as unloaded; one that
 /// stays loaded is an error.
 fn unload(label: &str) -> Result<(), String> {
     let out = launchctl(&["bootout", &service(label)])?;
-    if out.status.success() || !loaded(label) {
+    if out.status.success() || absent(label)? {
         return Ok(());
     }
     let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -382,6 +401,17 @@ mod tests {
         std::os::unix::fs::symlink(&target, agent_path(&home)).unwrap();
         assert!(write_agent(&home, "dev.talix.grimoire").unwrap_err().contains("symlink"));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine");
+
+        // A symlinked ~/Library is refused for writing and removing.
+        let other = temp_home();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::create_dir_all(elsewhere.join("Library/LaunchAgents")).unwrap();
+        std::fs::write(elsewhere.join(format!("Library/LaunchAgents/{LABEL}.plist")), "theirs").unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("Library"), other.join("Library")).unwrap();
+        assert!(write_agent(&other, "dev.talix.grimoire").unwrap_err().contains("symlink"));
+        assert!(remove_agent(&other).unwrap_err().contains("symlink"));
+        assert_eq!(std::fs::read_to_string(elsewhere.join(format!("Library/LaunchAgents/{LABEL}.plist"))).unwrap(), "theirs");
+        let _ = std::fs::remove_dir_all(&other);
         let _ = std::fs::remove_dir_all(&home);
     }
 
