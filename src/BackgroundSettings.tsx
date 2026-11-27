@@ -1,8 +1,8 @@
 import { createSignal, For, Show } from "solid-js";
-import { api, errorText, type BackgroundSettings } from "./api";
+import { api, errorText, type BackgroundSettings, type BackgroundSwitch } from "./api";
 import { Toggle } from "./ui";
 
-const ROWS: { key: Exclude<keyof BackgroundSettings, "launchedInBackground">; title: string; detail: string }[] = [
+const ROWS: { key: BackgroundSwitch; title: string; detail: string }[] = [
   {
     key: "runInBackground",
     title: "Run in the background",
@@ -22,24 +22,23 @@ const ROWS: { key: Exclude<keyof BackgroundSettings, "launchedInBackground">; ti
 
 /** Settings, General: run Grimoire on an always-on Mac with no window. */
 export function BackgroundSection() {
-  const [settings, setSettings] = createSignal<BackgroundSettings>({
-    runInBackground: false,
-    startAtLogin: false,
-    keepAwake: false,
-    launchedInBackground: false,
-  });
+  // Null until the saved values load; the switches stay disabled until then and while a change saves.
+  const [settings, setSettings] = createSignal<BackgroundSettings | null>(null);
+  const [saving, setSaving] = createSignal<BackgroundSwitch | null>(null);
   const [error, setError] = createSignal("");
   api.backgroundSettings().then(setSettings, (e) => setError(errorText(e)));
 
-  const change = async (patch: Partial<BackgroundSettings>) => {
-    const before = settings();
-    setSettings({ ...before, ...patch });
+  const change = async (key: BackgroundSwitch, on: boolean) => {
+    if (saving() || !settings()) return;
+    setSaving(key);
     setError("");
     try {
-      setSettings(await api.saveBackgroundSettings({ ...before, ...patch }));
+      setSettings(await api.setBackgroundSwitch(key, on));
     } catch (e) {
       setError(errorText(e));
-      await api.backgroundSettings().then(setSettings, () => setSettings(before));
+      await api.backgroundSettings().then(setSettings, () => undefined);
+    } finally {
+      setSaving(null);
     }
   };
 
@@ -54,15 +53,23 @@ export function BackgroundSection() {
                 <div class="list-title">{row.title}</div>
                 <p class="settings-detail">{row.detail}</p>
               </div>
-              <Toggle label={row.title} checked={settings()[row.key]} onChange={(on) => void change({ [row.key]: on })} />
+              <Toggle
+                label={row.title}
+                checked={settings()?.[row.key] ?? false}
+                disabled={!settings() || saving() !== null}
+                onChange={(on) => void change(row.key, on)}
+              />
             </div>
           )}
         </For>
       </div>
       <p class="hint settings-footnote">
         For a Mac mini or Mac Studio that stays on. It needs a logged-in macOS session.
-        <Show when={settings().launchedInBackground}> Grimoire started in the background at login, so closing the window keeps it running until you quit.</Show>
+        <Show when={settings()?.launchedInBackground}> Grimoire started in the background at login, so closing the window keeps it running until you quit.</Show>
       </p>
+      <Show when={settings()?.keepAwake && !settings()?.awakeHolding}>
+        <div class="error-box settings-error">Keep awake is on, but caffeinate isn't running, so this Mac can still sleep.</div>
+      </Show>
       <Show when={error()}>
         <div class="error-box settings-error">{error()}</div>
       </Show>
