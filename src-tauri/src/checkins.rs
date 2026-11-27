@@ -42,8 +42,8 @@ pub const SEARCH_TOOL: &str = "search_chats";
 const SEARCH_MAX: i64 = 20;
 /// A room message for `search_chats`: id, room title, kind, author id and name, text, and time.
 type RoomRow = (i64, String, String, Option<String>, Option<String>, String, i64);
-/// How many of the latest room messages `search_chats` looks through.
-const ROOM_SCAN: i64 = 2000;
+/// How many room messages `search_chats` reads at a time.
+const ROOM_PAGE: i64 = 500;
 const KIND_CHECKIN: &str = "checkin";
 const KIND_REVIEW: &str = "review";
 /// The source label on the first message of a check-in's transcript.
@@ -744,18 +744,26 @@ pub fn search(db: &Db, agent_id: &str, query: &str, limit: i64) -> Result<Vec<Fo
         })
         .collect();
     if (found.len() as i64) < limit {
-        // Rooms aren't in the search index, so read the latest of their messages and match them here.
-        let rows: Vec<RoomRow> = db.with(|c| {
-            let mut stmt = c.prepare_cached(
-                "SELECT r.id, rooms.title, r.kind, r.agent_id, r.name, r.text, r.created_at FROM room_messages r JOIN rooms ON rooms.id = r.room_id
-                 WHERE r.room_id IN (SELECT room_id FROM room_members WHERE agent_id = ?1 UNION SELECT room_id FROM room_messages WHERE agent_id = ?1)
-                 AND r.kind IN ('user', 'reply') ORDER BY r.id DESC LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![agent_id, ROOM_SCAN], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?;
-            rows.collect()
-        })?;
-        let rooms = rows.into_iter().filter(|row| has_words(&row.5, &words)).take((limit - found.len() as i64) as usize);
-        found.extend(rooms.map(|(id, title, kind, author, name, text, at)| Found {
+        // Rooms aren't in the search index, so read their messages a page at a time, newest first, and
+        // match them here until there are enough.
+        let wanted = (limit - found.len() as i64) as usize;
+        let (mut rooms, mut before) = (Vec::new(), i64::MAX);
+        while rooms.len() < wanted {
+            let page: Vec<RoomRow> = db.with(|c| {
+                let mut stmt = c.prepare_cached(
+                    "SELECT r.id, rooms.title, r.kind, r.agent_id, r.name, r.text, r.created_at FROM room_messages r JOIN rooms ON rooms.id = r.room_id
+                     WHERE r.room_id IN (SELECT room_id FROM room_members WHERE agent_id = ?1 UNION SELECT room_id FROM room_messages WHERE agent_id = ?1)
+                     AND r.kind IN ('user', 'reply') AND r.id < ?2 ORDER BY r.id DESC LIMIT ?3",
+                )?;
+                let rows = stmt.query_map(params![agent_id, before, ROOM_PAGE], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?;
+                rows.collect()
+            })?;
+            let Some(last) = page.last() else { break };
+            before = last.0;
+            rooms.extend(page.into_iter().filter(|row| has_words(&row.5, &words)));
+        }
+        rooms.truncate(wanted);
+        found.extend(rooms.into_iter().map(|(id, title, kind, author, name, text, at)| Found {
             place: "room".into(),
             title,
             message_id: id,
@@ -1135,6 +1143,16 @@ mod tests {
         let percent = search(&db, "a", "100%", 10).unwrap();
         assert_eq!(percent.iter().map(|f| f.from.as_str()).collect::<Vec<_>>(), ["B"], "a % in the query is a plain character");
         assert!(search(&db, "b", "marmalade", 10).unwrap().iter().any(|f| f.title == "Secret"));
+        // Older matches are still found behind many newer messages.
+        db.with(|c| {
+            let mut stmt = c.prepare("INSERT INTO room_messages (room_id, agent_id, name, kind, text, status, created_at) VALUES ('r1', 'b', 'B', 'reply', 'unrelated', 'done', 8)")?;
+            for _ in 0..1200 {
+                stmt.execute([])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(search(&db, "a", "marmalade", 10).unwrap().iter().any(|f| f.place == "room"));
 
         assert!(search_tool(&db, "a", &json!({ "query": " -- " })).unwrap_err().contains("Give some words"));
         assert!(search_tool(&db, "a", &json!({ "query": "zebra" })).unwrap().starts_with("Nothing in your past chats"));

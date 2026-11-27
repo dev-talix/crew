@@ -408,7 +408,8 @@ always do, with notifications as Settings, Notifications says.
   and the transcript. The line under the switch says when the next one runs and how the last went.
 - A check-in runs with workspace-only access even when the familiar has full access (Codex's
   `workspace-write` sandbox, Claude's `acceptEdits`), so an unattended run never gets an unsandboxed
-  shell. Codex never asks for approvals there, so no command leaves its sandbox, and Claude gets no
+  shell. Codex never asks for approvals there, so no command leaves its sandbox, which has no network
+  and writes only to the workspace whatever your own Codex config says, and Claude gets no
   shell at all and no MCP servers from your own Claude settings. It can't use connectors, the vault,
   the browser, helpers, or other familiars; only the ledger, memory, inbox, drafts, `search_chats`,
   and `list_familiars` tools.

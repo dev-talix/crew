@@ -140,6 +140,17 @@ fn thread_params(agent: &Agent, tools_key: &str) -> Value {
         }
         params["config"] = json!({ "mcp_servers": servers });
     }
+    if crate::checkins::unattended(tools_key) {
+        // Whatever the person's own Codex config allows, an unattended turn's sandbox has no network
+        // and writes only to the workspace.
+        let sandbox = json!({ "network_access": false, "writable_roots": [], "exclude_tmpdir_env_var": true, "exclude_slash_tmp": true });
+        match params.get_mut("config").and_then(Value::as_object_mut) {
+            Some(config) => {
+                config.insert("sandbox_workspace_write".into(), sandbox);
+            }
+            None => params["config"] = json!({ "sandbox_workspace_write": sandbox }),
+        }
+    }
     if let Some(memory) = crate::briefing::session_prompt(agent) {
         params["developerInstructions"] = json!(memory);
     }
@@ -674,6 +685,35 @@ mod tests {
         assert_eq!(failed.0, vec![ProviderEvent::Failed("quota".into())]);
         let stopped = run(&[("turn/completed", json!({"turn":{"status":"interrupted","error":null}}))]);
         assert_eq!(stopped.0, vec![ProviderEvent::Stopped]);
+    }
+
+    #[test]
+    fn check_ins_get_a_closed_sandbox() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let agent = Agent {
+            id: "ci".into(),
+            name: "Ada".into(),
+            provider: crate::db::Provider::Codex,
+            model: None,
+            workspace: "/tmp/ada".into(),
+            access: Access::Workspace,
+            session_id: None,
+            avatar: crate::db::Avatar::for_seed("ci"),
+            effort: None,
+            active_model: None,
+            coven_id: None,
+            host: None,
+            created_at: 0,
+        };
+        db.insert_agent(&agent).unwrap();
+        assert!(thread_params(&agent, "ci")["config"].get("sandbox_workspace_write").is_none(), "an ordinary turn keeps the person's config");
+        let (_, chat) = crate::checkins::begin(&db, "ci", "checkin", "Check-in").unwrap();
+        let key = crate::side::lane_key("ci", &chat);
+        let params = thread_params(&agent, &key);
+        assert_eq!(params["approvalPolicy"], "never");
+        assert_eq!(params["config"]["sandbox_workspace_write"]["network_access"], false);
+        assert_eq!(params["config"]["sandbox_workspace_write"]["exclude_slash_tmp"], true);
+        crate::checkins::release(&chat);
     }
 
     #[test]
