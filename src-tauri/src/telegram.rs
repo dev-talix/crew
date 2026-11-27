@@ -7,6 +7,12 @@
 //! bots. A paired chat can pick a familiar that lives here, send it text, answer inbox questions,
 //! and close drafts, through the same `Actions` the phone companion uses. Approvals only get a
 //! heads-up: answering them stays on the Mac.
+//!
+//! Every pairing gets a new id. Buttons carry it, and so does everything queued to send. All state
+//! sits behind one lock, and before an update acts, the offset moves, or a message part goes out,
+//! Grimoire checks under that lock that Telegram is on and the pairing is still the current one.
+//! Lock order: `poller`, then `state`, then `pending`. `shown` may be held while taking `state`,
+//! never the other way round.
 
 use crate::approvals::Request;
 use crate::companion::Actions;
@@ -19,8 +25,7 @@ use crate::vault::SecretStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -56,6 +61,9 @@ struct Saved {
     offset: i64,
     /// The familiar plain text goes to.
     current: Option<String>,
+    /// The last pairing id handed out. Ids never repeat, so nothing from one pairing matches a later
+    /// one, even for the same account.
+    pairings: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,6 +73,9 @@ pub struct Owner {
     pub chat_id: i64,
     pub name: String,
     pub paired_at: i64,
+    /// This pairing's id.
+    #[serde(default)]
+    pub pairing: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -89,11 +100,42 @@ pub struct TelegramCode {
     pub link: Option<String>,
 }
 
-struct Pairing {
+struct Code {
     code: String,
     expires: Instant,
     misses: u8,
 }
+
+/// Everything that decides whether Telegram may act, behind one lock.
+struct State {
+    saved: Saved,
+    token: Option<String>,
+    /// Bumped whenever the poll loop stops. A loop started under an older one acts on nothing.
+    poll_loop: u64,
+}
+
+impl State {
+    /// The token and the paired chat while Telegram is on and `pairing` is the current pairing.
+    fn live(&self, pairing: u64) -> Option<(String, i64)> {
+        let owner = self.saved.owner.as_ref().filter(|o| o.pairing == pairing && self.saved.enabled)?;
+        Some((self.token.clone()?, owner.chat_id))
+    }
+
+    /// The current pairing while Telegram is on and has a token.
+    fn pairing(&self) -> Option<u64> {
+        let owner = self.saved.owner.as_ref().filter(|_| self.saved.enabled && self.token.is_some())?;
+        Some(owner.pairing)
+    }
+}
+
+/// Where a message goes: the chat of a pairing, or someone writing in before any pairing.
+#[derive(Debug, Clone, Copy)]
+enum To {
+    Pairing(u64),
+    Unpaired(i64),
+}
+
+type Poller = Option<tauri::async_runtime::JoinHandle<()>>;
 
 pub struct Telegram {
     db: Arc<Db>,
@@ -101,17 +143,12 @@ pub struct Telegram {
     actions: Arc<dyn Actions>,
     /// The Bot API's base URL. Tests point it at a local server.
     api: String,
-    token: Mutex<Option<String>>,
-    pairing: Mutex<Option<Pairing>>,
+    state: Mutex<State>,
+    code: Mutex<Option<Code>>,
     error: Mutex<Option<String>>,
-    /// Held while the saved state is read, changed, and written.
-    saved_lock: Mutex<()>,
-    poller: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
-    /// Bumped whenever the poll loop stops, so a loop that was mid-request drops what it got.
-    generation: AtomicU64,
-    /// The pairing (its `paired_at`) behind each message sent from Telegram whose turn hasn't ended,
-    /// by message id. A reply goes out only to the pairing that asked for it.
-    pending: Mutex<HashMap<i64, i64>>,
+    poller: Mutex<Poller>,
+    /// The pairing behind each message sent from Telegram whose turn hasn't ended, by message id.
+    pending: Mutex<HashMap<i64, u64>>,
     /// Open questions and drafts already in the chat, so each goes out once.
     shown: Mutex<HashSet<String>>,
     /// One message at a time, so a long reply's parts arrive in order.
@@ -204,11 +241,12 @@ fn keyboard(rows: Vec<Value>) -> Value {
     json!({ "inline_keyboard": rows })
 }
 
-fn button(text: &str, data: String) -> Value {
-    json!({ "text": text, "callback_data": data })
+/// A button for `pairing`. Its data reads `kind:pairing:rest`, well under Telegram's 64 bytes.
+fn button(text: &str, kind: char, pairing: u64, rest: &str) -> Value {
+    json!({ "text": text, "callback_data": format!("{kind}:{pairing}:{rest}") })
 }
 
-fn question_message(name: &str, question: &InboxItem) -> (String, Value) {
+fn question_message(name: &str, question: &InboxItem, pairing: u64) -> (String, Value) {
     let mut text = format!("{name} asks: {}", question.title);
     if !question.detail.is_empty() {
         text.push_str(&format!("\n\n{}", question.detail));
@@ -219,13 +257,13 @@ fn question_message(name: &str, question: &InboxItem) -> (String, Value) {
         .enumerate()
         .map(|(i, option)| {
             let label = if option.value == question.recommended { format!("{} (recommended)", option.label) } else { option.label.clone() };
-            json!([button(&label, format!("q:{}:{i}", question.id))])
+            json!([button(&label, 'q', pairing, &format!("{}:{i}", question.id))])
         })
         .collect();
     (text, keyboard(rows))
 }
 
-fn draft_message(name: &str, draft: &Draft) -> (String, Value) {
+fn draft_message(name: &str, draft: &Draft, pairing: u64) -> (String, Value) {
     let mut text = format!("{name} wrote a draft for you to send.\n{}", crate::notify::capitalize(&crate::drafts::what(draft)));
     if let Some(subject) = &draft.subject {
         text.push_str(&format!("\nSubject: {subject}"));
@@ -234,7 +272,7 @@ fn draft_message(name: &str, draft: &Draft) -> (String, Value) {
     if let Some(note) = &draft.note {
         text.push_str(&format!("\n\nWhy: {note}"));
     }
-    let row = json!([button("Mark sent", format!("d:{}:s", draft.id)), button("Discard", format!("d:{}:x", draft.id))]);
+    let row = json!([button("Mark sent", 'd', pairing, &format!("{}:s", draft.id)), button("Discard", 'd', pairing, &format!("{}:x", draft.id))]);
     (text, keyboard(vec![row]))
 }
 
@@ -253,17 +291,16 @@ impl Telegram {
             eprintln!("Couldn't read the Telegram bot token from the Keychain: {e}");
             None
         });
+        let saved = db.setting(STATE).ok().flatten().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
         let telegram = Telegram {
             db,
             secrets,
             actions,
             api,
-            token: Mutex::new(token),
-            pairing: Mutex::new(None),
+            state: Mutex::new(State { saved, token, poll_loop: 0 }),
+            code: Mutex::new(None),
             error: Mutex::new(None),
-            saved_lock: Mutex::new(()),
             poller: Mutex::new(None),
-            generation: AtomicU64::new(0),
             pending: Mutex::new(HashMap::new()),
             shown: Mutex::new(HashSet::new()),
             sending: tokio::sync::Mutex::new(()),
@@ -275,20 +312,40 @@ impl Telegram {
 
     // ----- State -----
 
-    fn saved(&self) -> Saved {
-        self.db.setting(STATE).ok().flatten().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+    fn lock(&self) -> Result<MutexGuard<'_, State>, String> {
+        self.state.lock().map_err(|_| POISONED.into())
+    }
+
+    /// Writes `saved` and makes it current. The caller holds the state lock.
+    fn store(&self, state: &mut State, saved: Saved) -> Result<(), String> {
+        self.db.set_setting(STATE, &serde_json::to_string(&saved).map_err(|e| e.to_string())?)?;
+        state.saved = saved;
+        Ok(())
     }
 
     fn change(&self, edit: impl FnOnce(&mut Saved)) -> Result<Saved, String> {
-        let _guard = self.saved_lock.lock().map_err(|_| POISONED)?;
-        let mut saved = self.saved();
+        let mut state = self.lock()?;
+        let mut saved = state.saved.clone();
         edit(&mut saved);
-        self.db.set_setting(STATE, &serde_json::to_string(&saved).map_err(|e| e.to_string())?)?;
+        self.store(&mut state, saved.clone())?;
         Ok(saved)
     }
 
-    fn token(&self) -> Option<String> {
-        self.token.lock().ok()?.clone()
+    fn saved(&self) -> Saved {
+        self.lock().map(|s| s.saved.clone()).unwrap_or_default()
+    }
+
+    /// The current pairing while Telegram is on and has a token.
+    fn pairing(&self) -> Option<u64> {
+        self.lock().ok()?.pairing()
+    }
+
+    /// Runs `act` under the state lock if Telegram is on and `pairing` is still current. None means the
+    /// pairing is gone, and whatever asked is dropped.
+    fn with_live<T>(&self, pairing: u64, act: impl FnOnce(&mut State) -> Result<T, String>) -> Option<Result<T, String>> {
+        let mut state = self.lock().ok()?;
+        state.live(pairing)?;
+        Some(act(&mut state))
     }
 
     fn set_error(&self, error: Option<String>) {
@@ -296,20 +353,6 @@ impl Telegram {
         if changed {
             self.actions.changed();
         }
-    }
-
-    /// The owner's chat while Telegram is on and has a token.
-    fn chat(&self) -> Option<i64> {
-        self.owner_here().map(|o| o.chat_id)
-    }
-
-    /// The paired owner while Telegram is on and has a token.
-    fn owner_here(&self) -> Option<Owner> {
-        let saved = self.saved();
-        if !saved.enabled || self.token().is_none() {
-            return None;
-        }
-        saved.owner
     }
 
     fn name(&self, agent_id: &str) -> String {
@@ -325,10 +368,13 @@ impl Telegram {
     }
 
     pub fn status(&self) -> Result<TelegramStatus, String> {
-        let saved = self.saved();
+        let (saved, has_token) = {
+            let state = self.lock()?;
+            (state.saved.clone(), state.token.is_some())
+        };
         Ok(TelegramStatus {
             enabled: saved.enabled,
-            has_token: self.token().is_some(),
+            has_token,
             bot: saved.bot,
             owner: saved.owner,
             current: saved.current.and_then(|id| self.familiar_here(&id).ok()).map(|a| a.name),
@@ -345,56 +391,78 @@ impl Telegram {
         }
         let me = self.call_with(token, "getMe", json!({})).await?;
         let bot = me["username"].as_str().filter(|n| valid_username(n)).map(String::from);
-        self.secrets.set(TOKEN_KEY, token).map_err(|e| format!("Couldn't save the token in the Keychain: {e}"))?;
         {
-            // Under the poller lock, so no loop can start between the new token and its reset offset.
-            let _poller = self.stop_locked()?;
-            let same_bot = self.token().is_some_and(|old| old.split(':').next() == token.split(':').next());
-            *self.token.lock().map_err(|_| POISONED)? = Some(token.to_string());
-            self.change(|s| {
-                s.bot = bot;
-                // A new bot has a new chat and its own update numbers.
-                if !same_bot {
-                    s.owner = None;
-                    s.current = None;
-                    s.offset = 0;
+            let mut poller = self.poller.lock().map_err(|_| POISONED)?;
+            let mut state = self.lock()?;
+            self.stop_locked(&mut poller, &mut state);
+            let old = state.token.clone();
+            if let Err(e) = self.secrets.set(TOKEN_KEY, token) {
+                // Nothing changed, so the old bot's loop carries on.
+                self.restart_locked(&mut poller, &mut state);
+                return Err(format!("Couldn't save the token in the Keychain: {e}"));
+            }
+            let same_bot = old.as_deref().is_some_and(|old| old.split(':').next() == token.split(':').next());
+            let mut saved = state.saved.clone();
+            saved.bot = bot;
+            // A new bot has a new chat and its own update numbers.
+            if !same_bot {
+                saved.owner = None;
+                saved.current = None;
+                saved.offset = 0;
+            }
+            if let Err(e) = self.store(&mut state, saved) {
+                // The Keychain goes back to the token the saved state belongs to, and polling stays off.
+                let restored = match &old {
+                    Some(old) => self.secrets.set(TOKEN_KEY, old),
+                    None => self.secrets.delete(TOKEN_KEY),
+                };
+                if let Err(r) = restored {
+                    eprintln!("Couldn't put the old Telegram token back in the Keychain: {r}");
                 }
-            })?;
+                return Err(e);
+            }
+            state.token = Some(token.to_string());
+            self.restart_locked(&mut poller, &mut state);
         }
-
         let commands = json!({ "commands": [{ "command": "familiars", "description": "Pick a familiar to talk to" }] });
-        if let Err(e) = self.call("setMyCommands", commands).await {
+        if let Err(e) = self.call_with(token, "setMyCommands", commands).await {
             eprintln!("Couldn't set the Telegram bot's commands: {e}");
         }
         self.set_error(None);
-        self.restart();
         self.actions.changed();
         self.status()
     }
 
     pub fn forget_token(self: &Arc<Self>) -> Result<TelegramStatus, String> {
-        let deleted = {
-            let _poller = self.stop_locked()?;
-            *self.token.lock().map_err(|_| POISONED)? = None;
-            *self.pairing.lock().map_err(|_| POISONED)? = None;
-            let deleted = self.secrets.delete(TOKEN_KEY);
-            self.change(|s| *s = Saved { enabled: s.enabled, ..Saved::default() })?;
-            deleted
-        };
+        {
+            let mut poller = self.poller.lock().map_err(|_| POISONED)?;
+            let mut state = self.lock()?;
+            self.secrets.delete(TOKEN_KEY).map_err(|e| format!("Couldn't delete the token from the Keychain: {e}"))?;
+            self.stop_locked(&mut poller, &mut state);
+            state.token = None;
+            let saved = Saved { enabled: state.saved.enabled, pairings: state.saved.pairings, ..Saved::default() };
+            self.store(&mut state, saved)?;
+            *self.code.lock().map_err(|_| POISONED)? = None;
+        }
+        self.forget_pending();
         self.set_error(None);
-        deleted.map_err(|e| format!("Couldn't delete the token from the Keychain: {e}"))?;
         self.actions.changed();
         self.status()
     }
 
     pub fn set_enabled(self: &Arc<Self>, enabled: bool) -> Result<TelegramStatus, String> {
-        self.stop();
-        self.change(|s| s.enabled = enabled)?;
+        {
+            let mut poller = self.poller.lock().map_err(|_| POISONED)?;
+            let mut state = self.lock()?;
+            let mut saved = state.saved.clone();
+            saved.enabled = enabled;
+            self.store(&mut state, saved)?;
+            self.restart_locked(&mut poller, &mut state);
+        }
         if !enabled {
-            *self.pairing.lock().map_err(|_| POISONED)? = None;
+            *self.code.lock().map_err(|_| POISONED)? = None;
             self.set_error(None);
         }
-        self.restart();
         self.actions.changed();
         self.status()
     }
@@ -409,73 +477,64 @@ impl Telegram {
         self.status()
     }
 
-    /// Whether the reply to `message_id`'s turn should go out: only when Telegram sent that message and
-    /// the pairing that sent it is still the one paired.
-    /// Returns the chat that asked, so the reply goes there even if the owner changes before it's sent.
-    fn reply_due(&self, message_id: i64) -> Option<i64> {
-        let asked = self.pending.lock().ok().and_then(|mut pending| pending.remove(&message_id))?;
-        self.owner_here().filter(|o| o.paired_at == asked).map(|o| o.chat_id)
+    /// The pairing that sent `message_id`, if Telegram sent it. Each message answers once.
+    fn reply_due(&self, message_id: i64) -> Option<u64> {
+        self.pending.lock().ok()?.remove(&message_id)
     }
 
-    /// Drops replies still owed to a pairing that's gone, and the entries of turns that were stopped
-    /// before they ran.
+    /// Drops what's owed to pairings that are gone, and entries for turns stopped before they ran.
     fn forget_pending(&self) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.clear();
         }
     }
 
-    /// Stops the poll loop. One that is waiting on Telegram drops whatever comes back.
-    fn stop(&self) {
-        drop(self.stop_locked());
-    }
-
-    /// `stop`, handing back the poller lock so the caller can change things before a loop restarts.
-    fn stop_locked(&self) -> Result<std::sync::MutexGuard<'_, Option<tauri::async_runtime::JoinHandle<()>>>, String> {
-        let mut poller = self.poller.lock().map_err(|_| POISONED)?;
-        self.generation.fetch_add(1, Ordering::SeqCst);
+    fn stop_locked(&self, poller: &mut Poller, state: &mut State) {
+        state.poll_loop += 1;
         if let Some(old) = poller.take() {
             old.abort();
         }
-        Ok(poller)
     }
 
     /// Stops the poll loop and starts a new one while Telegram is on and has a token. The loop keeps
     /// the token it started with, so it never asks one bot for another bot's updates.
+    fn restart_locked(self: &Arc<Self>, poller: &mut Poller, state: &mut State) {
+        self.stop_locked(poller, state);
+        if let (true, Some(token)) = (state.saved.enabled, state.token.clone()) {
+            *poller = Some(tauri::async_runtime::spawn(self.clone().poll(state.poll_loop, token)));
+        }
+    }
+
     fn restart(self: &Arc<Self>) {
-        let Ok(mut poller) = self.poller.lock() else { return };
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        if let Some(old) = poller.take() {
-            old.abort();
-        }
-        if let (true, Some(token)) = (self.saved().enabled, self.token()) {
-            *poller = Some(tauri::async_runtime::spawn(self.clone().poll(generation, token)));
-        }
+        let (Ok(mut poller), Ok(mut state)) = (self.poller.lock(), self.lock()) else { return };
+        self.restart_locked(&mut poller, &mut state);
     }
 
     // ----- Pairing -----
 
     pub fn start_pairing(&self) -> Result<TelegramCode, String> {
-        let saved = self.saved();
-        if self.token().is_none() {
-            return Err("Add your bot's token first.".into());
-        }
-        if !saved.enabled {
-            return Err("Turn on Telegram first.".into());
+        let (bot, ready) = {
+            let state = self.lock()?;
+            (state.saved.bot.clone(), (state.token.is_some(), state.saved.enabled))
+        };
+        match ready {
+            (false, _) => return Err("Add your bot's token first.".into()),
+            (_, false) => return Err("Turn on Telegram first.".into()),
+            _ => {}
         }
         let code = link::new_code();
-        *self.pairing.lock().map_err(|_| POISONED)? = Some(Pairing { code: code.clone(), expires: Instant::now() + link::CODE_TTL, misses: 0 });
-        let link = saved.bot.map(|bot| format!("https://t.me/{bot}?start={code}"));
+        *self.code.lock().map_err(|_| POISONED)? = Some(Code { code: code.clone(), expires: Instant::now() + link::CODE_TTL, misses: 0 });
+        let link = bot.map(|bot| format!("https://t.me/{bot}?start={code}"));
         Ok(TelegramCode { code, expires_at: now_ms() + link::CODE_TTL.as_millis() as i64, link })
     }
 
-    fn pairing_live(&self, now: Instant) -> bool {
-        self.pairing.lock().is_ok_and(|p| p.as_ref().is_some_and(|p| now < p.expires))
+    fn code_live(&self, now: Instant) -> bool {
+        self.code.lock().is_ok_and(|p| p.as_ref().is_some_and(|p| now < p.expires))
     }
 
     /// Whether `given` is the live code. A match uses it up, and so do too many misses.
     fn check_code(&self, given: &str, now: Instant) -> bool {
-        let Ok(mut slot) = self.pairing.lock() else { return false };
+        let Ok(mut slot) = self.code.lock() else { return false };
         let Some(pairing) = slot.as_mut() else { return false };
         if now >= pairing.expires {
             *slot = None;
@@ -494,32 +553,36 @@ impl Telegram {
 
     async fn pair(&self, user: i64, chat: i64, from: &Value, code: &str) {
         if !self.check_code(code, Instant::now()) {
-            if self.pairing_live(Instant::now()) {
-                self.say(chat, "That code didn't work. Check it in Grimoire's Settings, Channels.", None).await;
+            if self.code_live(Instant::now()) {
+                self.say(To::Unpaired(chat), "That code didn't work. Check it in Grimoire's Settings, Channels.", None).await;
             }
             return;
         }
-        let owner = Owner { user_id: user, chat_id: chat, name: owner_name(from), paired_at: now_ms() };
-        if let Err(e) = self.change(|s| {
-            s.owner = Some(owner);
-            s.current = None;
-        }) {
-            eprintln!("Couldn't save the Telegram pairing: {e}");
-            return;
-        }
+        let pairing = {
+            let Ok(mut state) = self.lock() else { return };
+            // Telegram may have been turned off, or someone else paired, since this update was confirmed.
+            if !state.saved.enabled || state.token.is_none() || state.saved.owner.is_some() {
+                return;
+            }
+            let mut saved = state.saved.clone();
+            saved.pairings += 1;
+            saved.owner = Some(Owner { user_id: user, chat_id: chat, name: owner_name(from), paired_at: now_ms(), pairing: saved.pairings });
+            saved.current = None;
+            let pairing = saved.pairings;
+            if let Err(e) = self.store(&mut state, saved) {
+                eprintln!("Couldn't save the Telegram pairing: {e}");
+                return;
+            }
+            pairing
+        };
         // What's open now stays on the Mac, including pushes a past pairing never got.
         self.unseen();
         self.forget_pending();
         self.actions.changed();
-        self.say(chat, &format!("Paired with Grimoire. {HELP}"), None).await;
+        self.say(To::Pairing(pairing), &format!("Paired with Grimoire. {HELP}"), None).await;
     }
 
     // ----- The Bot API -----
-
-    async fn call(&self, method: &str, body: Value) -> Result<Value, String> {
-        let token = self.token().ok_or("Add your bot's token first.")?;
-        self.call_with(&token, method, body).await
-    }
 
     async fn call_with(&self, token: &str, method: &str, body: Value) -> Result<Value, String> {
         let url = format!("{}/bot{token}/{method}", self.api);
@@ -538,10 +601,26 @@ impl Telegram {
         }))
     }
 
-    async fn poll(self: Arc<Self>, generation: u64, token: String) {
+    /// The token and chat for `to`, read under the state lock, or None when it may no longer be sent to.
+    fn resolve(&self, to: To) -> Option<(String, i64)> {
+        let state = self.lock().ok()?;
+        match to {
+            To::Pairing(pairing) => state.live(pairing),
+            To::Unpaired(chat) => (state.saved.enabled && state.saved.owner.is_none()).then(|| state.token.clone().map(|t| (t, chat))).flatten(),
+        }
+    }
+
+    /// Calls `method` for `to`'s chat, with `chat_id` filled in. Err when the pairing is gone.
+    async fn call_for(&self, to: To, method: &str, mut body: Value) -> Result<Value, String> {
+        let (token, chat) = self.resolve(to).ok_or("Telegram is off or paired again.")?;
+        body["chat_id"] = json!(chat);
+        self.call_with(&token, method, body).await
+    }
+
+    async fn poll(self: Arc<Self>, poll_loop: u64, token: String) {
         let mut wait = Duration::from_secs(1);
-        while self.generation.load(Ordering::SeqCst) == generation {
-            match self.poll_as(generation, &token).await {
+        while self.lock().is_ok_and(|s| s.poll_loop == poll_loop) {
+            match self.poll_as(poll_loop, &token).await {
                 Ok(()) => {
                     self.set_error(None);
                     wait = Duration::from_secs(1);
@@ -557,12 +636,22 @@ impl Telegram {
 
     #[cfg(test)]
     async fn poll_once(&self) -> Result<(), String> {
-        self.poll_as(self.generation.load(Ordering::SeqCst), &self.token().unwrap_or_default()).await
+        let (poll_loop, token) = {
+            let state = self.lock()?;
+            (state.poll_loop, state.token.clone().unwrap_or_default())
+        };
+        self.poll_as(poll_loop, &token).await
     }
 
-    /// One getUpdates call for the poll loop of `generation`. A stopped loop acts on nothing more.
-    async fn poll_as(&self, generation: u64, token: &str) -> Result<(), String> {
-        let offset = self.saved().offset;
+    /// One getUpdates call for `poll_loop`. A stopped loop acts on nothing it gets back.
+    async fn poll_as(&self, poll_loop: u64, token: &str) -> Result<(), String> {
+        let offset = {
+            let state = self.lock()?;
+            if state.poll_loop != poll_loop {
+                return Ok(());
+            }
+            state.saved.offset
+        };
         let mut body = json!({ "timeout": POLL_SECONDS, "allowed_updates": ["message", "callback_query"] });
         if offset > 0 {
             body["offset"] = json!(offset);
@@ -571,23 +660,23 @@ impl Telegram {
         for update in &updates {
             let Some(id) = update["update_id"].as_i64() else { continue };
             // Saved before acting, so a crash mid-update skips it instead of doing it twice. Updates
-            // after it stay unconfirmed and come back next time. The check runs under the state lock:
-            // a bot change bumps the generation before it resets the offset, so a stopped loop can
-            // neither act nor write over the reset.
-            let mut live = false;
-            self.change(|s| {
-                live = self.generation.load(Ordering::SeqCst) == generation;
-                if live {
-                    s.offset = s.offset.max(id + 1);
+            // after it stay unconfirmed and come back next time. The pairing it acts for is read in the
+            // same step, and each action checks it again under the lock.
+            let pairing = {
+                let mut state = self.lock()?;
+                if state.poll_loop != poll_loop || !state.saved.enabled {
+                    return Ok(());
                 }
-            })?;
-            if !live {
-                return Ok(());
-            }
+                let mut saved = state.saved.clone();
+                saved.offset = saved.offset.max(id + 1);
+                let pairing = saved.owner.as_ref().map(|o| o.pairing);
+                self.store(&mut state, saved)?;
+                pairing
+            };
             if let Some(message) = update.get("message") {
-                self.on_message(message).await;
+                self.on_message(message, pairing).await;
             } else if let Some(press) = update.get("callback_query") {
-                self.on_button(press).await;
+                self.on_button(press, pairing).await;
             }
         }
         Ok(())
@@ -595,11 +684,15 @@ impl Telegram {
 
     // ----- From the chat -----
 
-    async fn on_message(&self, message: &Value) {
+    /// Whether (user, chat) is `pairing`'s owner, with Telegram on.
+    fn is_owner(&self, pairing: u64, user: i64, chat: i64) -> bool {
+        self.lock().is_ok_and(|s| s.live(pairing).is_some() && s.saved.owner.as_ref().is_some_and(|o| o.user_id == user && o.chat_id == chat))
+    }
+
+    async fn on_message(&self, message: &Value, pairing: Option<u64>) {
         let Some((user, chat)) = private_sender(message) else { return };
         let text = message["text"].as_str().unwrap_or("").trim();
-        let saved = self.saved();
-        let Some(owner) = saved.owner else {
+        let Some(pairing) = pairing else {
             if let Some(("start", code)) = command(text).as_ref().map(|(n, a)| (n.as_str(), *a)) {
                 if !code.is_empty() {
                     self.pair(user, chat, &message["from"], code).await;
@@ -607,121 +700,143 @@ impl Telegram {
             }
             return;
         };
-        if owner.user_id != user || owner.chat_id != chat {
+        if !self.is_owner(pairing, user, chat) {
             return;
         }
+        let to = To::Pairing(pairing);
         let reply = match command(text) {
-            Some((name, _)) if name == "familiars" => return self.show_familiars(chat, saved.current.as_deref()).await,
+            Some((name, _)) if name == "familiars" => return self.show_familiars(pairing).await,
             Some((name, _)) if name == "start" || name == "help" => HELP.to_string(),
             Some(_) => "Grimoire knows /familiars and /help.".into(),
             None if text.is_empty() => "Grimoire only takes text messages for now.".into(),
-            None => match self.send(&owner, saved.current.as_deref(), text) {
-                Ok(()) => {
-                    let _ = self.call("sendChatAction", json!({ "chat_id": chat, "action": "typing" })).await;
+            None => match self.send(pairing, text) {
+                None => return,
+                Some(Ok(())) => {
+                    let _ = self.call_for(to, "sendChatAction", json!({ "action": "typing" })).await;
                     return;
                 }
-                Err(e) => e,
+                Some(Err(e)) => e,
             },
         };
-        self.say(chat, &reply, None).await;
+        self.say(to, &reply, None).await;
     }
 
-    fn send(&self, owner: &Owner, current: Option<&str>, text: &str) -> Result<(), String> {
-        let agent = self.familiar_here(current.ok_or("Pick a familiar first with /familiars.")?)?;
-        if text.chars().count() > MAX_TEXT_CHARS {
-            return Err(format!("Keep a message under {MAX_TEXT_CHARS} characters."));
-        }
-        // Held across the send, so a turn that ends at once still finds its entry when it looks.
-        let mut pending = self.pending.lock().map_err(|_| POISONED)?;
-        let message = self.actions.send(&agent.id, text.to_string(), SOURCE)?;
-        pending.insert(message.id, owner.paired_at);
-        Ok(())
+    /// Queues `text` for the current familiar, if `pairing` is still current. The runtime gets it under
+    /// the state lock, so an unpair or a turn-off that lands first stops it.
+    fn send(&self, pairing: u64, text: &str) -> Option<Result<(), String>> {
+        self.with_live(pairing, |state| {
+            let agent = self.familiar_here(state.saved.current.as_deref().ok_or("Pick a familiar first with /familiars.")?)?;
+            if text.chars().count() > MAX_TEXT_CHARS {
+                return Err(format!("Keep a message under {MAX_TEXT_CHARS} characters."));
+            }
+            // Held across the send, so a turn that ends at once still finds its entry.
+            let mut pending = self.pending.lock().map_err(|_| POISONED)?;
+            let message = self.actions.send(&agent.id, text.to_string(), SOURCE)?;
+            pending.insert(message.id, pairing);
+            Ok(())
+        })
     }
 
-    async fn show_familiars(&self, chat: i64, current: Option<&str>) {
+    async fn show_familiars(&self, pairing: u64) {
+        let current = self.saved().current;
         let agents: Vec<Agent> = self.db.list_agents().unwrap_or_default().into_iter().filter(|a| link::valid_id(&a.id)).take(MAX_BUTTONS).collect();
         if agents.is_empty() {
-            self.say(chat, "There are no familiars on this Mac yet.", None).await;
+            self.say(To::Pairing(pairing), "There are no familiars on this Mac yet.", None).await;
             return;
         }
         let rows = agents
             .iter()
             .map(|a| {
-                let label = if current == Some(a.id.as_str()) { format!("{} (current)", a.name) } else { a.name.clone() };
-                json!([button(&label, format!("f:{}", a.id))])
+                let label = if current.as_deref() == Some(a.id.as_str()) { format!("{} (current)", a.name) } else { a.name.clone() };
+                json!([button(&label, 'f', pairing, &a.id)])
             })
             .collect();
-        self.say(chat, "Who do you want to talk to?", Some(keyboard(rows))).await;
+        self.say(To::Pairing(pairing), "Who do you want to talk to?", Some(keyboard(rows))).await;
     }
 
-    async fn on_button(&self, press: &Value) {
+    async fn on_button(&self, press: &Value, pairing: Option<u64>) {
         let Some(id) = press["id"].as_str() else { return };
         let message = &press["message"];
-        let (Some(user), Some(chat), Some(message_id)) = (press["from"]["id"].as_i64(), message["chat"]["id"].as_i64(), message["message_id"].as_i64()) else {
+        let (Some(user), Some(chat), Some(message_id), Some(pairing)) = (press["from"]["id"].as_i64(), message["chat"]["id"].as_i64(), message["message_id"].as_i64(), pairing) else {
             return;
         };
-        let Some(owner) = self.saved().owner else { return };
-        if owner.user_id != user || owner.chat_id != chat {
+        if !self.is_owner(pairing, user, chat) {
             return;
         }
-        let result = self.press(press["data"].as_str().unwrap_or(""));
+        let to = To::Pairing(pairing);
+        let result = match self.press(pairing, press["data"].as_str().unwrap_or("")) {
+            None => return,
+            Some(result) => result,
+        };
         let note = match &result {
             Ok(text) | Err(text) => text.clone(),
         };
-        let _ = self.call("answerCallbackQuery", json!({ "callback_query_id": id, "text": clip(&note, 190), "show_alert": result.is_err() })).await;
+        let answer = json!({ "callback_query_id": id, "text": clip(&note, 190), "show_alert": result.is_err() });
+        if let Some((token, _)) = self.resolve(to) {
+            let _ = self.call_with(&token, "answerCallbackQuery", answer).await;
+        }
         if result.is_ok() {
             // Says what was picked and takes the buttons away.
             let text = clip(&format!("{}\n\n{note}", message["text"].as_str().unwrap_or("")), MAX_MESSAGE);
-            let _ = self.call("editMessageText", json!({ "chat_id": chat, "message_id": message_id, "text": text })).await;
+            let _ = self.call_for(to, "editMessageText", json!({ "message_id": message_id, "text": text })).await;
         }
     }
 
-    /// Does what a button asks. Each kind looks up its own item, so a button can't reach another kind.
-    fn press(&self, data: &str) -> Result<String, String> {
-        let (kind, rest) = data.split_once(':').ok_or(STALE)?;
-        match kind {
-            "f" => {
-                let agent = self.familiar_here(rest)?;
-                self.change(|s| s.current = Some(agent.id.clone()))?;
-                self.actions.changed();
-                Ok(format!("Talking to {}. Write your message.", agent.name))
+    /// Does what a button asks, under the state lock while `pairing` is current. A button from another
+    /// pairing is out of date. Each kind looks up its own item, so a button can't reach another kind.
+    fn press(&self, pairing: u64, data: &str) -> Option<Result<String, String>> {
+        self.with_live(pairing, |state| {
+            let mut parts = data.splitn(3, ':');
+            let (kind, from, rest) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+            if from.parse::<u64>().ok() != Some(pairing) {
+                return Err(STALE.into());
             }
-            "q" => {
-                let (id, index) = rest.rsplit_once(':').ok_or(STALE)?;
-                let index: usize = index.parse().map_err(|_| STALE)?;
-                let question = crate::inbox::open_questions(&self.db)?.into_iter().find(|q| q.id == id).ok_or("That question was already answered or dismissed.")?;
-                let option = question.options.get(index).ok_or(STALE)?.value.clone();
-                self.actions.answer_question(id, &option)?;
-                Ok(format!("You chose: {option}"))
+            match kind {
+                "f" => {
+                    let agent = self.familiar_here(rest)?;
+                    let mut saved = state.saved.clone();
+                    saved.current = Some(agent.id.clone());
+                    self.store(state, saved)?;
+                    self.actions.changed();
+                    Ok(format!("Talking to {}. Write your message.", agent.name))
+                }
+                "q" => {
+                    let (id, index) = rest.rsplit_once(':').ok_or(STALE)?;
+                    let index: usize = index.parse().map_err(|_| STALE)?;
+                    let question = crate::inbox::open_questions(&self.db)?.into_iter().find(|q| q.id == id).ok_or("That question was already answered or dismissed.")?;
+                    let option = question.options.get(index).ok_or(STALE)?.value.clone();
+                    self.actions.answer_question(id, &option)?;
+                    Ok(format!("You chose: {option}"))
+                }
+                "d" => {
+                    let (id, action) = rest.rsplit_once(':').ok_or(STALE)?;
+                    let sent = match action {
+                        "s" => true,
+                        "x" => false,
+                        _ => return Err(STALE.into()),
+                    };
+                    self.actions.close_draft(id, sent, None)?;
+                    Ok(if sent { "Marked sent." } else { "Discarded." }.into())
+                }
+                _ => Err(STALE.into()),
             }
-            "d" => {
-                let (id, action) = rest.rsplit_once(':').ok_or(STALE)?;
-                let sent = match action {
-                    "s" => true,
-                    "x" => false,
-                    _ => return Err(STALE.into()),
-                };
-                self.actions.close_draft(id, sent, None)?;
-                Ok(if sent { "Marked sent." } else { "Discarded." }.into())
-            }
-            _ => Err(STALE.into()),
-        }
+        })
     }
 
     // ----- To the chat -----
 
-    /// Sends text in as many messages as it takes, with the buttons on the last one. False when
-    /// Telegram refused a part.
-    async fn say(&self, chat: i64, text: &str, buttons: Option<Value>) -> bool {
+    /// Sends text in as many messages as it takes, with the buttons on the last one. Each part checks
+    /// again that `to` may still be sent to. False when a part didn't go out.
+    async fn say(&self, to: To, text: &str, buttons: Option<Value>) -> bool {
         let _turn = self.sending.lock().await;
         let parts = split(text);
         let last = parts.len() - 1;
         for (i, part) in parts.into_iter().enumerate() {
-            let mut body = json!({ "chat_id": chat, "text": part, "link_preview_options": { "is_disabled": true } });
+            let mut body = json!({ "text": part, "link_preview_options": { "is_disabled": true } });
             if let (true, Some(buttons)) = (i == last, &buttons) {
                 body["reply_markup"] = buttons.clone();
             }
-            if let Err(e) = self.call("sendMessage", body).await {
+            if let Err(e) = self.call_for(to, "sendMessage", body).await {
                 eprintln!("Couldn't send a Telegram message: {e}");
                 return false;
             }
@@ -729,10 +844,10 @@ impl Telegram {
         true
     }
 
-    async fn tell_owner(&self, text: &str, buttons: Option<Value>) -> bool {
-        match self.chat() {
-            Some(chat) => self.say(chat, text, buttons).await,
-            None => false,
+    /// The reply to `message_id`'s turn, for the pairing that sent the message.
+    async fn reply(&self, agent_id: &str, message_id: i64, outcome: &TurnOutcome) {
+        if let Some(pairing) = self.reply_due(message_id) {
+            self.say(To::Pairing(pairing), &reply_text(&self.name(agent_id), outcome), None).await;
         }
     }
 
@@ -750,17 +865,17 @@ impl Telegram {
 
     async fn push_inbox(&self) {
         let (questions, drafts) = self.unseen();
-        let Some(owner) = self.owner_here() else { return };
+        let Some(pairing) = self.pairing() else { return };
         let messages = questions
             .iter()
-            .map(|q| (format!("q:{}", q.id), question_message(&self.name(&q.agent_id), q)))
-            .chain(drafts.iter().map(|d| (format!("d:{}", d.id), draft_message(&self.name(&d.agent_id), d))));
+            .map(|q| (format!("q:{}", q.id), question_message(&self.name(&q.agent_id), q, pairing)))
+            .chain(drafts.iter().map(|d| (format!("d:{}", d.id), draft_message(&self.name(&d.agent_id), d, pairing))));
         for (key, (text, buttons)) in messages.collect::<Vec<_>>() {
             // One that didn't get through goes again with the next change to the inbox or drafts, unless
-            // the owner paired again meanwhile: a new pairing starts after what was open.
-            if !self.say(owner.chat_id, &text, Some(buttons)).await {
+            // the pairing changed meanwhile: a new pairing starts after what was open.
+            if !self.say(To::Pairing(pairing), &text, Some(buttons)).await {
                 if let Ok(mut shown) = self.shown.lock() {
-                    if self.owner_here().is_some_and(|now| now.paired_at == owner.paired_at) {
+                    if self.pairing() == Some(pairing) {
                         shown.remove(&key);
                     }
                 }
@@ -768,21 +883,17 @@ impl Telegram {
         }
     }
 
-    fn approval_text(&self, request: &Request) -> Option<String> {
-        if self.chat().is_none() || !crate::notify::load(&self.db).approvals {
-            return None;
-        }
+    fn approval_text(&self, request: &Request) -> Option<(u64, String)> {
+        let pairing = self.pairing().filter(|_| crate::notify::load(&self.db).approvals)?;
         let name = self.name(crate::side::split(&request.agent_id).0);
         let summary = crate::notify::approval_text(&name, request).1;
-        Some(format!("{name} needs your OK: {}. Open Grimoire to answer.", summary.trim_end_matches('.')))
+        Some((pairing, format!("{name} needs your OK: {}. Open Grimoire to answer.", summary.trim_end_matches('.'))))
     }
 
     /// A ritual or spell alert, when Settings, Notifications lets those through.
-    fn run_text(&self, title: String, body: String) -> Option<String> {
-        if self.chat().is_none() || !crate::notify::load(&self.db).runs {
-            return None;
-        }
-        Some(format!("{title}\n{body}"))
+    fn run_text(&self, title: String, body: String) -> Option<(u64, String)> {
+        let pairing = self.pairing().filter(|_| crate::notify::load(&self.db).runs)?;
+        Some((pairing, format!("{title}\n{body}")))
     }
 }
 
@@ -794,36 +905,34 @@ fn running() -> Result<&'static Arc<Telegram>, String> {
     TELEGRAM.get().ok_or_else(|| "Telegram isn't running.".into())
 }
 
-fn tell_owner(text: Option<String>) {
-    let (Some(telegram), Some(text)) = (TELEGRAM.get().cloned(), text) else { return };
+/// Sends a notice to the pairing that was current when it was made.
+fn notify_owner(notice: Option<(u64, String)>) {
+    let (Some(telegram), Some((pairing, text))) = (TELEGRAM.get().cloned(), notice) else { return };
     tauri::async_runtime::spawn(async move {
-        telegram.tell_owner(&text, None).await;
+        telegram.say(To::Pairing(pairing), &text, None).await;
     });
 }
 
-/// A turn ended. A turn a Telegram message started sends its reply back there.
+/// A turn ended, or was stopped before it ran. A turn a Telegram message started answers there.
 pub fn turn_ended(agent_id: &str, message_id: i64, outcome: &TurnOutcome) {
     let Some(telegram) = TELEGRAM.get().cloned() else { return };
-    let Some(chat) = telegram.reply_due(message_id) else { return };
-    let text = reply_text(&telegram.name(agent_id), outcome);
-    tauri::async_runtime::spawn(async move {
-        telegram.say(chat, &text, None).await;
-    });
+    let (agent_id, outcome) = (agent_id.to_string(), outcome.clone());
+    tauri::async_runtime::spawn(async move { telegram.reply(&agent_id, message_id, &outcome).await });
 }
 
 pub fn approval_requested(request: &Request) {
-    tell_owner(TELEGRAM.get().and_then(|t| t.approval_text(request)));
+    notify_owner(TELEGRAM.get().and_then(|t| t.approval_text(request)));
 }
 
 pub fn ritual_fired(ritual: &str, agent_id: &str) {
-    tell_owner(TELEGRAM.get().and_then(|t| {
+    notify_owner(TELEGRAM.get().and_then(|t| {
         let (title, body) = crate::notify::ritual_text(ritual, &t.name(agent_id));
         t.run_text(title, body)
     }));
 }
 
 pub fn spell_ended(spell: &str, state: &str, step: usize, total: usize, detail: Option<&str>) {
-    tell_owner(TELEGRAM.get().and_then(|t| {
+    notify_owner(TELEGRAM.get().and_then(|t| {
         let (title, body) = crate::notify::spell_text(spell, state, step, total, detail)?;
         t.run_text(title, body)
     }));
@@ -885,6 +994,7 @@ mod tests {
     use crate::drafts::Edits;
     use crate::vault::MemoryStore;
     use std::collections::VecDeque;
+    use std::sync::atomic::Ordering;
     use tokio::net::TcpListener;
 
     const TOKEN: &str = "123456:ABCdefGHIjklMNOpqrSTUvwxYZ01234567";
@@ -1073,11 +1183,11 @@ mod tests {
         s.telegram.poll_once().await.unwrap();
         assert!(s.telegram.saved().owner.is_none());
         assert_eq!(s.api.texts(), ["That code didn't work. Check it in Grimoire's Settings, Channels."], "a bare /start spends no try and gets no reply");
-        assert_eq!(s.telegram.pairing.lock().unwrap().as_ref().unwrap().misses, 1);
+        assert_eq!(s.telegram.code.lock().unwrap().as_ref().unwrap().misses, 1);
 
         let code = s.telegram.start_pairing().unwrap().code;
         assert!(!s.telegram.check_code(&code, Instant::now() + link::CODE_TTL), "expired");
-        assert!(s.telegram.pairing.lock().unwrap().is_none());
+        assert!(s.telegram.code.lock().unwrap().is_none());
 
         let code = s.telegram.start_pairing().unwrap().code;
         for _ in 0..link::CODE_TRIES {
@@ -1113,7 +1223,7 @@ mod tests {
             forwarded,
             from_bot,
             json!({ "update_id": 7, "channel_post": { "chat": { "id": -200, "type": "channel" }, "text": "post" } }),
-            press(8, 7, "f:ada"),
+            press(8, 7, "f:1:ada"),
             message(9, OWNER, private(OWNER), "hello"),
         ]);
         s.telegram.poll_once().await.unwrap();
@@ -1131,9 +1241,9 @@ mod tests {
         s.telegram.poll_once().await.unwrap();
         assert_eq!(s.api.texts(), ["Pick a familiar first with /familiars.", "Who do you want to talk to?"]);
         let picker = s.api.calls("sendMessage")[1].clone();
-        assert_eq!(picker["reply_markup"]["inline_keyboard"], json!([[{ "text": "Ada", "callback_data": "f:ada" }]]));
+        assert_eq!(picker["reply_markup"]["inline_keyboard"], json!([[{ "text": "Ada", "callback_data": "f:1:ada" }]]));
 
-        s.api.queue([press(4, OWNER, "f:ada"), press(5, OWNER, "f:peer:mac:ada"), message(6, OWNER, private(OWNER), " hi Ada ")]);
+        s.api.queue([press(4, OWNER, "f:1:ada"), press(5, OWNER, "f:1:peer:mac:ada"), message(6, OWNER, private(OWNER), " hi Ada ")]);
         s.telegram.poll_once().await.unwrap();
         assert_eq!(s.telegram.status().unwrap().current.as_deref(), Some("Ada"));
         let answers = s.api.calls("answerCallbackQuery");
@@ -1156,10 +1266,10 @@ mod tests {
         assert_eq!(pushed[0]["text"], "Ada asks: Ship it?");
         let id = crate::inbox::open_questions(&s.db).unwrap()[0].id.clone();
         let buttons = &pushed[0]["reply_markup"]["inline_keyboard"];
-        assert_eq!(buttons[0][0], json!({ "text": "Ship (recommended)", "callback_data": format!("q:{id}:0") }));
-        assert_eq!(buttons[1][0], json!({ "text": "Wait", "callback_data": format!("q:{id}:1") }));
+        assert_eq!(buttons[0][0], json!({ "text": "Ship (recommended)", "callback_data": format!("q:1:{id}:0") }));
+        assert_eq!(buttons[1][0], json!({ "text": "Wait", "callback_data": format!("q:1:{id}:1") }));
 
-        s.api.queue([press(2, 7, &format!("q:{id}:0")), press(3, OWNER, &format!("q:{id}:1")), press(4, OWNER, "d:d-1:s"), press(5, OWNER, "d:d-2:x")]);
+        s.api.queue([press(2, 7, &format!("q:1:{id}:0")), press(3, OWNER, &format!("q:1:{id}:1")), press(4, OWNER, "d:1:d-1:s"), press(5, OWNER, "d:1:d-2:x")]);
         s.telegram.poll_once().await.unwrap();
         assert_eq!(*s.actions.answered.lock().unwrap(), vec![(id, "Wait".to_string())]);
         assert_eq!(*s.actions.closed.lock().unwrap(), vec![("d-1".to_string(), true), ("d-2".to_string(), false)]);
@@ -1210,7 +1320,7 @@ mod tests {
         familiar(&s.db, "ada", "Ada");
         paired(&s).await;
         let reply = reply_text(&s.telegram.name("ada"), &TurnOutcome::Done(format!("{}\n{}", "x".repeat(4000), "y".repeat(100))));
-        s.telegram.tell_owner(&reply, None).await;
+        assert!(s.telegram.say(To::Pairing(1), &reply, None).await);
         assert_eq!(s.api.texts(), [format!("Ada: {}", "x".repeat(4000)), "y".repeat(100)]);
         assert!(s.api.calls("sendMessage").iter().all(|b| b["chat_id"] == json!(OWNER)));
     }
@@ -1261,13 +1371,13 @@ mod tests {
         let request = Request { id: "r1".into(), agent_id: "ada".into(), kind: "command", title: "Ada wants to run a command".into(), detail: "git push".into(), can_remember: true };
         assert_eq!(s.telegram.approval_text(&request), None, "nothing goes out before pairing");
         paired(&s).await;
-        assert_eq!(s.telegram.approval_text(&request).as_deref(), Some("Ada needs your OK: git push. Open Grimoire to answer."));
-        assert_eq!(s.telegram.run_text("Morning ran".into(), "Ada is working on it.".into()).as_deref(), Some("Morning ran\nAda is working on it."));
+        assert_eq!(s.telegram.approval_text(&request), Some((1, "Ada needs your OK: git push. Open Grimoire to answer.".into())));
+        assert_eq!(s.telegram.run_text("Morning ran".into(), "Ada is working on it.".into()), Some((1, "Morning ran\nAda is working on it.".into())));
         s.db.set_setting("notifications", r#"{"runs":false,"approvals":false}"#).unwrap();
         assert_eq!(s.telegram.run_text("Morning ran".into(), "x".into()), None);
         assert_eq!(s.telegram.approval_text(&request), None);
         // Answering an approval has no button to press.
-        assert_eq!(s.telegram.press("a:r1:once"), Err(STALE.into()));
+        assert_eq!(s.telegram.press(1, "a:1:r1"), Some(Err(STALE.into())));
     }
 
     #[tokio::test]
@@ -1277,38 +1387,113 @@ mod tests {
         paired(&s).await;
         s.telegram.change(|saved| saved.current = Some("ada".into())).unwrap();
         s.telegram.unpair().unwrap();
-        s.api.queue([message(2, OWNER, private(OWNER), "hello"), press(3, OWNER, "f:ada")]);
+        s.api.queue([message(2, OWNER, private(OWNER), "hello"), press(3, OWNER, "f:1:ada")]);
         s.telegram.poll_once().await.unwrap();
         assert!(s.actions.sent.lock().unwrap().is_empty());
         assert!(s.api.texts().is_empty());
-        assert_eq!(s.telegram.chat(), None);
+        assert_eq!(s.telegram.pairing(), None);
     }
 
     #[tokio::test]
-    async fn a_reply_reaches_only_the_owner_who_asked() {
+    async fn a_reply_reaches_only_the_pairing_that_asked() {
         let s = setup().await;
         familiar(&s.db, "ada", "Ada");
         paired(&s).await;
         s.telegram.change(|saved| saved.current = Some("ada".into())).unwrap();
         s.api.queue([message(2, OWNER, private(OWNER), "one"), message(3, OWNER, private(OWNER), "two")]);
         s.telegram.poll_once().await.unwrap();
-        assert_eq!(s.telegram.reply_due(2), Some(OWNER), "message 2's reply goes out, even before message 1's");
-        assert_eq!(s.telegram.reply_due(1), Some(OWNER));
-        assert_eq!((s.telegram.reply_due(1), s.telegram.reply_due(99)), (None, None), "a turn that didn't come from Telegram stays on the Mac");
+        s.api.clear();
+        s.telegram.reply("ada", 2, &TurnOutcome::Done("second".into())).await;
+        s.telegram.reply("ada", 1, &TurnOutcome::Done("first".into())).await;
+        s.telegram.reply("ada", 1, &TurnOutcome::Done("again".into())).await;
+        s.telegram.reply("ada", 99, &TurnOutcome::Done("not from Telegram".into())).await;
+        assert_eq!(s.api.texts(), ["Ada: second", "Ada: first"], "each Telegram message answers once, in any order");
 
-        // A turn from the old pairing still running when the owner pairs again doesn't reach the new
-        // pairing, and doesn't take the new pairing's reply.
+        // The same account pairs again while a turn from the old pairing runs. The old reply stays
+        // quiet; the new pairing's reply goes out.
         s.api.queue([message(4, OWNER, private(OWNER), "old")]);
         s.telegram.poll_once().await.unwrap();
         s.telegram.unpair().unwrap();
         let code = s.telegram.start_pairing().unwrap().code;
         s.api.queue([message(5, OWNER, private(OWNER), &format!("/start {code}"))]);
         s.telegram.poll_once().await.unwrap();
+        assert_eq!(s.telegram.pairing(), Some(2));
         s.telegram.change(|saved| saved.current = Some("ada".into())).unwrap();
         s.api.queue([message(6, OWNER, private(OWNER), "new")]);
         s.telegram.poll_once().await.unwrap();
-        assert_eq!(s.telegram.reply_due(3), None, "the old turn ends and stays quiet");
-        assert_eq!(s.telegram.reply_due(4), Some(OWNER), "the new turn's reply goes out");
+        s.api.clear();
+        s.telegram.reply("ada", 3, &TurnOutcome::Done("old reply".into())).await;
+        s.telegram.reply("ada", 4, &TurnOutcome::Done("new reply".into())).await;
+        assert_eq!(s.api.texts(), ["Ada: new reply"]);
+    }
+
+    #[tokio::test]
+    async fn a_send_queued_before_unpairing_or_turning_off_never_goes_out() {
+        let s = setup().await;
+        familiar(&s.db, "ada", "Ada");
+        paired(&s).await;
+        s.telegram.change(|saved| saved.current = Some("ada".into())).unwrap();
+        s.api.queue([message(2, OWNER, private(OWNER), "one")]);
+        s.telegram.poll_once().await.unwrap();
+        let pairing = s.telegram.reply_due(1).unwrap();
+        s.telegram.unpair().unwrap();
+        s.api.clear();
+        assert!(!s.telegram.say(To::Pairing(pairing), "late reply", None).await);
+        assert!(s.api.calls("sendMessage").is_empty());
+
+        let s = setup().await;
+        paired(&s).await;
+        s.telegram.set_enabled(false).unwrap();
+        assert!(!s.telegram.say(To::Pairing(1), "late notice", None).await);
+        assert!(s.api.calls("sendMessage").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stopped_turn_tells_the_chat_that_asked() {
+        let s = setup().await;
+        familiar(&s.db, "ada", "Ada");
+        paired(&s).await;
+        s.telegram.change(|saved| saved.current = Some("ada".into())).unwrap();
+        s.api.queue([message(2, OWNER, private(OWNER), "queued")]);
+        s.telegram.poll_once().await.unwrap();
+        s.api.clear();
+        s.telegram.reply("ada", 1, &TurnOutcome::Stopped).await;
+        assert_eq!(s.api.texts(), ["Ada stopped."]);
+        assert_eq!(s.telegram.reply_due(1), None, "the entry is gone");
+    }
+
+    #[tokio::test]
+    async fn an_old_button_does_nothing_after_the_same_account_pairs_again() {
+        let s = setup().await;
+        familiar(&s.db, "ada", "Ada");
+        familiar(&s.db, "bob", "Bob");
+        paired(&s).await;
+        s.telegram.unpair().unwrap();
+        let code = s.telegram.start_pairing().unwrap().code;
+        s.api.queue([message(2, OWNER, private(OWNER), &format!("/start {code}"))]);
+        s.telegram.poll_once().await.unwrap();
+        s.api.clear();
+        s.api.queue([press(3, OWNER, "f:1:ada"), press(4, OWNER, "f:2:bob")]);
+        s.telegram.poll_once().await.unwrap();
+        let answers = s.api.calls("answerCallbackQuery");
+        assert_eq!((answers[0]["text"].as_str(), answers[0]["show_alert"].as_bool()), (Some(STALE), Some(true)));
+        assert_eq!(s.telegram.status().unwrap().current.as_deref(), Some("Bob"));
+    }
+
+    #[tokio::test]
+    async fn an_update_confirmed_before_a_revocation_does_nothing_after_it() {
+        let s = setup().await;
+        familiar(&s.db, "ada", "Ada");
+        paired(&s).await;
+        s.telegram.change(|saved| saved.current = Some("ada".into())).unwrap();
+        let update = message(2, OWNER, private(OWNER), "hello");
+        let button = press(3, OWNER, "f:1:ada");
+        s.telegram.unpair().unwrap();
+        s.telegram.on_message(&update["message"], Some(1)).await;
+        s.telegram.on_button(&button["callback_query"], Some(1)).await;
+        assert!(s.actions.sent.lock().unwrap().is_empty());
+        assert!(s.api.calls("answerCallbackQuery").is_empty() && s.api.texts().is_empty());
+        assert_eq!(s.telegram.press(1, "f:1:ada"), None, "pressing checks the pairing under the lock too");
     }
 
     #[tokio::test]
@@ -1317,8 +1502,8 @@ mod tests {
         familiar(&s.db, "ada", "Ada");
         paired(&s).await;
         s.telegram.change(|saved| saved.current = Some("ada".into())).unwrap();
-        let old = s.telegram.generation.load(Ordering::SeqCst);
-        s.telegram.stop();
+        let old = s.telegram.lock().unwrap().poll_loop;
+        s.telegram.lock().unwrap().poll_loop += 1;
         s.api.queue([message(5, OWNER, private(OWNER), "late")]);
         s.telegram.poll_as(old, TOKEN).await.unwrap();
         assert!(s.actions.sent.lock().unwrap().is_empty());
@@ -1360,7 +1545,36 @@ mod tests {
     #[tokio::test]
     async fn errors_never_carry_the_token() {
         let s = setup().await;
-        let error = s.telegram.call("echo", json!({})).await.unwrap_err();
+        let error = s.telegram.call_with(TOKEN, "echo", json!({})).await.unwrap_err();
         assert!(error.contains("<token>") && !error.contains(TOKEN), "{error}");
+    }
+
+    /// A Keychain that refuses to save.
+    struct LockedKeychain;
+
+    impl SecretStore for LockedKeychain {
+        fn set(&self, _id: &str, _value: &str) -> Result<(), String> {
+            Err("The Keychain is locked.".into())
+        }
+        fn get(&self, _id: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn delete(&self, _id: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_token_the_keychain_refuses_changes_nothing() {
+        let api = FakeApi::default();
+        let address = api.start().await;
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let telegram = Telegram::new(db.clone(), Arc::new(LockedKeychain), Arc::new(FakeActions::default()), address);
+        let error = telegram.set_token(TOKEN).await.unwrap_err();
+        assert!(error.contains("Keychain is locked"), "{error}");
+        let status = telegram.status().unwrap();
+        assert_eq!((status.has_token, status.bot), (false, None));
+        assert_eq!(db.setting(STATE).unwrap(), None, "the saved state wasn't touched");
+        assert!(api.calls("setMyCommands").is_empty());
     }
 }

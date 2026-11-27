@@ -266,6 +266,7 @@ impl Runtime {
         };
         for job in cancelled {
             self.update_status(job.message_id, agent_id, "cancelled");
+            crate::telegram::turn_ended(agent_id, job.message_id, &TurnOutcome::Stopped);
             if let Some(reply) = job.reply {
                 let _ = reply.send(TurnOutcome::Stopped);
             }
