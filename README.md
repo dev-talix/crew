@@ -32,6 +32,9 @@
   row the room pauses until you write again. Each familiar answers on its own session for the room,
   reads what was said since its last turn, and every reply can show exactly what it was sent.
 - **Memory** carries rules, facts, and project notes from one chat to the next, for each familiar and each coven.
+- **Skills** are SKILL.md instructions for one kind of task, the format Claude Code and Codex read
+  on their own. Add them in Settings, Skills, turn each on per familiar, and familiars save their own
+  after they solve something they'd do again.
 - **Ledgers** keep each familiar's goal, status, and what it's waiting on. A familiar gets its ledger
   when a chat starts and updates it with `update_ledger`; you edit it in the strip under the chat bar.
 - **Rituals** send a familiar the same message, or cast a spell, on a schedule, like a morning summary.
@@ -249,6 +252,7 @@ message, since you have to fix those yourself.
 
 What doesn't cross machines yet: Grimoire's tools (saving memory, making spells and themes, the
 vault, Mac apps, and asking other familiars) need a socket on this Mac, so remote familiars run without them.
+Skills live on this Mac too, so remote familiars don't get them.
 They still get their memory when a chat starts, and other familiars can still ask them. Attachments
 are refused, and Finder can't open the workspace. The host can't be changed after you summon the
 familiar. Your Permissions rules still apply, since Codex and Claude ask Grimoire over the same
@@ -360,6 +364,55 @@ entry, with the 16 KB limit and who last changed it. The files live in `memory/`
 (`<id>.md`) reads as facts, one per line or list item, and becomes a `.json` file the first time it
 changes, with the old file kept as `.md.bak`. Backups carry memory, and importing an older backup
 turns its markdown memory into facts. Deleting a familiar or coven deletes its memory.
+
+## Skills
+
+A skill is a folder with a SKILL.md: frontmatter with a `name` and a `description`, then
+instructions in Markdown, plus any files beside it, like a script or a reference page. It's the open
+[Agent Skills](https://agentskills.io) format, so skills written for Claude Code or Codex work as
+they are. The CLI reads each description to decide when a skill fits, then follows its
+instructions.
+
+```markdown
+---
+name: weekly-report
+description: Writes the weekly report from merged pull requests. Use when asked for the weekly report.
+---
+
+1. List the pull requests merged since last Monday with `gh pr list --state merged`.
+2. ...
+```
+
+Settings, Skills lists the library: each skill's description, who made it, and which familiars have
+it on. Click one to read every file. Add a skill by pasting a SKILL.md, picking a folder, or pasting
+a GitHub link to a SKILL.md or to a skill's folder, like
+`https://github.com/owner/repo/tree/main/skills/pdf`. Grimoire shows every file in full before it
+saves anything. It brings text files only, up to 50 files and 1 MB per skill, and leaves out hidden
+files and links. GitHub links are read over https from github.com and raw.githubusercontent.com,
+without a sign-in, so the repository has to be public. A name you already have gets "-2". New
+skills start turned off for every familiar; turn each on in a familiar's settings.
+
+Familiars have three tools for skills:
+
+- `list_skills` shows the skills a familiar has on and the rest of the library, with who made each.
+  A skill someone else wrote stays unread until you turn it on for that familiar.
+- `create_skill` saves a new skill with a name, description, and body, credited to the familiar and
+  turned on for it alone. Familiars are told to save one after they solve a task they'd repeat.
+- `update_skill` changes a skill the familiar made. It can't change yours or another familiar's.
+
+A change reaches a familiar on its next turn, in the same chat. Skills never go into a familiar's
+workspace or into `~/.claude` or `~/.codex`:
+
+- **Claude** gets `--plugin-dir`, pointing at a folder Grimoire keeps for that familiar
+  (`skill-plugins/<familiar id>` in the data folder) with a link to each skill it has on. Its
+  process restarts and resumes the chat when the list changes.
+- **Codex** familiars share one app server, so Grimoire gives it one extra skill folder
+  (`skill-roots/codex`) with links to every skill some familiar has on, and each familiar's thread
+  config turns off the ones that familiar doesn't have. A skill nobody has on is in neither.
+
+The skills themselves live in `skills/<name>/` in the data folder. Deleting a skill deletes its
+folder and turns it off everywhere. Grimoire doesn't run a skill's scripts itself; a familiar runs
+them with its own access, like any other command.
 
 ## Spells and rituals
 
@@ -665,15 +718,16 @@ themes from the theme editor. Each becomes one JSON file, like `Researcher.grimo
 - A spell names the familiar for each step, so it works on another Mac with familiars of those names.
 - A coven carries its members' names. A theme is the same JSON as a file in the themes folder.
 
-Settings, General, "Export a backup" saves familiars and covens with their memory, spells, rituals, your themes, and
-settings (Claude billing, the dock, permission rules, and the plan limit guard) in one file. Chat
+Settings, General, "Export a backup" saves familiars and covens with their memory, spells, rituals, your themes, skills
+with the familiars that have each on, and settings (Claude billing, the dock, permission rules, and the plan limit guard) in one file. Chat
 history goes in only when you tick "Include chat history". Vault items, Keychain secrets, and vault
 grants never do.
 
 "Import" takes a backup or any shared file and shows what it adds first. Everything gets a new id.
 A name you already have gets " (2)". Spell steps, rituals, and coven members point at the familiars
 the file brings, or else at yours with the same name; anything that can't be placed is listed and left
-out. Imported familiars get new workspace folders under `~/Grimoire`, and the rows go in one
+out. A skill comes in turned on only for the familiars the file brings; for one of yours with the same
+name it comes in off. Imported familiars get new workspace folders under `~/Grimoire`, and the rows go in one
 transaction. A familiar the file gives full access comes in with workspace access, unless you turn on
 "Keep full access" in the preview.
 
@@ -686,17 +740,19 @@ from Browse. The marketplace has no public API or export format. Grimoire reads 
 public pages carry for their own rendering, so import can stop working when x.ai changes those pages.
 Private bots, and share links that aren't listed in the marketplace, can't be imported.
 
-Grimoire has no persona field, so a template maps onto memory and rituals:
+Grimoire has no persona field, so a template maps onto memory, skills, and rituals:
 
-- The description, any instructions, its memories, and its skills become rules. Grimoire can't run Grok
-  skills, so each skill comes in as "When asked to <skill>: <what it does>". Long text is split to fit
+- The description, any instructions, and its memories become rules. Long text is split to fit
   memory's entry limit, and rows past the 16 KB limit start unchecked.
+- Its skills become Grimoire skills, turned on for the new familiar only. The skill's title gives its
+  name, its text the instructions, and "Use when asked to <title>" plus the first sentence the
+  description.
 - Its integrations become one fact naming the apps it expected. Grimoire connects none of them.
 - Its routines become rituals. Templates describe schedules in words, so Grimoire guesses a daily or
   weekly time, and every ritual comes in turned off.
 
-The preview shows what the template asks for, and you can edit or drop every rule and ritual before
-anything is created. The text is someone else's, so the familiar gets workspace access and no tools
+The preview shows what the template asks for, and you can edit or drop every rule, skill, and ritual
+before anything is created. The text is someone else's, so the familiar gets workspace access and no tools
 unless you turn on full access in the preview. The familiar is created through the same path as
 "Import", in one transaction.
 
@@ -783,17 +839,17 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
 - **Familiar tools.** Grimoire gives each familiar an MCP server named `grimoire` (`--mcp-config`
   for Claude, thread config for Codex) with `list_familiars`, `list_spells`, `create_spell`,
   `list_themes`, `create_theme`, `set_theme`, `vault_search`, `vault_use`, `ask_familiar`,
-  `read_memory`, `remember`, `forget_memory`, and `search_chats`, plus the [Mac app](#mac-apps) tools a
-  familiar has turned on. The CLI starts `grimoire mcp <socket> <agent-id>`, which asks the app for
-  that familiar's tool list and relays calls to the app over `grimoire.sock` in its data folder
-  (owner-only). Each server gets
+  `read_memory`, `remember`, `forget_memory`, `search_chats`, `list_skills`, `create_skill`, and
+  `update_skill`, plus the [Mac app](#mac-apps) tools a familiar has turned on. The CLI starts
+  `grimoire mcp <socket> <agent-id>`, which asks the app for that familiar's tool list and relays
+  calls to the app over `grimoire.sock` in its data folder (owner-only). Each server gets
   a random token for its familiar in `GRIMOIRE_TOOLS_TOKEN`, and the app refuses a call whose token
   doesn't match the familiar it names. Familiars can't cast, edit, or delete spells.
 - **Claude billing.** With "Claude subscription" (the default), Grimoire removes
   `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` from the `claude` process
   so it uses your claude.ai Pro or Max sign-in. "API key" leaves them in place.
 - **Storage.** `~/Library/Application Support/dev.talix.grimoire/grimoire.db`, with your themes in
-  `themes/`, memories in `memory/`, and attachments in `attachments/` beside it. Default workspaces go under `~/Grimoire`. Deleting a familiar keeps its
+  `themes/`, memories in `memory/`, skills in `skills/`, and attachments in `attachments/` beside it. Default workspaces go under `~/Grimoire`. Deleting a familiar keeps its
   workspace folder.
 - **Names.** The code calls a familiar an agent, a spell a workflow, and a ritual a routine.
 
@@ -802,7 +858,7 @@ bunx tauri icon app-icon.png    # then delete the android and ios folders it add
 ## Checks
 
 ```sh
-bun run test                     # timeline, models, chat store, palette, moods, themes, spells, budgets, imports
+bun run test                     # timeline, models, chat store, palette, moods, themes, spells, budgets, imports, skills
 bun run build                    # typechecks the app and its tests, then builds dist/
 cd src-tauri
 cargo test                       # unit tests
