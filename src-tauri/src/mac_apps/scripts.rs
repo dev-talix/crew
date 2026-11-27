@@ -78,10 +78,8 @@ function run(argv) {
   var msgs = boxes[0].messages.whose({ id: a.id })();
   if (msgs.length === 0) return JSON.stringify({ error: 'no_message' });
   var m = msgs[0];
-  var body = m.content() || '';
-  // Cutting between the halves of an emoji leaves text that isn't valid JSON for Grimoire.
-  var cut = body.slice(0, a.cap);
-  if (/[\ud800-\udbff]$/.test(cut)) cut = cut.slice(0, -1);
+  // Counted in characters, as Rust counts them, so an emoji is one and is never cut in half.
+  var chars = Array.from(m.content() || '');
   var people = function (list) {
     return list.slice(0, 50).map(function (r) {
       var name = r.name(), address = r.address();
@@ -90,7 +88,7 @@ function run(argv) {
   };
   return JSON.stringify({
     subject: m.subject() || '', from: m.sender() || '', to: people(m.toRecipients()), cc: people(m.ccRecipients()),
-    date: Math.floor(m.dateReceived().getTime() / 1000), body: cut, length: body.length
+    date: Math.floor(m.dateReceived().getTime() / 1000), body: chars.slice(0, a.cap).join(''), length: chars.length
   });
 }
 "#;
@@ -363,9 +361,9 @@ var FAKE = { running: value(true), inbox: { messages: spec([msg]) }, accounts: s
         }
         // A cap that lands inside the emoji drops its first half instead of breaking the JSON.
         let message = parse_mail_read(&run_against_fake(MAIL_READ, json!({ "id": 42, "mailbox": "INBOX", "account": "iCloud", "cap": 10 }))).unwrap();
-        assert_eq!(message.body, "aaaaaaaaa");
+        assert_eq!(message.body, "aaaaaaaaa😀", "the emoji counts as one character");
         assert_eq!(message.to, ["Me <me@x.com>"]);
-        assert_eq!(message.length, 20);
+        assert_eq!(message.length, 19);
     }
 
     #[test]

@@ -511,11 +511,11 @@ familiar's next new chat.
   or up to 50. `mail_read` returns one message's headers and up to 8,000 characters of plain text.
   Mail has to be open. Familiars can't send mail; they write replies with `draft_message`.
 - **Shortcuts**: `shortcuts_list` lists your Shortcuts by name, and `shortcuts_run` runs one, with
-  optional text input, and returns up to 4,000 characters of its text output.
+  optional text input of up to 2,000 characters, and returns up to 4,000 characters of its text output.
 
 Adding an event, adding a reminder, and running a Shortcut ask you first, in the corner of the window,
 with a notification when approval notifications are on. The card shows the event, reminder, or
-Shortcut and its input. There's no "Always allow": a Shortcut can send messages or change settings,
+Shortcut and all of its input, and names the account when two calendars share a name. There's no "Always allow": a Shortcut can send messages or change settings,
 so each run asks again. No answer in 2 minutes counts as Deny.
 
 macOS asks for permission the first time a familiar uses Calendar, Reminders, or Contacts, and the

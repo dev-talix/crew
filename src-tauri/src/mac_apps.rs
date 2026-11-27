@@ -131,7 +131,8 @@ const MAX_BODY: usize = 8_000;
 const MAX_RECIPIENTS: usize = 20;
 const MAX_NOTES: usize = 300;
 const MAX_SHORTCUTS: usize = 200;
-const MAX_SHORTCUT_INPUT: usize = 10_000;
+/// Short enough that the approval card shows all of it.
+const MAX_SHORTCUT_INPUT: usize = 2_000;
 const MAX_SHORTCUT_OUTPUT: usize = 4_000;
 const MAX_TITLE: usize = 200;
 const MAX_WRITE_NOTES: usize = 2_000;
@@ -715,15 +716,17 @@ fn pick_calendar(calendars: &[Calendar], wanted: Option<&str>, app: App) -> Resu
     let all: Vec<&Calendar> = calendars.iter().collect();
     let found = match wanted {
         Some(name) => {
-            let full = |c: &&Calendar| format!("{} ({})", c.title, c.account).eq_ignore_ascii_case(name);
+            // A calendar's own title comes first, so one really called "Work (iCloud)" wins over
+            // "Work" in iCloud.
             let titled: Vec<&Calendar> = calendars.iter().filter(|c| c.title.eq_ignore_ascii_case(name)).collect();
-            match (all.iter().copied().find(full), titled.as_slice()) {
-                (Some(c), _) => Some(c),
-                (None, []) => None,
-                (None, [one]) => Some(*one),
-                (None, many) => match many.iter().find(|c| c.default) {
+            let qualified: Vec<&Calendar> = calendars.iter().filter(|c| format!("{} ({})", c.title, c.account).eq_ignore_ascii_case(name)).collect();
+            let matches = if titled.is_empty() { qualified } else { titled };
+            match matches.as_slice() {
+                [] => None,
+                [one] => Some(*one),
+                many => match many.iter().find(|c| c.default) {
                     Some(c) => Some(*c),
-                    None => return Err(format!("More than one {kind} is called \"{name}\". Name one of these: {}.", labels(many))),
+                    None => return Err(format!("More than one {kind} is called \"{name}\": {}. Ask the person which one, or to rename one.", labels(many))),
                 },
             }
         }
@@ -1053,7 +1056,8 @@ where
             let shortcut = pick_shortcut(&shortcuts, &name)?;
             let mut detail = String::from("A Shortcut can send messages, change settings, or do anything its actions allow.");
             if let Some(input) = &input {
-                detail = format!("Input: {}\n{detail}", clip(input, 300));
+                // The person sees exactly what the Shortcut will get.
+                detail = format!("Input: {input}\n{detail}");
             }
             if !allowed(ask, caller, format!("{} wants to run the Shortcut \"{}\"", agent.name, shortcut.name), detail).await {
                 return Err(NOT_ALLOWED.into());
@@ -1401,6 +1405,12 @@ mod tests {
         let neither = [work("personal", "iCloud", false), work("company", "Google", false)];
         let err = pick_calendar(&neither, Some("Work"), App::Calendar).unwrap_err();
         assert!(err.contains("Work (iCloud), Work (Google)"), "{err}");
+        // A calendar really titled "Work (iCloud)" beats Work in iCloud.
+        let literal = [work("personal", "iCloud", false), Calendar { id: "literal".into(), title: "Work (iCloud)".into(), account: "Google".into(), writable: true, default: false }];
+        assert_eq!(pick_calendar(&literal, Some("work (icloud)"), App::Calendar).unwrap().0, "literal");
+        // Two with the same title and account can't be told apart, so neither is guessed.
+        let twins = [work("a", "iCloud", false), work("b", "iCloud", false)];
+        assert!(pick_calendar(&twins, Some("Work (iCloud)"), App::Calendar).unwrap_err().contains("More than one"));
     }
 
     #[test]
