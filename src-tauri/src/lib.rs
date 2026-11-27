@@ -34,6 +34,7 @@ mod rooms;
 mod routines;
 mod runtime;
 mod side;
+mod skills;
 mod status;
 mod themes;
 mod tools;
@@ -816,6 +817,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             let secrets: Arc<dyn vault::SecretStore> = Arc::new(vault::Keychain);
             connectors::install(db.clone());
+            skills::install(db.clone(), &dir);
+            skills::sync(&db);
             let tools = tools::Context {
                 app: app.handle().clone(),
                 db: db.clone(),
@@ -1004,7 +1007,13 @@ pub fn run() {
             checkins::save_checkins,
             checkins::list_checkins,
             mac_apps::agent_mac_apps,
-            mac_apps::set_agent_mac_apps
+            mac_apps::set_agent_mac_apps,
+            skills::skill_library,
+            skills::skill_files,
+            skills::preview_skill,
+            skills::add_skill,
+            skills::delete_skill,
+            skills::set_agent_skills
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {

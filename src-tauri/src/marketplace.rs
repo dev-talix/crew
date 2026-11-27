@@ -11,7 +11,7 @@
 //! into tool grants.
 
 use crate::db::{Access, Avatar, Provider, Schedule};
-use crate::exports::{FamiliarDoc, GrimoireFile, Kind, RitualDoc};
+use crate::exports::{FamiliarDoc, GrimoireFile, Kind, RitualDoc, SkillDoc};
 use crate::memory::Entry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -263,6 +263,19 @@ pub struct Draft {
     pub avatar: Avatar,
     pub memory: Vec<Entry>,
     pub rituals: Vec<DraftRitual>,
+    #[serde(default)]
+    pub skills: Vec<DraftSkill>,
+    /// The template's marketplace page, recorded as where its skills came from.
+    #[serde(default)]
+    pub source_url: Option<String>,
+}
+
+/// A template skill after review: it becomes a Grimoire skill, on for the new familiar only.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DraftSkill {
+    pub name: String,
+    pub description: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -293,7 +306,7 @@ pub fn to_file(draft: Draft) -> Result<GrimoireFile, String> {
         .collect();
     let mut file = GrimoireFile::new(Kind::Familiar);
     file.familiars.push(FamiliarDoc {
-        name,
+        name: name.clone(),
         provider: draft.provider,
         model: draft.model,
         effort: draft.effort,
@@ -305,6 +318,18 @@ pub fn to_file(draft: Draft) -> Result<GrimoireFile, String> {
         memory,
     });
     file.rituals = rituals;
+    file.skills = draft
+        .skills
+        .into_iter()
+        .map(|s| SkillDoc {
+            files: vec![crate::skills::SkillFile { path: crate::skills::MAIN_FILE.into(), text: crate::skills::compose(&crate::skills::name_from(&s.name), &s.description, &s.body) }],
+            name: crate::skills::name_from(&s.name),
+            source: "template".into(),
+            origin: draft.source_url.clone(),
+            created_by: None,
+            familiars: vec![name.clone()],
+        })
+        .collect();
     Ok(file)
 }
 
@@ -333,7 +358,7 @@ pub(crate) async fn import_template(app: AppHandle, state: State<'_, crate::AppS
     let name = familiar.final_name.clone();
     crate::exports::apply(&state.db, &state.themes_dir, &plan)?;
     state.scheduler.changed();
-    for event in ["agents_changed", "routines_changed", "memory_changed"] {
+    for event in ["agents_changed", "routines_changed", "memory_changed", crate::skills::CHANGED] {
         let _ = app.emit(event, ());
     }
     let agents = state.db.list_agents()?;
@@ -409,6 +434,8 @@ mod tests {
             avatar: Avatar { shape: "orbit".into(), eyes: "dot".into(), color: "#4c7ef3".into() },
             memory,
             rituals,
+            skills: Vec::new(),
+            source_url: None,
         }
     }
 
@@ -451,6 +478,37 @@ mod tests {
         let empty = DraftRitual { name: "Blank".into(), prompt: "  ".into(), schedule: Schedule::Interval { minutes: 60 } };
         let plan = crate::exports::plan(&db, &home, to_file(draft(vec![empty], Vec::new())).unwrap(), &home, false).unwrap();
         assert!(plan.preview.items.iter().any(|i| i.what == "ritual" && i.skipped), "import_template refuses plans like this");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn template_skills_become_skills_on_for_the_new_familiar() {
+        let root = crate::skills::test_root();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let home = std::env::temp_dir().join(format!("grimoire-tpl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let mut with_skills = draft(Vec::new(), Vec::new());
+        with_skills.source_url = Some("https://x.ai/bot/marketplace/bots/haggle-bot".into());
+        with_skills.skills = vec![
+            DraftSkill { name: "Template Haggle Setup".into(), description: "First-run interview.".into(), body: "Ask what they pay for.".into() },
+            DraftSkill { name: "template-haggle-setup".into(), description: "Second one, same name.".into(), body: "Steps.".into() },
+        ];
+        let file = to_file(with_skills).unwrap();
+        assert_eq!(file.skills[0].name, "template-haggle-setup");
+        assert_eq!(file.skills[0].familiars, vec!["Haggle Bot".to_string()]);
+        let plan = crate::exports::plan(&db, &home, file, &home, false).unwrap();
+        assert!(plan.preview.items.iter().all(|i| !i.skipped), "{:?}", plan.preview.items);
+        crate::exports::apply(&db, &home, &plan).unwrap();
+        let familiar = db.list_agents().unwrap().remove(0);
+        let list = crate::skills::list_in(&db, root).unwrap();
+        let names: Vec<_> = list.iter().filter(|s| s.name.starts_with("template-haggle-setup")).map(|s| (s.name.as_str(), s.source.as_str(), s.agents.clone())).collect();
+        assert_eq!(names, vec![("template-haggle-setup", "template", vec![familiar.id.clone()]), ("template-haggle-setup-2", "template", vec![familiar.id.clone()])]);
+        assert_eq!(list[0].origin.as_deref(), Some("https://x.ai/bot/marketplace/bots/haggle-bot"));
+        // A skill with no description can't come in, so import_template refuses the whole draft.
+        let mut empty = draft(Vec::new(), Vec::new());
+        empty.skills = vec![DraftSkill { name: "blank".into(), description: " ".into(), body: "b".into() }];
+        let plan = crate::exports::plan(&db, &home, to_file(empty).unwrap(), &home, false).unwrap();
+        assert!(plan.preview.items.iter().any(|i| i.what == "skill" && i.skipped));
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

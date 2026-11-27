@@ -250,7 +250,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 31;
+const SCHEMA_VERSION: i64 = 32;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -566,6 +566,9 @@ impl Db {
         }
         if version < 31 {
             crate::mac_apps::migrate(&conn)?;
+        }
+        if version < 32 {
+            crate::skills::migrate(&conn)?;
         }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
@@ -1101,7 +1104,7 @@ mod tests {
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
-                "DROP TABLE agent_connectors; DROP TABLE connectors;
+                "DROP TABLE agent_skills; DROP TABLE skills; DROP TABLE agent_connectors; DROP TABLE connectors;
                  ALTER TABLE agents DROP COLUMN setup_pending; ALTER TABLE chats DROP COLUMN handoff; DROP TABLE handoffs; DROP TABLE link_peers;
                  ALTER TABLE chats DROP COLUMN remote_peer; ALTER TABLE chats DROP COLUMN remote_asker; ALTER TABLE chats DROP COLUMN remote_name;
                  DROP TABLE chat_reviews; DROP TABLE checkin_runs; DROP TABLE checkins;
@@ -1140,7 +1143,7 @@ mod tests {
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
-                "DROP TABLE agent_connectors; DROP TABLE connectors;
+                "DROP TABLE agent_skills; DROP TABLE skills; DROP TABLE agent_connectors; DROP TABLE connectors;
                  ALTER TABLE chats DROP COLUMN remote_peer; ALTER TABLE chats DROP COLUMN remote_asker; ALTER TABLE chats DROP COLUMN remote_name;
                  CREATE TABLE old (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
                    kind TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL);
