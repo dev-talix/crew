@@ -632,7 +632,7 @@ fn parse_output(output: &[u8]) -> Result<Answer, String> {
 }
 
 /// Sends one request. GETs follow redirects; other methods don't.
-async fn fetch(method: &str, url: &str, headers: &[(&str, String)], body: Option<&str>) -> Result<Answer, String> {
+pub(crate) async fn fetch(method: &str, url: &str, headers: &[(&str, String)], body: Option<&str>) -> Result<Answer, String> {
     fetch_with(method, url, headers, body, method == "GET").await
 }
 

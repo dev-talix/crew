@@ -90,6 +90,9 @@
 - **Voice** dictation in the composer uses macOS speech recognition.
 - **Your phone** pairs with Grimoire over Tailscale to answer the inbox, send drafts, and chat with familiars.
   See [docs/phone-companion.md](docs/phone-companion.md).
+- **Telegram** reaches your familiars from a bot you make with @BotFather, with no Tailscale and no
+  open port. Chat with a familiar, answer its questions, close drafts, and get alerts there. See
+  [Telegram](#telegram).
 - **Remote familiars** run on another Mac over SSH, so the menu bar app on your laptop can drive a
   Mac Studio at home.
 
@@ -451,6 +454,44 @@ In a rule, `*` matches anything. "Always allow" on a prompt adds an allow rule f
 command. Codex asks through its approval requests (Grimoire sets its approval policy to
 `untrusted`, so commands it knows only read run without asking); Claude asks through a `PreToolUse`
 hook on Bash that Grimoire registers, which runs even for commands your own Claude settings allow.
+
+## Telegram
+
+Settings, Channels connects a Telegram bot, so you can reach this Mac's familiars from Telegram
+anywhere. It's off until you turn it on.
+
+1. In Telegram, message @BotFather, send `/newbot`, and copy the token it gives you. You don't need
+   a developer account.
+2. Paste the token in Settings, Channels and turn on "Use Telegram". Grimoire checks the token with
+   Telegram and keeps it in your Keychain.
+3. Click "Show a pairing code" and send `/start CODE` to your bot, or click "open it in Telegram". A
+   code is 8 characters, works once, lasts 10 minutes, and dies after 5 wrong tries.
+
+After that the bot listens only to your account in your private chat with it. It ignores everyone
+else, groups, channels, forwarded messages, and other bots. "Unpair" forgets your account, and
+"Remove token" forgets the bot.
+
+- `/familiars` shows a button for each familiar on this Mac. Tap one, then write to it. Your messages
+  show "Via Telegram" in its chat, and its reply comes back to Telegram with its name in front,
+  split into parts when it's longer than Telegram allows.
+- A familiar's inbox questions arrive with a button for each option, and drafts arrive with "Mark
+  sent" and "Discard". Only questions and drafts that open after you pair are sent.
+- Approvals arrive as a notice, like "Warden needs your OK: git push. Open Grimoire to answer."
+  Telegram can't answer them.
+- Rituals that run and spells that end are sent when Settings, Notifications has "Rituals and spells"
+  on, and approval notices when "Approvals" is on.
+
+Grimoire asks Telegram for new messages over outbound HTTPS, holding each request open up to 50
+seconds, and remembers where it stopped so a restart doesn't repeat anything. It sends the token
+to curl on stdin, never on a command line. Telegram's servers can read everything in a bot chat,
+so use the phone companion for anything you'd keep on your tailnet.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/telegram-pairing.png" alt="Settings, Channels showing a bot, a pairing code, and a link to open it in Telegram"></td>
+    <td width="50%"><img src="docs/screenshots/telegram-paired.png" alt="Settings, Channels paired with a Telegram account, with messages going to the Researcher familiar"></td>
+  </tr>
+</table>
 
 ## Notifications and the menu bar
 

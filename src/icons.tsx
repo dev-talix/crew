@@ -262,6 +262,13 @@ export const PlugIcon = () => (
   </Icon>
 );
 
+/** A speech bubble: chat apps that reach familiars. */
+export const ChannelIcon = () => (
+  <Icon>
+    <path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z" />
+  </Icon>
+);
+
 /** Two laptops joined by a line: Macs linked to each other. */
 export const PhoneIcon = () => (
   <Icon>

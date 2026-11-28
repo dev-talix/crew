@@ -736,11 +736,14 @@ fn to_value(value: impl Serialize) -> Result<Value, String> {
 
 // ---------- The app's side ----------
 
-struct AppActions {
-    app: tauri::AppHandle,
-    db: Arc<Db>,
-    runtime: Arc<crate::runtime::Runtime>,
-    approvals: Arc<crate::approvals::Approvals>,
+/// The runtime and approval gate, shared by the phone companion and Telegram.
+pub(crate) struct AppActions {
+    pub(crate) app: tauri::AppHandle,
+    pub(crate) db: Arc<Db>,
+    pub(crate) runtime: Arc<crate::runtime::Runtime>,
+    pub(crate) approvals: Arc<crate::approvals::Approvals>,
+    /// The window event that tells the channel's settings page to reload.
+    pub(crate) changed: &'static str,
 }
 
 impl Actions for AppActions {
@@ -773,7 +776,7 @@ impl Actions for AppActions {
     }
 
     fn changed(&self) {
-        let _ = tauri::Emitter::emit(&self.app, CHANGED, ());
+        let _ = tauri::Emitter::emit(&self.app, self.changed, ());
     }
 }
 
@@ -862,7 +865,7 @@ pub fn install(
     mac: String,
 ) -> Result<(), String> {
     use tauri::Listener;
-    let actions = Arc::new(AppActions { app: app.clone(), db: db.clone(), runtime, approvals });
+    let actions = Arc::new(AppActions { app: app.clone(), db: db.clone(), runtime, approvals, changed: CHANGED });
     let companion = Companion::new(db, secrets, actions, Arc::new(LinkNetwork), Arc::new(AppAssets(app.clone())), mac, PORT)?;
     if COMPANION.set(companion.clone()).is_err() {
         return Ok(());

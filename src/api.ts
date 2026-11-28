@@ -118,6 +118,26 @@ export interface PhonePairingCode {
   error: string | null;
 }
 
+/** The Telegram bot that reaches this Mac's familiars, and who it answers to. */
+export interface TelegramStatus {
+  enabled: boolean;
+  hasToken: boolean;
+  /** The bot's username, without the @. */
+  bot: string | null;
+  owner: { userId: number; chatId: number; name: string; pairedAt: number } | null;
+  /** The familiar plain text goes to. */
+  current: string | null;
+  error: string | null;
+}
+
+/** A one-time code the owner sends to the bot as /start CODE. */
+export interface TelegramCode {
+  code: string;
+  expiresAt: number;
+  /** A t.me link that opens the bot and sends the code. */
+  link: string | null;
+}
+
 /** What the host badge says about a remote familiar's Mac, or null when there's nothing to flag. */
 export function hostState(agent: Pick<Agent, "setupPending" | "offline" | "home">): "Setup pending" | "Offline" | null {
   if (agent.home) return agent.home.online ? null : "Offline";
@@ -796,6 +816,12 @@ export const api = {
   companionStatus: () => invoke<CompanionStatus>("companion_status"),
   companionStartPairing: () => invoke<PhonePairingCode>("companion_start_pairing"),
   companionRemove: (phoneId: string) => invoke<void>("companion_remove", { phoneId }),
+  telegramStatus: () => invoke<TelegramStatus>("telegram_status"),
+  telegramSetToken: (token: string) => invoke<TelegramStatus>("telegram_set_token", { token }),
+  telegramForgetToken: () => invoke<TelegramStatus>("telegram_forget_token"),
+  telegramSetEnabled: (enabled: boolean) => invoke<TelegramStatus>("telegram_set_enabled", { enabled }),
+  telegramStartPairing: () => invoke<TelegramCode>("telegram_start_pairing"),
+  telegramUnpair: () => invoke<TelegramStatus>("telegram_unpair"),
   linkStatus: () => invoke<LinkStatus>("link_status"),
   linkStartPairing: () => invoke<PairingCode>("link_start_pairing"),
   linkPair: (address: string, code: string) => invoke<Peer>("link_pair", { address, code }),
@@ -872,7 +898,7 @@ export function createFetch<S, T>(source: () => S, fetch: (source: S) => Promise
 }
 
 export function onEvent<T>(
-  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload" | "companion_changed" | "browser_changed" | "browser_frame" | "connectors_changed" | "rooms_changed" | "room_message" | "room_delta" | "room_floor",
+  name: "routines_changed" | "workflow_progress" | "workflows_changed" | "themes_changed" | "covens_changed" | "memory_changed" | "vault_changed" | "approval_requested" | "approval_closed" | "agent_model" | "agents_changed" | "open_agent" | "dock_edge" | "dock_hidden" | "chats_changed" | "budgets_changed" | "side_message" | "side_delta" | "inbox_changed" | "ledger_changed" | "helpers_changed" | "drafts_changed" | "handoffs_changed" | "links_changed" | "link_reload" | "companion_changed" | "browser_changed" | "browser_frame" | "connectors_changed" | "rooms_changed" | "room_message" | "room_delta" | "room_floor" | "telegram_changed",
   handler: (payload: T) => void,
 ) {
   return listen<T>(name, (e) => handler(e.payload));

@@ -41,6 +41,7 @@ mod updates;
 mod vault;
 mod workflow_runs;
 mod workflows;
+mod telegram;
 
 use db::{now_ms, Access, Agent, Avatar, Db, Message, Provider, Routine, Workflow, WorkflowStep};
 use routines::Scheduler;
@@ -828,6 +829,7 @@ pub fn run() {
             if let Err(e) = companion::install(app.handle(), db.clone(), secrets.clone(), runtime.clone(), approvals.clone(), mac) {
                 eprintln!("The phone companion is off: {e}");
             }
+            telegram::install(app.handle(), db.clone(), secrets.clone(), runtime.clone(), approvals.clone());
             // Rituals can fire as soon as the scheduler starts, so the approval gate and the tool socket
             // have to be up first.
             let scheduler = Scheduler::start(db.clone(), &runtime, &workflows, app.handle().clone());
@@ -986,7 +988,13 @@ pub fn run() {
             connectors::set_agent_connectors,
             background::background_settings,
             background::set_background_switch,
-            dock::main_ready
+            dock::main_ready,
+            telegram::telegram_status,
+            telegram::telegram_set_token,
+            telegram::telegram_forget_token,
+            telegram::telegram_set_enabled,
+            telegram::telegram_start_pairing,
+            telegram::telegram_unpair
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {

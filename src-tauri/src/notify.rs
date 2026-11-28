@@ -142,7 +142,7 @@ fn reply_text(name: &str, outcome: &TurnOutcome) -> Option<(String, String)> {
     }
 }
 
-fn approval_text(name: &str, request: &Request) -> (String, String) {
+pub(crate) fn approval_text(name: &str, request: &Request) -> (String, String) {
     let body = match request.kind {
         // The title reads "Researcher wants to use the password for github.com".
         "vault" => match request.title.strip_prefix(&format!("{name} wants to ")) {
@@ -154,17 +154,17 @@ fn approval_text(name: &str, request: &Request) -> (String, String) {
     (format!("{name} needs your OK"), body)
 }
 
-fn capitalize(text: &str) -> String {
+pub(crate) fn capitalize(text: &str) -> String {
     let mut chars = text.chars();
     chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
-fn ritual_text(ritual: &str, name: &str) -> (String, String) {
+pub(crate) fn ritual_text(ritual: &str, name: &str) -> (String, String) {
     (format!("{ritual} ran"), format!("{name} is working on it."))
 }
 
 /// `step` is the step a spell stopped on; `detail` is the last reply when it finished, or the error.
-fn spell_text(spell: &str, state: &str, step: usize, total: usize, detail: Option<&str>) -> Option<(String, String)> {
+pub(crate) fn spell_text(spell: &str, state: &str, step: usize, total: usize, detail: Option<&str>) -> Option<(String, String)> {
     let line = detail.map(first_line).filter(|l| !l.is_empty());
     match state {
         "done" => Some((format!("{spell} finished"), line.unwrap_or_else(|| format!("All {total} steps are done.")))),
@@ -219,6 +219,7 @@ pub fn turn_ended(app: &AppHandle, agent_id: &str, source: Option<&str>, outcome
 }
 
 pub fn approval_requested(app: &AppHandle, request: &Request) {
+    crate::telegram::approval_requested(request);
     send(app, Kind::Approval, |n| {
         let (title, body) = approval_text(&n.agent_name(&request.agent_id), request);
         Some(Note { title, body, target: Target::Approval { agent_id: request.agent_id.clone(), id: request.id.clone() } })
@@ -239,6 +240,7 @@ pub fn draft_ready(app: &AppHandle, agent_id: &str, what: &str, body: &str) {
 }
 
 pub fn ritual_fired(app: &AppHandle, ritual: &str, agent_id: &str) {
+    crate::telegram::ritual_fired(ritual, agent_id);
     send(app, Kind::Run, |n| {
         let (title, body) = ritual_text(ritual, &n.agent_name(agent_id));
         Some(Note { title, body, target: Target::Agent(agent_id.into()) })
@@ -246,6 +248,7 @@ pub fn ritual_fired(app: &AppHandle, ritual: &str, agent_id: &str) {
 }
 
 pub fn spell_ended(app: &AppHandle, spell: &str, state: &str, step: usize, total: usize, agent_id: &str, detail: Option<&str>) {
+    crate::telegram::spell_ended(spell, state, step, total, detail);
     send(app, Kind::Run, |_| {
         let (title, body) = spell_text(spell, state, step, total, detail)?;
         Some(Note { title, body, target: Target::Agent(agent_id.into()) })
