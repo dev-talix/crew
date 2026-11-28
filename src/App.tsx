@@ -145,10 +145,21 @@ export default function App() {
     void loadCovens();
     startUpdateChecks();
     void loadSpells();
-    const stopOpen = await onEvent<string>("open_agent", (id) => {
-      if (agents().some((a) => a.id === id)) openAgent(id);
-    });
-    keep(stopOpen);
+    const openIfKnown = (id: string | null) => {
+      if (id && agents().some((a) => a.id === id)) openAgent(id);
+    };
+    // A live click is newer than one queued while the page loaded, so it wins.
+    let clicked = false;
+    keep(
+      await onEvent<string>("open_agent", (id) => {
+        clicked = true;
+        openIfKnown(id);
+      }),
+    );
+    // A menu bar or notification click that rebuilt this window came in before it was listening.
+    api.mainReady().then((id) => {
+      if (!clicked) openIfKnown(id);
+    }, () => {});
     // A linked Mac coming or going changes which familiars show and whether they're offline.
     for (const name of ["agents_changed", "links_changed"] as const) {
       keep(await onEvent<null>(name, () => api.listAgents().then(setAgents, () => {})));

@@ -2,6 +2,7 @@ mod approvals;
 mod chats;
 mod connectors;
 mod attachments;
+mod background;
 mod companion;
 mod briefing;
 mod browser;
@@ -759,7 +760,11 @@ pub fn mcp_main(args: &[String]) -> i32 {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    // Known before the app finishes launching, so a background launch never shows a Dock icon or
+    // takes focus, even for a moment.
+    let windowless = background::launched_in_background(std::env::args());
+    let app = tauri::Builder::default()
+        .activate_ignoring_other_apps(!windowless)
         .plugin(tauri_plugin_opener::init())
         .register_asynchronous_uri_scheme_protocol(attachments::SCHEME, |ctx, request, responder| {
             attachments::protocol(ctx.app_handle(), request, responder)
@@ -767,7 +772,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .setup(|app| {
+        .setup(move |app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             memory::init(&dir);
@@ -793,7 +798,6 @@ pub fn run() {
             remote::install(app.handle().clone(), db.clone());
             let runtime = Runtime::new(db.clone(), app.handle().clone());
             let workflows = WorkflowRunner::new(db.clone(), runtime.clone(), app.handle().clone());
-            let edge = db.setting(DOCK_EDGE).ok().flatten().and_then(|e| dock::Edge::parse(&e));
             // Agents get the Grimoire tools only when this socket is up; Grimoire still works without them.
             let themes_dir = themes::dir(&dir);
             vault::clear_hand_offs();
@@ -801,6 +805,7 @@ pub fn run() {
             app.manage(notify::Notifier::new(db.clone(), approvals.clone()));
             notify::install(app.handle());
             tray::install(app.handle(), db.clone());
+            background::install(app.handle(), db.clone(), windowless);
             permissions::install(app.handle().clone(), db.clone(), approvals.clone());
             #[cfg(target_os = "macos")]
             let secrets: Arc<dyn vault::SecretStore> = Arc::new(vault::Keychain);
@@ -831,9 +836,12 @@ pub fn run() {
             app.manage(quick);
             app.manage(rooms::Rooms::new(db.clone(), runtime.clone(), rooms::emitter(app.handle().clone())));
             app.manage(AppState { db, runtime, scheduler, workflows, dock: dock::Dock::default(), themes_dir, approvals, secrets });
-            if edge.is_some() {
-                let state = app.state::<AppState>();
-                state.dock.set_edge(app.handle(), edge)?;
+            // The main window starts hidden, so a background launch never shows it. Showing it also
+            // brings back a saved dock, which a background launch leaves off the screen until then.
+            if !windowless {
+                if let Err(e) = dock::show_main(app.handle(), None) {
+                    eprintln!("Couldn't show the Grimoire window: {e}");
+                }
             }
             Ok(())
         })
@@ -975,23 +983,32 @@ pub fn run() {
             connectors::connector_sign_in,
             connectors::connector_set_token,
             connectors::connector_sign_out,
-            connectors::set_agent_connectors
+            connectors::set_agent_connectors,
+            background::background_settings,
+            background::set_background_switch,
+            dock::main_ready
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {
                 tray::main_focused(window.app_handle());
             }
             if let WindowEvent::CloseRequested { api, .. } = event {
-                let dock_on = window.app_handle().state::<AppState>().dock.edge().is_some();
-                if window.label() == "main" && dock_on {
+                let app = window.app_handle();
+                let dock_on = app.state::<AppState>().dock.edge().is_some();
+                if window.label() == "main" && (dock_on || background::on(app)) {
                     api.prevent_close();
                     let _ = window.hide();
+                    background::window_hidden(app);
                 }
             }
         })
-        .build(tauri::generate_context!())
-        .expect("error while building Grimoire")
-        .run(|app, event| {
+        .build(tauri::generate_context!());
+    let mut app = app.expect("error while building Grimoire");
+    #[cfg(target_os = "macos")]
+    if windowless {
+        app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    }
+    app.run(|app, event| {
             match event {
                 RunEvent::Reopen { .. } => {
                     let _ = dock::show_main(app, None);

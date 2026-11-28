@@ -64,6 +64,9 @@
 - **Quick Ask** opens a small panel from any app with ⇧⌘Space. Pick a familiar, ask it something,
   watch the reply stream in, or answer what's waiting in the inbox. Change or turn off the shortcut in
   Settings, General. It needs no Accessibility or Input Monitoring permission.
+- **Background mode** runs Grimoire on an always-on Mac with no window and no Dock icon. It can
+  start at login and keep the Mac awake, so rituals, the phone, and linked Macs keep working. See
+  [Background mode](#background-mode).
 - **Helpers** take long jobs. A familiar calls `start_helper` and keeps chatting while a helper works
   in a hidden chat, on a fresh session with the familiar's model, workspace, and access. The result
   comes back as a message labeled "Helper <label>", which starts the familiar's next turn. Up to 3 run
@@ -467,6 +470,29 @@ Notifications use `UNUserNotificationCenter`, which works only from a bundled `G
 `bunx tauri dev` they're off. The menu bar icon is drawn in `scripts/icons.mjs` as
 `src/assets/tray.svg`; render it with `bunx @resvg/resvg-js-cli --fit-width 18` (and 36 for
 `tray@2x.png`) into `src-tauri/icons/tray.png`.
+
+## Background mode
+
+Run Grimoire on a Mac mini or Mac Studio that stays on, and drive it from your laptop through
+[linked Macs](#linked-macs) or your phone. Settings, General, Background has three switches, all off
+by default:
+
+- **Run in the background.** Closing the window hides it and the Dock icon, and Grimoire keeps
+  running. Opening Grimoire again (Dock, Finder, `open -a Grimoire`), the menu bar's Open Grimoire, or
+  a notification click brings the window back.
+- **Start at login.** Writes `~/Library/LaunchAgents/dev.talix.grimoire.background.plist`, which runs
+  `open -g -b dev.talix.grimoire --args --background` when you log in, so Grimoire starts with no window
+  and no Dock icon. The menu bar item stays if it's on. Opening by bundle ID keeps it working after you
+  move or rename the app. macOS loads it at the next login. Turning it off unloads it with
+  `launchctl bootout` and deletes the file. It works only from Grimoire.app, not a development build.
+- **Keep this Mac awake while Grimoire runs.** Runs `caffeinate -i -w <Grimoire's pid>`, which stops
+  idle sleep and ends when Grimoire quits. The display can still sleep. If caffeinate stops, Settings
+  restarts it, and says so if it can't.
+
+You can also start it by hand with `open -a Grimoire --args --background`. Rituals, event triggers,
+the phone companion, and linked Macs don't need the window. Background mode still needs a logged-in
+macOS session; with no one logged in, nothing runs. Running Grimoire on a Linux server with no
+display is planned separately.
 
 ## Usage
 

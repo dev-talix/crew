@@ -13,6 +13,19 @@ import type { Ledger } from "./ledgers";
 export type Provider = "codex" | "claude";
 export type Access = "workspace" | "full";
 
+/** Background mode, for an always-on Mac. */
+export interface BackgroundSettings {
+  runInBackground: boolean;
+  startAtLogin: boolean;
+  keepAwake: boolean;
+  /** Keep awake is on and caffeinate is running. */
+  awakeHolding: boolean;
+  /** This launch came from the login item. */
+  launchedInBackground: boolean;
+}
+
+export type BackgroundSwitch = "runInBackground" | "startAtLogin" | "keepAwake";
+
 export const PROVIDER_NAMES: Record<Provider, string> = { codex: "Codex", claude: "Claude" };
 
 export interface Agent {
@@ -747,6 +760,10 @@ export const api = {
   saveNotificationSettings: (prefs: NotificationPrefs) => invoke<NotificationPrefs>("save_notification_settings", { prefs }),
   menuBarVisible: () => invoke<boolean>("menu_bar_visible"),
   setMenuBarVisible: (visible: boolean) => invoke<boolean>("set_menu_bar_visible", { visible }),
+  backgroundSettings: () => invoke<BackgroundSettings>("background_settings"),
+  setBackgroundSwitch: (change: BackgroundSwitch, on: boolean) => invoke<BackgroundSettings>("set_background_switch", { switch: change, on }),
+  /** Says the main window is listening for open_agent; returns a familiar a click asked for while it loaded. */
+  mainReady: () => invoke<string | null>("main_ready"),
   /** Tells the menu bar which familiar's chat the main window shows. */
   setOpenAgent: (agentId: string | null) => invoke<void>("set_open_agent", { agentId }),
   listBudgets: () => invoke<Budgets.BudgetStatus[]>("list_budgets"),

@@ -6,6 +6,7 @@ import BotAvatar from "./BotAvatar";
 import { Page, Segmented, Toggle } from "./ui";
 import { ThemePicker } from "./ThemeEditor";
 import { BackupSection } from "./ImportExport";
+import { BackgroundSection } from "./BackgroundSettings";
 import { appIcon, readMode, setAppIcon, setMode, type AppIconSetting, type ModeSetting } from "./themeStore";
 import nightIcon from "./assets/icon-night.svg";
 import paperIcon from "./assets/icon-paper.svg";
@@ -307,6 +308,8 @@ function GeneralSettings(props: { agents: Agent[] }) {
           <div class="error-box settings-error">{menuBarError()}</div>
         </Show>
 
+        <BackgroundSection />
+
         <BackupSection />
 
         <h2 class="section-title">About</h2>
@@ -386,7 +389,7 @@ export type SettingsSection = "general" | "appearance" | "notifications" | "vaul
 
 /** The sections, with words the ⌘K palette also finds them by. */
 export const SETTINGS_SECTIONS: { id: SettingsSection; label: string; icon: () => JSX.Element; keywords: string }[] = [
-  { id: "general", label: "General", icon: GearIcon, keywords: "claude billing dock providers about menu bar quick ask shortcut hotkey" },
+  { id: "general", label: "General", icon: GearIcon, keywords: "claude billing dock providers about menu bar quick ask shortcut hotkey background login awake sleep" },
   { id: "appearance", label: "Appearance", icon: PaletteIcon, keywords: "theme dark light mode app icon colors" },
   { id: "notifications", label: "Notifications", icon: BellIcon, keywords: "alerts banners finished approvals rituals" },
   { id: "vault", label: "Vault", icon: VaultIcon, keywords: "keychain passwords logins api keys cards secrets" },
