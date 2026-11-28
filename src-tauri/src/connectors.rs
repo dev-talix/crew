@@ -1,6 +1,7 @@
 //! Connectors: hosted MCP servers, like Linear or Notion, that familiars use once the person signs in
-//! in the browser. Grimoire registers itself with each server (OAuth dynamic client registration), so
-//! nobody needs a developer account or an OAuth app of their own.
+//! in the browser. Grimoire identifies itself to each server without a developer account or an OAuth
+//! app of anyone's own: by OAuth dynamic client registration, or by its Client ID Metadata Document,
+//! whose URL is its client id at servers that support one.
 //!
 //! Tokens live in the vault's Keychain store and never leave the app. A familiar's CLI starts one
 //! `grimoire mcp` relay per connector; the relay sends each message over the app's tool socket, and the
@@ -23,6 +24,16 @@ pub const CHANGED: &str = "connectors_changed";
 const SIGN_IN_WAIT: Duration = Duration::from_secs(5 * 60);
 /// A token this close to expiring is refreshed before use.
 const REFRESH_EARLY_MS: i64 = 60_000;
+/// Grimoire's Client ID Metadata Document, from docs/oauth/client-metadata.json. Its URL is Grimoire's
+/// client id at sign-in servers that support these documents.
+const CLIENT_METADATA_URL: &str = "https://dev-talix.github.io/grimoire/oauth/client-metadata.json";
+/// Whether a server that offers both registration and the metadata document gets the document. Off
+/// until the document is published at `CLIENT_METADATA_URL`.
+const PREFER_CLIENT_METADATA: bool = false;
+/// The browser comes back here, with the port Grimoire got for this sign-in after the host. The
+/// metadata document lists it without a port, which allows any loopback port (RFC 8252, 7.3).
+const REDIRECT_HOST: &str = "http://127.0.0.1";
+const REDIRECT_PATH: &str = "/callback";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,17 +44,25 @@ pub struct CatalogEntry {
     pub description: &'static str,
     /// App names a template might use for this service, lowercase.
     pub apps: &'static [&'static str],
+    /// Set when an app name is also a common word, like Square, so "Square Enix" doesn't match it.
+    /// Then a template's app name must equal one of `apps`.
+    pub exact_apps: bool,
     /// Set when the server doesn't let apps register themselves, so the person pastes a token instead.
     pub token_help: Option<&'static str>,
 }
 
 const fn entry(id: &'static str, name: &'static str, url: &'static str, description: &'static str, apps: &'static [&'static str]) -> CatalogEntry {
-    CatalogEntry { id, name, url, description, apps, token_help: None }
+    CatalogEntry { id, name, url, description, apps, exact_apps: false, token_help: None }
+}
+
+const fn exact(entry: CatalogEntry) -> CatalogEntry {
+    CatalogEntry { exact_apps: true, ..entry }
 }
 
 /// Hosted MCP servers that sign in through the browser with no developer app. Each one's OAuth
-/// metadata offered a registration endpoint when this list was made, except GitHub's, which takes a
-/// personal access token.
+/// metadata offered a registration endpoint or Client ID Metadata Documents when it was last checked,
+/// except the ones with `token_help`. Run `cargo test catalog_servers_offer_sign_in -- --ignored
+/// --nocapture` to check them again.
 pub const CATALOG: &[CatalogEntry] = &[
     entry("linear", "Linear", "https://mcp.linear.app/mcp", "Issues, projects, and cycles", &["linear"]),
     entry("notion", "Notion", "https://mcp.notion.com/mcp", "Pages, databases, and search", &["notion"]),
@@ -66,6 +85,36 @@ pub const CATALOG: &[CatalogEntry] = &[
     entry("webflow", "Webflow", "https://mcp.webflow.com/mcp", "Sites, pages, and CMS items", &["webflow"]),
     entry("paypal", "PayPal", "https://mcp.paypal.com/mcp", "Invoices, orders, and disputes", &["paypal"]),
     entry("zapier", "Zapier", "https://mcp.zapier.com/api/mcp/mcp", "Actions in the apps you've connected to Zapier", &["zapier"]),
+    entry("todoist", "Todoist", "https://ai.todoist.net/mcp", "Tasks, projects, and due dates", &["todoist"]),
+    entry("miro", "Miro", "https://mcp.miro.com/", "Boards, diagrams, and sticky notes", &["miro"]),
+    entry("calendly", "Calendly", "https://mcp.calendly.com", "Event types, bookings, and availability", &["calendly"]),
+    entry("cal", "Cal.com", "https://mcp.cal.com/mcp", "Bookings, event types, and schedules", &["cal.com"]),
+    entry("dropbox", "Dropbox", "https://mcp.dropbox.com/mcp", "Files, folders, and sharing", &["dropbox"]),
+    entry("coda", "Coda", "https://coda.io/apis/mcp", "Docs, tables, and rows", &["coda"]),
+    entry("gamma", "Gamma", "https://mcp.gamma.app/mcp", "Presentations, documents, and web pages", &["gamma"]),
+    entry("granola", "Granola", "https://mcp.granola.ai/mcp", "Meeting notes and transcripts", &["granola"]),
+    entry("fireflies", "Fireflies.ai", "https://api.fireflies.ai/mcp", "Meeting transcripts and summaries", &["fireflies", "fireflies.ai"]),
+    entry("attio", "Attio", "https://mcp.attio.com/mcp", "Companies, people, and deals", &["attio"]),
+    exact(entry("close", "Close", "https://mcp.close.com/mcp", "Leads, contacts, and opportunities", &["close", "close crm", "close.com"])),
+    entry("mailchimp", "Mailchimp", "https://mcp.mailchimp.com/mcp", "Audiences, campaigns, and reports", &["mailchimp"]),
+    entry("klaviyo", "Klaviyo", "https://mcp.klaviyo.com/mcp", "Profiles, campaigns, and flows", &["klaviyo"]),
+    exact(entry("square", "Square", "https://mcp.squareup.com/mcp", "Payments, orders, and catalog items", &["square", "square pos", "squareup"])),
+    entry("wix", "Wix", "https://mcp.wix.com/mcp", "Sites, stores, and bookings", &["wix"]),
+    entry("dovetail", "Dovetail", "https://dovetail.com/api/mcp", "Research notes, insights, and highlights", &["dovetail"]),
+    entry("gitlab", "GitLab", "https://gitlab.com/api/v4/mcp", "Projects, issues, and merge requests", &["gitlab"]),
+    entry("netlify", "Netlify", "https://netlify-mcp.netlify.app/mcp", "Sites, deploys, and forms", &["netlify"]),
+    exact(entry("neon", "Neon", "https://mcp.neon.tech/mcp", "Postgres projects, branches, and queries", &["neon", "neon postgres", "neon.tech"])),
+    entry("railway", "Railway", "https://mcp.railway.com", "Projects, services, and deployments", &["railway"]),
+    entry("digitalocean", "DigitalOcean", "https://mcp.digitalocean.com/mcp", "Apps, droplets, and databases", &["digitalocean"]),
+    CatalogEntry {
+        token_help: Some("Render signs in only for apps it knows. Make an API key under Account Settings in the Render Dashboard and paste it here. It can reach every workspace your account can."),
+        ..exact(entry("render", "Render", "https://mcp.render.com/mcp", "Services, deploys, and logs", &["render", "render.com"]))
+    },
+    entry("posthog", "PostHog", "https://mcp.posthog.com/mcp", "Product analytics, flags, and experiments", &["posthog"]),
+    entry("amplitude", "Amplitude", "https://mcp.amplitude.com/mcp", "Charts, cohorts, and events", &["amplitude"]),
+    entry("mixpanel", "Mixpanel", "https://mcp.mixpanel.com/mcp", "Reports, events, and funnels", &["mixpanel"]),
+    exact(entry("make", "Make", "https://mcp.make.com", "Scenarios you've built in Make", &["make", "make.com", "integromat"])),
+    entry("apify", "Apify", "https://mcp.apify.com", "Web scrapers and their results", &["apify"]),
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -538,7 +587,8 @@ fn quoted(value: &str) -> String {
 }
 
 /// The curl config for one request. It goes in on stdin, so tokens never show in process arguments.
-fn curl_config(method: &str, url: &str, headers: &[(&str, String)], body: Option<&str>) -> String {
+/// With `follow`, curl follows up to five https redirects.
+fn curl_config(method: &str, url: &str, headers: &[(&str, String)], body: Option<&str>, follow: bool) -> String {
     let mut lines = vec![
         "silent".to_string(),
         "show-error".to_string(),
@@ -550,7 +600,7 @@ fn curl_config(method: &str, url: &str, headers: &[(&str, String)], body: Option
         format!("request = {}", quoted(method)),
         format!("url = {}", quoted(url)),
     ];
-    if method == "GET" {
+    if follow {
         lines.push("location".into());
         lines.push("max-redirs = 5".into());
         lines.push("proto-redir = \"=https\"".into());
@@ -581,7 +631,12 @@ fn parse_output(output: &[u8]) -> Result<Answer, String> {
     Ok(answer)
 }
 
+/// Sends one request. GETs follow redirects; other methods don't.
 async fn fetch(method: &str, url: &str, headers: &[(&str, String)], body: Option<&str>) -> Result<Answer, String> {
+    fetch_with(method, url, headers, body, method == "GET").await
+}
+
+async fn fetch_with(method: &str, url: &str, headers: &[(&str, String)], body: Option<&str>, follow: bool) -> Result<Answer, String> {
     let host = Url::parse(url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_else(|| "the server".into());
     // --disable skips any ~/.curlrc, so the person's curl settings can't redirect the request.
     let mut child = tokio::process::Command::new("/usr/bin/curl")
@@ -592,7 +647,7 @@ async fn fetch(method: &str, url: &str, headers: &[(&str, String)], body: Option
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("Could not start curl: {e}"))?;
-    let config = curl_config(method, url, headers, body);
+    let config = curl_config(method, url, headers, body, follow);
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(config.as_bytes()).await.map_err(|e| format!("Could not reach {host}: {e}"))?;
     }
@@ -658,11 +713,34 @@ fn issuer_metadata_urls(issuer: &Url) -> Vec<String> {
 /// What signing in to one server needs, found from its metadata.
 #[derive(Debug, PartialEq)]
 struct Plan {
+    issuer: String,
     authorization_endpoint: String,
     token_endpoint: String,
     registration_endpoint: Option<String>,
+    /// The sign-in server takes a Client ID Metadata Document's URL as the client id.
+    client_metadata_documents: bool,
     resource: String,
     scope: Option<String>,
+}
+
+/// How Grimoire gets a client id at one sign-in server.
+#[derive(Debug, PartialEq)]
+enum Registration {
+    /// Use the metadata document's URL.
+    Document,
+    /// Register at this endpoint (RFC 7591).
+    Dynamic(String),
+    /// Neither works, so the person pastes a token.
+    Token,
+}
+
+fn registration(plan: &Plan) -> Registration {
+    match (&plan.registration_endpoint, plan.client_metadata_documents) {
+        (Some(_), true) if PREFER_CLIENT_METADATA => Registration::Document,
+        (Some(endpoint), _) => Registration::Dynamic(endpoint.clone()),
+        (None, true) => Registration::Document,
+        (None, false) => Registration::Token,
+    }
 }
 
 async fn discover(server: &Url) -> Result<Plan, String> {
@@ -708,9 +786,11 @@ async fn discover(server: &Url) -> Result<Plan, String> {
     check_sign_in_server(server, &issuer, text(&server_meta, "issuer").as_deref(), &endpoints)?;
     let published = resource_meta.as_ref().and_then(|m| m["scopes_supported"].as_array()).map(|list| list.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "));
     Ok(Plan {
+        issuer: issuer.to_string(),
         authorization_endpoint,
         token_endpoint,
         registration_endpoint,
+        client_metadata_documents: server_meta.as_ref().is_some_and(|m| m["client_id_metadata_document_supported"] == true),
         resource: text(&resource_meta, "resource").unwrap_or_else(|| server.to_string()),
         scope: auth_param(&www, "scope").or(published.filter(|s| !s.is_empty())),
     })
@@ -806,46 +886,62 @@ async fn wait_for_code(listener: &tokio::net::TcpListener, state: &str) -> Resul
     }
 }
 
-/// Signs in to a connector: discovery, registration, the browser, then the token exchange.
-async fn sign_in(app: &AppHandle, db: &Db, secrets: &dyn SecretStore, id: &str) -> Result<(), String> {
+fn redirect_uri(port: u16) -> String {
+    format!("{REDIRECT_HOST}:{port}{REDIRECT_PATH}")
+}
+
+/// Grimoire's client id at one sign-in server, and the secret registration gave it, if any.
+struct Client {
+    id: String,
+    secret: Option<String>,
+}
+
+/// Gets a client id at the plan's sign-in server, by registering or with the metadata document at
+/// `document`. `name` is the connector's, for errors.
+async fn client_for(plan: &Plan, name: &str, redirect: &str, document: &str) -> Result<Client, String> {
+    let endpoint = match registration(plan) {
+        Registration::Token => return Err(format!("{name} doesn't let apps register themselves, so Grimoire can't sign in for you. Paste an access token instead.")),
+        Registration::Dynamic(endpoint) => endpoint,
+        Registration::Document => {
+            // The sign-in server fetches the document itself, without following redirects. Without it,
+            // the browser would land on the server's error page, so check the same way first and say why.
+            let answer = fetch_with("GET", document, &[("Accept", "application/json".to_string())], None, false).await.ok();
+            if answer.filter(Answer::ok).and_then(|a| a.json().ok()).is_none_or(|d| d["client_id"] != document) {
+                return Err(format!("{name} needs Grimoire's client document, which isn't published yet, so Grimoire can't sign in there. Paste an access token instead."));
+            }
+            return Ok(Client { id: document.into(), secret: None });
+        }
+    };
+    let body = json!({
+        "client_name": "Grimoire",
+        "redirect_uris": [redirect],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        // OpenID servers treat a client without this as a website and may refuse a loopback redirect.
+        "application_type": "native",
+    });
+    let headers = [("Content-Type", "application/json".to_string()), ("Accept", "application/json".to_string())];
+    let registered = fetch("POST", &endpoint, &headers, Some(&body.to_string())).await?;
+    let client = registered.json().ok().filter(|_| registered.ok());
+    let id = client.as_ref().and_then(|c| c["client_id"].as_str()).map(String::from);
+    let id = id.ok_or_else(|| format!("{name} didn't register Grimoire (HTTP {}). Paste an access token instead.", registered.status))?;
+    Ok(Client { id, secret: client.as_ref().and_then(|c| c["client_secret"].as_str()).map(String::from) })
+}
+
+/// Signs in to a connector: discovery, a client id, the browser, then the token exchange. `open` shows
+/// the authorize URL in the browser; `document` is the metadata document's URL.
+async fn sign_in(open: impl FnOnce(String) -> Result<(), String>, db: &Db, secrets: &dyn SecretStore, id: &str, document: &str) -> Result<(), String> {
     let connector = get(db, id)?;
     let server = check_url(&connector.url)?;
     let plan = discover(&server).await?;
-    let Some(registration) = &plan.registration_endpoint else {
-        return Err(format!("{} doesn't let apps register themselves, so Grimoire can't sign in for you. Paste an access token instead.", connector.name));
-    };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| format!("Could not open the sign-in redirect: {e}"))?;
-    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-    let redirect = format!("http://127.0.0.1:{port}/callback");
-    let registered = fetch(
-        "POST",
-        registration,
-        &[("Content-Type", "application/json".to_string()), ("Accept", "application/json".to_string())],
-        Some(
-            &json!({
-                "client_name": "Grimoire",
-                "redirect_uris": [redirect],
-                "grant_types": ["authorization_code", "refresh_token"],
-                "response_types": ["code"],
-                "token_endpoint_auth_method": "none",
-            })
-            .to_string(),
-        ),
-    )
-    .await?;
-    let client = registered.json().ok().filter(|_| registered.ok());
-    let client_id = client.as_ref().and_then(|c| c["client_id"].as_str()).map(String::from).ok_or_else(|| {
-        format!("{} didn't register Grimoire (HTTP {}). Paste an access token instead.", connector.name, registered.status)
-    })?;
-    let client_secret = client.as_ref().and_then(|c| c["client_secret"].as_str()).map(String::from);
+    let redirect = redirect_uri(listener.local_addr().map_err(|e| e.to_string())?.port());
+    let Client { id: client_id, secret: client_secret } = client_for(&plan, &connector.name, &redirect, document).await?;
     // Two random UUIDs give 244 random bits, in the characters PKCE allows.
     let verifier = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
     let state = uuid::Uuid::new_v4().simple().to_string();
-    let url = authorize_url(&plan, &client_id, &redirect, &code_challenge(&verifier), &state)?;
-    {
-        use tauri_plugin_opener::OpenerExt;
-        app.opener().open_url(url, None::<&str>).map_err(|e| format!("Could not open the browser: {e}"))?;
-    }
+    open(authorize_url(&plan, &client_id, &redirect, &code_challenge(&verifier), &state)?)?;
     let code = tokio::time::timeout(SIGN_IN_WAIT, wait_for_code(&listener, &state)).await.map_err(|_| "The sign-in timed out. Try again.".to_string())??;
     let mut form = vec![
         ("grant_type", "authorization_code"),
@@ -899,7 +995,11 @@ pub fn remove_connector(app: AppHandle, state: State<crate::AppState>, id: Strin
 
 #[tauri::command]
 pub async fn connector_sign_in(app: AppHandle, state: State<'_, crate::AppState>, id: String) -> Result<Connector, String> {
-    sign_in(&app, &state.db, state.secrets.as_ref(), &id).await?;
+    let open = |url: String| {
+        use tauri_plugin_opener::OpenerExt;
+        app.opener().open_url(url, None::<&str>).map_err(|e| format!("Could not open the browser: {e}"))
+    };
+    sign_in(open, &state.db, state.secrets.as_ref(), &id, CLIENT_METADATA_URL).await?;
     let _ = app.emit(CHANGED, ());
     get(&state.db, &id)
 }
@@ -1080,12 +1180,13 @@ mod tests {
     fn quotes_curl_config_values() {
         assert_eq!(quoted(r#"a"b\c"#), r#""a\"b\\c""#);
         assert_eq!(quoted("x\ny"), r#""x\ny""#);
-        let config = curl_config("POST", "https://mcp.linear.app/mcp", &[("Authorization", "Bearer t".into())], Some("{\"id\":1}"));
+        let config = curl_config("POST", "https://mcp.linear.app/mcp", &[("Authorization", "Bearer t".into())], Some("{\"id\":1}"), false);
         assert!(config.starts_with("silent\n"));
         assert!(config.contains("header = \"Authorization: Bearer t\"\n"));
         assert!(config.contains("data-raw = \"{\\\"id\\\":1}\"\n"));
-        assert!(!config.contains("location"), "POSTs don't follow redirects");
-        assert!(curl_config("GET", "https://x", &[], None).contains("location\n"));
+        assert!(!config.contains("location"));
+        assert!(curl_config("GET", "https://x", &[], None, true).contains("location\n"));
+        assert!(!curl_config("GET", "https://x", &[], None, false).contains("location"));
     }
 
     #[test]
@@ -1132,14 +1233,17 @@ mod tests {
         assert_eq!(base64url(b"f"), "Zg");
         assert_eq!(base64url(b"foob"), "Zm9vYg");
         let plan = Plan {
+            issuer: "https://mcp.linear.app".into(),
             authorization_endpoint: "https://mcp.linear.app/authorize".into(),
             token_endpoint: "https://mcp.linear.app/token".into(),
             registration_endpoint: None,
+            client_metadata_documents: true,
             resource: "https://mcp.linear.app/mcp".into(),
             scope: Some("read write".into()),
         };
-        let url = Url::parse(&authorize_url(&plan, "cid", "http://127.0.0.1:5555/callback", "chal", "st").unwrap()).unwrap();
+        let url = Url::parse(&authorize_url(&plan, CLIENT_METADATA_URL, &redirect_uri(5555), "chal", "st").unwrap()).unwrap();
         let q: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        assert_eq!(q["client_id"], CLIENT_METADATA_URL, "a document's URL is the client id as is");
         assert_eq!(q["redirect_uri"], "http://127.0.0.1:5555/callback");
         assert_eq!((q["code_challenge_method"].as_str(), q["resource"].as_str(), q["scope"].as_str()), ("S256", "https://mcp.linear.app/mcp", "read write"));
         assert_eq!(form_body(&[("a", "x y"), ("b", "&=")]), "a=x+y&b=%26%3D");
@@ -1156,9 +1260,15 @@ mod tests {
     /// A local stand-in for a hosted MCP server and its token endpoint. Each request gets the next
     /// canned response; what it saw goes into `seen`.
     async fn fake_server(responses: Vec<String>) -> (String, Arc<Mutex<Vec<Seen>>>) {
+        fake_server_at(|_| responses).await
+    }
+
+    /// `fake_server`, with responses made from the server's own address, like `http://127.0.0.1:5555`.
+    async fn fake_server_at(responses: impl FnOnce(&str) -> Vec<String>) -> (String, Arc<Mutex<Vec<Seen>>>) {
         use tokio::io::AsyncReadExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let responses = responses(&base);
         let seen = Arc::new(Mutex::new(vec![]));
         let log = seen.clone();
         tokio::spawn(async move {
@@ -1245,7 +1355,7 @@ mod tests {
         let local = Url::parse("http://127.0.0.1:9/mcp").unwrap();
         assert!(check_sign_in_server(&local, &local, None, &["http://127.0.0.1:9/token"]).is_ok());
         assert!(check_sign_in_server(&local, &local, None, &["http://other.example/token"]).is_err());
-        assert!(curl_config("GET", "https://x", &[], None).contains("proto-redir = \"=https\""), "discovery only follows https redirects");
+        assert!(curl_config("GET", "https://x", &[], None, true).contains("proto-redir = \"=https\""), "discovery only follows https redirects");
     }
 
     #[tokio::test]
@@ -1329,5 +1439,225 @@ mod tests {
         assert!(callback_code("code=abc", "s1").is_err());
         assert_eq!(callback_code("error=access_denied&state=s1", "s1").unwrap_err(), "The sign-in didn't finish (access_denied).");
         assert!(callback_code("state=s1", "s1").unwrap_err().contains("no code"));
+    }
+
+    fn json_ok(body: &str) -> String {
+        response("200 OK", "Content-Type: application/json\r\n", body)
+    }
+
+    /// What a server sends during discovery: the 401 to the probe, its resource metadata, and its
+    /// sign-in server's metadata with `extra` fields, all at `base`.
+    fn discovery(base: &str, extra: &str) -> Vec<String> {
+        vec![
+            response("401 Unauthorized", &format!("WWW-Authenticate: Bearer resource_metadata=\"{base}/resource\"\r\n"), ""),
+            json_ok(&format!(r#"{{"resource":"{base}/mcp","authorization_servers":["{base}"]}}"#)),
+            json_ok(&format!(r#"{{"issuer":"{base}","authorization_endpoint":"{base}/authorize","token_endpoint":"{base}/token"{extra}}}"#)),
+        ]
+    }
+
+    #[tokio::test]
+    async fn reads_how_a_server_gives_out_client_ids() {
+        let cases = [
+            (r#","registration_endpoint":"{base}/register""#, "dynamic"),
+            (r#","client_id_metadata_document_supported":true"#, "document"),
+            (r#","client_id_metadata_document_supported":"true""#, "token"),
+            ("", "token"),
+        ];
+        for (extra, want) in cases {
+            let (base, _) = fake_server_at(|base| discovery(base, &extra.replace("{base}", base))).await;
+            let plan = discover(&Url::parse(&format!("{base}/mcp")).unwrap()).await.unwrap();
+            assert_eq!(plan.issuer, format!("{base}/"));
+            let got = match registration(&plan) {
+                Registration::Dynamic(endpoint) if endpoint == format!("{base}/register") => "dynamic",
+                Registration::Dynamic(endpoint) => panic!("registers at {endpoint}"),
+                Registration::Document => "document",
+                Registration::Token => "token",
+            };
+            assert_eq!(got, want, "{extra}");
+        }
+        let both = Plan {
+            issuer: "https://a.example".into(),
+            authorization_endpoint: "https://a.example/authorize".into(),
+            token_endpoint: "https://a.example/token".into(),
+            registration_endpoint: Some("https://a.example/register".into()),
+            client_metadata_documents: true,
+            resource: "https://a.example/mcp".into(),
+            scope: None,
+        };
+        let want = if PREFER_CLIENT_METADATA { Registration::Document } else { Registration::Dynamic("https://a.example/register".into()) };
+        assert_eq!(registration(&both), want, "one constant decides between the two");
+    }
+
+    #[test]
+    fn the_client_metadata_document_matches_how_grimoire_signs_in() {
+        let doc: Value = serde_json::from_str(include_str!("../../docs/oauth/client-metadata.json")).unwrap();
+        assert_eq!(doc["client_id"], CLIENT_METADATA_URL, "the document names its own URL");
+        assert_eq!(doc["redirect_uris"], json!([format!("{REDIRECT_HOST}{REDIRECT_PATH}")]));
+        assert_eq!(redirect_uri(5555).replace(":5555", ""), format!("{REDIRECT_HOST}{REDIRECT_PATH}"), "only the port differs");
+        assert_eq!(doc["token_endpoint_auth_method"], "none");
+        assert_eq!(doc["grant_types"], json!(["authorization_code", "refresh_token"]));
+        let url = Url::parse(CLIENT_METADATA_URL).unwrap();
+        assert!(url.scheme() == "https" && url.path().len() > 1, "a client id URL is https with a path");
+    }
+
+    /// Signs in to a fake server with `sign_in`, playing the browser: it checks the authorize URL and
+    /// comes back to the redirect with a code. Returns the authorize URL's query.
+    async fn sign_in_as_browser(db: &Db, secrets: &dyn SecretStore, id: &str, document: &str) -> Result<HashMap<String, String>, String> {
+        let query = Arc::new(Mutex::new(HashMap::new()));
+        let seen = query.clone();
+        let open = move |url: String| {
+            let q: HashMap<String, String> = Url::parse(&url).unwrap().query_pairs().into_owned().collect();
+            let back = format!("{}?code=code-1&state={}", q["redirect_uri"], q["state"]);
+            *seen.lock().unwrap() = q;
+            tokio::spawn(async move { fetch("GET", &back, &[], None).await });
+            Ok(())
+        };
+        sign_in(open, db, secrets, id, document).await?;
+        let q = query.lock().unwrap().clone();
+        Ok(q)
+    }
+
+    #[tokio::test]
+    async fn signs_in_with_the_metadata_document_and_refreshes_without_a_secret() {
+        let db = setup();
+        let secrets = MemoryStore::new();
+        let (base, seen) = fake_server_at(|base| {
+            let mut r = discovery(base, r#","client_id_metadata_document_supported":true"#);
+            r.push(json_ok(&format!(r#"{{"client_id":"{base}/client.json","client_name":"Grimoire"}}"#)));
+            r.push(json_ok(r#"{"access_token":"a1","refresh_token":"r1","expires_in":3600}"#));
+            r.push(json_ok(r#"{"access_token":"a2","expires_in":3600}"#));
+            r
+        })
+        .await;
+        let document = format!("{base}/client.json");
+        let c = add(&db, NewConnector { url: Some(format!("{base}/mcp")), ..Default::default() }).unwrap();
+        let q = sign_in_as_browser(&db, &secrets, &c.id, &document).await.unwrap();
+        assert_eq!(q["client_id"], document, "the document's URL is the client id");
+        assert!(q["redirect_uri"].starts_with("http://127.0.0.1:") && q["redirect_uri"].ends_with("/callback"));
+        assert_eq!(q["code_challenge_method"], "S256");
+
+        let saved = load_tokens(&secrets, &c.id).unwrap().unwrap();
+        assert_eq!((saved.access_token.as_str(), saved.client_id.as_deref(), saved.client_secret.as_deref()), ("a1", Some(document.as_str()), None));
+        assert_eq!(get(&db, &c.id).unwrap().auth.as_deref(), Some("oauth"));
+
+        let fresh = refresh(&db, &secrets, &c.id, "a1").await.unwrap().unwrap();
+        assert_eq!((fresh.access_token.as_str(), fresh.refresh_token.as_deref()), ("a2", Some("r1")));
+
+        let seen = seen.lock().unwrap().clone();
+        let paths: Vec<&str> = seen.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(paths, ["/mcp", "/resource", "/.well-known/oauth-authorization-server", "/client.json", "/token", "/token"], "no registration");
+        let doc_id = form_body(&[("client_id", &document)]);
+        for exchange in [&seen[4], &seen[5]] {
+            assert!(exchange.body.contains(&doc_id) && !exchange.body.contains("client_secret"), "{}", exchange.body);
+        }
+        assert!(seen[4].body.contains("grant_type=authorization_code") && seen[4].body.contains("code=code-1") && seen[4].body.contains("code_verifier="));
+        assert!(seen[5].body.contains("grant_type=refresh_token") && seen[5].body.contains("refresh_token=r1"));
+    }
+
+    #[tokio::test]
+    async fn says_so_when_a_server_needs_the_unpublished_document() {
+        let db = setup();
+        let secrets = MemoryStore::new();
+        let (base, seen) = fake_server_at(|base| {
+            let mut r = discovery(base, r#","client_id_metadata_document_supported":true"#);
+            r.push(response("404 Not Found", "", "Not found"));
+            r
+        })
+        .await;
+        let c = add(&db, NewConnector { url: Some(format!("{base}/mcp")), name: Some("Dovetail".into()), ..Default::default() }).unwrap();
+        let err = sign_in(|_| panic!("the browser stays closed"), &db, &secrets, &c.id, &format!("{base}/client.json")).await.unwrap_err();
+        assert_eq!(err, "Dovetail needs Grimoire's client document, which isn't published yet, so Grimoire can't sign in there. Paste an access token instead.");
+        assert_eq!(seen.lock().unwrap().len(), 4);
+        assert!(load_tokens(&secrets, &c.id).unwrap().is_none());
+
+        // The sign-in server won't follow a redirect to the document, so neither does the check.
+        let (base, seen) = fake_server_at(|base| {
+            let mut r = discovery(base, r#","client_id_metadata_document_supported":true"#);
+            r.push(response("302 Found", &format!("Location: {base}/elsewhere.json\r\n"), ""));
+            r.push(json_ok(&format!(r#"{{"client_id":"{base}/client.json"}}"#)));
+            r
+        })
+        .await;
+        let c = add(&db, NewConnector { url: Some(format!("{base}/mcp")), name: Some("Moved".into()), ..Default::default() }).unwrap();
+        let err = sign_in(|_| panic!("the browser stays closed"), &db, &secrets, &c.id, &format!("{base}/client.json")).await.unwrap_err();
+        assert!(err.contains("isn't published yet"), "{err}");
+        assert_eq!(seen.lock().unwrap().len(), 4, "the redirect isn't followed");
+    }
+
+    #[tokio::test]
+    async fn registers_when_the_server_offers_registration() {
+        let db = setup();
+        let secrets = MemoryStore::new();
+        let (base, seen) = fake_server_at(|base| {
+            let both = format!(r#","registration_endpoint":"{base}/register","client_id_metadata_document_supported":true"#);
+            let mut r = discovery(base, &both);
+            r.push(json_ok(r#"{"client_id":"dcr-1","client_secret":"s1"}"#));
+            r.push(json_ok(r#"{"access_token":"a1"}"#));
+            r
+        })
+        .await;
+        if PREFER_CLIENT_METADATA {
+            return; // This server would get the document instead; the test above covers that.
+        }
+        let c = add(&db, NewConnector { url: Some(format!("{base}/mcp")), ..Default::default() }).unwrap();
+        let q = sign_in_as_browser(&db, &secrets, &c.id, "https://unused.example/client.json").await.unwrap();
+        assert_eq!(q["client_id"], "dcr-1");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen[3].path, "/register");
+        let registered: Value = serde_json::from_str(&seen[3].body).unwrap();
+        assert_eq!(registered["redirect_uris"], json!([q["redirect_uri"]]));
+        assert_eq!(registered["application_type"], "native");
+        assert!(seen[4].body.contains("client_id=dcr-1") && seen[4].body.contains("client_secret=s1"));
+        assert_eq!(load_tokens(&secrets, &c.id).unwrap().unwrap().client_secret.as_deref(), Some("s1"));
+    }
+
+    /// Checks every catalog server's OAuth metadata again. It sends what discovery sends: an
+    /// initialize without a token, then unauthenticated metadata GETs. It never registers or signs in.
+    #[tokio::test]
+    #[ignore = "reaches the real servers"]
+    async fn catalog_servers_offer_sign_in() {
+        let checks: Vec<_> = CATALOG
+            .iter()
+            .map(|e| {
+                tokio::spawn(async move {
+                    let plan = discover(&Url::parse(e.url).unwrap()).await;
+                    // Discovery guesses /register for a server with no metadata, so look for real metadata.
+                    let published = match &plan {
+                        Ok(p) => {
+                            let mut found = false;
+                            for url in issuer_metadata_urls(&Url::parse(&p.issuer).unwrap()) {
+                                found = found || get_json(&url).await.is_some();
+                            }
+                            found
+                        }
+                        Err(_) => false,
+                    };
+                    (e, plan, published)
+                })
+            })
+            .collect();
+        let mut failed = vec![];
+        println!("| Connector | Registration | Metadata document | Sign-in server | Result |\n|---|---|---|---|---|");
+        for check in checks {
+            let (e, plan, published) = check.await.unwrap();
+            let (dcr, cimd, issuer, way) = match &plan {
+                Ok(p) if published => (p.registration_endpoint.is_some(), p.client_metadata_documents, p.issuer.clone(), Some(registration(p))),
+                Ok(p) => (false, false, format!("{} (no metadata)", p.issuer), None),
+                Err(why) => (false, false, why.clone(), None),
+            };
+            let result = match (way, e.token_help.is_some()) {
+                (Some(Registration::Token) | None, true) => "PASS (token)",
+                (Some(Registration::Dynamic(_)), false) => "PASS (registers)",
+                (Some(Registration::Document), false) => "PASS (document)",
+                (_, true) => "PASS, but no longer needs a token",
+                _ => {
+                    failed.push(e.id);
+                    "FAIL"
+                }
+            };
+            let yes = |b: bool| if b { "yes" } else { "no" };
+            println!("| {} | {} | {} | {} | {} |", e.name, yes(dcr), yes(cimd), issuer, result);
+        }
+        assert!(failed.is_empty(), "no longer offer sign-in: {failed:?}");
     }
 }

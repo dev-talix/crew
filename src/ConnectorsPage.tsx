@@ -1,6 +1,6 @@
 import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { api, errorText, onEvent, onMountAsync, type Agent } from "./api";
-import { addedFor, connectorStatus, type CatalogEntry, type Connector } from "./connectors";
+import { addedFor, connectorStatus, filterCatalog, type CatalogEntry, type Connector } from "./connectors";
 import { Page, Sheet } from "./ui";
 import "./connectors.css";
 
@@ -23,6 +23,7 @@ export default function ConnectorsPage(props: { agents: Agent[] }) {
   const [url, setUrl] = createSignal("");
   const [name, setName] = createSignal("");
   const [adding, setAdding] = createSignal(false);
+  const [query, setQuery] = createSignal("");
   let confirmTimer: number | undefined;
   onCleanup(() => clearTimeout(confirmTimer));
 
@@ -36,6 +37,7 @@ export default function ConnectorsPage(props: { agents: Agent[] }) {
 
   const names = createMemo(() => Object.fromEntries(props.agents.map((a) => [a.id, a.name])));
   const available = createMemo(() => catalog().filter((e) => !addedFor(e, connectors())));
+  const shown = createMemo(() => filterCatalog(available(), query()));
   const entryFor = (c: Connector) => catalog().find((e) => addedFor(e, [c]));
 
   const run = async (action: () => Promise<unknown>) => {
@@ -138,8 +140,23 @@ export default function ConnectorsPage(props: { agents: Agent[] }) {
 
         <Show when={available().length > 0}>
           <h2 class="section-title">Catalog</h2>
+          <input
+            class="connector-search"
+            type="search"
+            placeholder="Search connectors"
+            aria-label="Search connectors"
+            value={query()}
+            onInput={(e) => setQuery(e.currentTarget.value)}
+          />
           <div class="list">
-            <For each={available()}>
+            <For
+              each={shown()}
+              fallback={
+                <div class="list-row">
+                  <p class="hint">No connectors match. You can still add one by its URL below.</p>
+                </div>
+              }
+            >
               {(entry) => (
                 <div class="list-row connector-row">
                   <Tile name={entry.name} />
@@ -181,8 +198,8 @@ export default function ConnectorsPage(props: { agents: Agent[] }) {
           </div>
         </form>
         <p class="hint settings-footnote">
-          Grimoire signs in to servers that let apps register themselves. Services that only work with your own OAuth app, like Gmail or Slack,
-          aren't supported. For a server that takes a personal access token instead, use "Use a token".
+          Grimoire signs in to servers that let apps register themselves or accept Grimoire's published client document. Services that only work
+          with your own OAuth app, like Gmail or Slack, aren't supported. For a server that takes a personal access token instead, use "Use a token".
         </p>
       </div>
 

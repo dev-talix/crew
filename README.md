@@ -46,14 +46,19 @@
   library" and it saves it through Grimoire's own tools, credited to it.
 - **The vault** keeps logins, API keys, and cards in your macOS Keychain. Familiars can use a
   secret in a command without ever seeing it, and Grimoire asks you first.
-- **Connectors** let familiars use hosted MCP servers like Linear, Notion, Sentry, Atlassian, Figma,
-  and Stripe. Add one from the catalog in Settings, Connectors, or paste any server's URL, then sign
-  in with your own account in the browser. Grimoire registers itself with the server, so you don't
-  need a developer account. Turn each connector on per familiar in its settings. Sign-ins stay in your
-  Keychain, and Grimoire adds them to each request itself, so familiars never see them. Servers that
-  only work with your own OAuth app, like Gmail and Slack, aren't supported. GitHub takes a personal
-  access token instead. Connectors run through this Mac, so remote familiars don't get them yet.
-  Importing a template that names apps like Linear or Jira suggests the matching connectors.
+- **Connectors** let familiars use hosted MCP servers. The catalog in Settings, Connectors has 45,
+  including Linear, Notion, Atlassian, Figma, Stripe, Todoist, Miro, Dropbox, Granola, Attio, GitLab,
+  and PostHog, with a search box. You can also paste any server's URL. Then sign in with your own
+  account in the browser. You don't need a developer account: Grimoire registers itself with the
+  server, or, at a server that takes [Client ID Metadata Documents](docs/oauth/client-metadata.json),
+  uses that document's URL as its client id. That document isn't published yet, so a server that only
+  takes the document, like Dovetail, says so instead of signing in. Turn each connector on per
+  familiar in its settings. Sign-ins stay in your Keychain, and Grimoire adds them to each request
+  itself, so familiars never see them. Servers that only work with your own OAuth app, like Gmail and
+  Slack, aren't supported. GitHub and Render take a token you make yourself instead. Connectors run
+  through this Mac, so remote familiars don't get them yet. Importing a template that names apps like
+  Linear or Jira suggests the matching connectors. To check that every catalog server still offers
+  sign-in, run `cargo test catalog_servers_offer_sign_in -- --ignored --nocapture` in `src-tauri`.
 - **Drafts, not sends.** A familiar never sends email, Slack messages, or posts. It drafts them with
   `draft_message`, and the draft shows up as a card in the corner, with a notification when approval
   notifications are on. Edit it, open it in Mail or copy it, then mark it sent or discard it; the

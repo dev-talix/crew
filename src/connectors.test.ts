@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { addedFor, connectorStatus, suggestConnectors, toggleId, type CatalogEntry, type Connector } from "./connectors";
+import { addedFor, connectorStatus, filterCatalog, suggestConnectors, toggleId, type CatalogEntry, type Connector } from "./connectors";
 
-const entry = (id: string, apps: string[]): CatalogEntry => ({ id, name: id, url: `https://mcp.${id}.com/mcp`, description: "", apps, tokenHelp: null });
+const entry = (id: string, apps: string[]): CatalogEntry => ({ id, name: id, url: `https://mcp.${id}.com/mcp`, description: "", apps, exactApps: false, tokenHelp: null });
 const catalog = [entry("linear", ["linear"]), entry("atlassian", ["atlassian", "jira", "confluence"]), entry("monday", ["monday", "monday.com"])];
 
 describe("suggestConnectors", () => {
@@ -10,9 +10,24 @@ describe("suggestConnectors", () => {
     expect(found.map((e) => e.id)).toEqual(["atlassian", "linear", "monday"]);
   });
 
+  test("matches an entry with exactApps only by a whole app name", () => {
+    const square = { ...entry("square", ["square", "square pos"]), exactApps: true };
+    expect(suggestConnectors(["Square Enix"], [square])).toEqual([]);
+    expect(suggestConnectors(["Square"], [square]).map((e) => e.id)).toEqual(["square"]);
+    expect(suggestConnectors(["Square POS"], [square]).map((e) => e.id)).toEqual(["square"]);
+  });
+
   test("ignores names that only contain an app name", () => {
     expect(suggestConnectors(["Nonlinear notes", "Mondays"], catalog)).toEqual([]);
   });
+});
+
+test("filterCatalog matches every word against the name, description, and app names", () => {
+  const described = [...catalog, { ...entry("granola", ["granola"]), description: "Meeting notes and transcripts" }];
+  expect(filterCatalog(described, "").length).toBe(4);
+  expect(filterCatalog(described, "JIRA").map((e) => e.id)).toEqual(["atlassian"]);
+  expect(filterCatalog(described, " meeting  notes ").map((e) => e.id)).toEqual(["granola"]);
+  expect(filterCatalog(described, "meeting jira")).toEqual([]);
 });
 
 describe("connectorStatus", () => {
