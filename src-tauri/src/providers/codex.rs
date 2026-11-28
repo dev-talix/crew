@@ -90,14 +90,16 @@ pub struct Codex {
 }
 
 /// "untrusted" makes Codex ask before commands it doesn't know are safe, so Grimoire's rules see them.
-fn approval_policy() -> &'static str {
-    if crate::permissions::active() { "untrusted" } else { "never" }
+/// A check-in or memory review (`key`) never asks, since nobody is there to answer, so Codex keeps
+/// every command in its sandbox.
+fn approval_policy(key: &str) -> &'static str {
+    if crate::permissions::active() && !crate::checkins::unattended(key) { "untrusted" } else { "never" }
 }
 
 /// `tools_key` is the familiar's id, or its side conversation's lane key, for Grimoire's tool server.
 fn thread_params(agent: &Agent, tools_key: &str) -> Value {
     let mut params = json!({
-        "approvalPolicy": approval_policy(),
+        "approvalPolicy": approval_policy(tools_key),
         // Approval requests come to Grimoire, not to Codex's own automatic reviewer.
         "approvalsReviewer": "user",
         "sandbox": match agent.access {
@@ -137,6 +139,17 @@ fn thread_params(agent: &Agent, tools_key: &str) -> Value {
             }
         }
         params["config"] = json!({ "mcp_servers": servers });
+    }
+    if crate::checkins::unattended(tools_key) {
+        // Whatever the person's own Codex config allows, an unattended turn's sandbox has no network
+        // and writes only to the workspace.
+        let sandbox = json!({ "network_access": false, "writable_roots": [], "exclude_tmpdir_env_var": true, "exclude_slash_tmp": true });
+        match params.get_mut("config").and_then(Value::as_object_mut) {
+            Some(config) => {
+                config.insert("sandbox_workspace_write".into(), sandbox);
+            }
+            None => params["config"] = json!({ "sandbox_workspace_write": sandbox }),
+        }
     }
     if let Some(memory) = crate::briefing::session_prompt(agent) {
         params["developerInstructions"] = json!(memory);
@@ -194,7 +207,7 @@ impl Codex {
         if let Ok(mut routes) = process.routes.lock() {
             routes.insert(thread_id.clone(), Route { tx: Some(tx), ..Route::default() });
         }
-        let mut params = json!({ "threadId": thread_id, "input": turn_input(text, images), "approvalPolicy": approval_policy(), "approvalsReviewer": "user" });
+        let mut params = json!({ "threadId": thread_id, "input": turn_input(text, images), "approvalPolicy": approval_policy(key), "approvalsReviewer": "user" });
         if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
             params["model"] = json!(model);
         }
@@ -398,6 +411,7 @@ impl Codex {
                         let (id, process) = (id.clone(), process.clone());
                         tauri::async_runtime::spawn(async move {
                             let allowed = match agent {
+                                Some(key) if crate::checkins::unattended(&key) => false,
                                 Some(key) => crate::permissions::check_command(crate::side::split(&key).0, &command, codex_request_key(process.serial, &id)).await,
                                 None => false,
                             };
@@ -671,6 +685,35 @@ mod tests {
         assert_eq!(failed.0, vec![ProviderEvent::Failed("quota".into())]);
         let stopped = run(&[("turn/completed", json!({"turn":{"status":"interrupted","error":null}}))]);
         assert_eq!(stopped.0, vec![ProviderEvent::Stopped]);
+    }
+
+    #[test]
+    fn check_ins_get_a_closed_sandbox() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let agent = Agent {
+            id: "ci".into(),
+            name: "Ada".into(),
+            provider: crate::db::Provider::Codex,
+            model: None,
+            workspace: "/tmp/ada".into(),
+            access: Access::Workspace,
+            session_id: None,
+            avatar: crate::db::Avatar::for_seed("ci"),
+            effort: None,
+            active_model: None,
+            coven_id: None,
+            host: None,
+            created_at: 0,
+        };
+        db.insert_agent(&agent).unwrap();
+        assert!(thread_params(&agent, "ci")["config"].get("sandbox_workspace_write").is_none(), "an ordinary turn keeps the person's config");
+        let (_, chat) = crate::checkins::begin(&db, "ci", "checkin", "Check-in").unwrap();
+        let key = crate::side::lane_key("ci", &chat);
+        let params = thread_params(&agent, &key);
+        assert_eq!(params["approvalPolicy"], "never");
+        assert_eq!(params["config"]["sandbox_workspace_write"]["network_access"], false);
+        assert_eq!(params["config"]["sandbox_workspace_write"]["exclude_slash_tmp"], true);
+        crate::checkins::release(&chat);
     }
 
     #[test]

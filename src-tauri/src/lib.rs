@@ -1,5 +1,6 @@
 mod approvals;
 mod chats;
+mod checkins;
 mod connectors;
 mod attachments;
 mod background;
@@ -784,6 +785,9 @@ pub fn run() {
             ledger::init(db.clone());
             // Helpers' CLI sessions ended with the last launch; the chat's helpers list shows them as interrupted.
             let _ = helpers::interrupt_leftovers(&db);
+            if let Err(e) = checkins::recover(&db) {
+                eprintln!("Couldn't close check-ins left unfinished: {e}");
+            }
             let billing = db.setting(CLAUDE_BILLING).ok().flatten();
             providers::USE_CLAUDE_SUBSCRIPTION.store(billing.as_deref() != Some("api"), Ordering::Relaxed);
             let cut_off = handoffs::cut_off_remote(&db).unwrap_or_else(|e| {
@@ -994,7 +998,10 @@ pub fn run() {
             telegram::telegram_forget_token,
             telegram::telegram_set_enabled,
             telegram::telegram_start_pairing,
-            telegram::telegram_unpair
+            telegram::telegram_unpair,
+            checkins::get_checkins,
+            checkins::save_checkins,
+            checkins::list_checkins
         ])
         .on_window_event(|window, event| {
             if let (WindowEvent::Focused(true), "main") = (event, window.label()) {

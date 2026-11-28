@@ -396,7 +396,12 @@ pub fn list_chats(state: State<AppState>, agent_id: String) -> Result<Vec<Chat>,
 #[tauri::command]
 pub fn new_chat(app: AppHandle, state: State<AppState>, agent_id: String) -> Result<Chat, String> {
     crate::link::local_only(&agent_id)?;
-    switch(&app, &state, &agent_id, || start(&state.db, &agent_id))
+    let left = state.db.with(|c| current_id(c, &agent_id))?;
+    let chat = switch(&app, &state, &agent_id, || start(&state.db, &agent_id))?;
+    if let Some(left) = left.filter(|left| *left != chat.id) {
+        crate::checkins::after_new_chat(&state.db, &state.runtime, &agent_id, &left);
+    }
+    Ok(chat)
 }
 
 #[tauri::command]

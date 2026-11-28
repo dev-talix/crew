@@ -1,0 +1,61 @@
+/* Check-ins in familiar settings: the schedule row and the recent check-ins with their transcripts. */
+.checkin-schedule {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.checkin-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.checkin-inline input[type="number"] {
+  width: 64px;
+}
+
+.checkin-inline input[type="time"] {
+  width: auto;
+}
+
+.checkin-runs {
+  display: flex;
+  flex-direction: column;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.checkin-run {
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+}
+
+.checkin-run:first-child {
+  border-top: 0;
+}
+
+.checkin-run .row.side {
+  padding-bottom: 0;
+}
+
+.checkin-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.checkin-time {
+  color: var(--faint);
+}
+
+.checkin-summary {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text);
+}

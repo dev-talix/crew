@@ -59,6 +59,7 @@ function LocalConversation(props: { message: Message; asker: string; startOpen?:
   return (
     <div class="row side" data-slot="message" data-role="side" data-message-id={props.message.id}>
       <button
+        type="button"
         class="tool-line tool-toggle side-toggle"
         aria-expanded={open() ? "true" : "false"}
         title={`Open the conversation with ${partner()}`}

@@ -250,7 +250,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 29;
+const SCHEMA_VERSION: i64 = 30;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -560,6 +560,9 @@ impl Db {
         }
         if version < 29 {
             crate::rooms::migrate(&conn)?;
+        }
+        if version < 30 {
+            crate::checkins::migrate(&conn)?;
         }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
@@ -1098,6 +1101,7 @@ mod tests {
                 "DROP TABLE agent_connectors; DROP TABLE connectors;
                  ALTER TABLE agents DROP COLUMN setup_pending; ALTER TABLE chats DROP COLUMN handoff; DROP TABLE handoffs; DROP TABLE link_peers;
                  ALTER TABLE chats DROP COLUMN remote_peer; ALTER TABLE chats DROP COLUMN remote_asker; ALTER TABLE chats DROP COLUMN remote_name;
+                 DROP TABLE chat_reviews; DROP TABLE checkin_runs; DROP TABLE checkins;
                  DROP TABLE room_messages; DROP TABLE room_members; DROP TABLE rooms;
                  PRAGMA user_version = 21;",
             )
@@ -1138,6 +1142,7 @@ mod tests {
                    kind TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL);
                  INSERT INTO old SELECT id, chat_id, kind, text, status, created_at FROM handoffs;
                  DROP TABLE handoffs; ALTER TABLE old RENAME TO handoffs; CREATE INDEX handoffs_by_chat ON handoffs(chat_id);
+                 DROP TABLE chat_reviews; DROP TABLE checkin_runs; DROP TABLE checkins;
                  DROP TABLE room_messages; DROP TABLE room_members; DROP TABLE rooms;
                  PRAGMA user_version = 25;",
             )
