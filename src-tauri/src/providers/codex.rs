@@ -756,10 +756,10 @@ mod tests {
             created_at: 0,
         };
         db.insert_agent(&agent).unwrap();
-        assert!(thread_params(&agent, "ci")["config"].get("sandbox_workspace_write").is_none(), "an ordinary turn keeps the person's config");
+        assert!(thread_params(&agent, "ci", None)["config"].get("sandbox_workspace_write").is_none(), "an ordinary turn keeps the person's config");
         let (_, chat) = crate::checkins::begin(&db, "ci", "checkin", "Check-in").unwrap();
         let key = crate::side::lane_key("ci", &chat);
-        let params = thread_params(&agent, &key);
+        let params = thread_params(&agent, &key, None);
         assert_eq!(params["approvalPolicy"], "never");
         assert_eq!(params["config"]["sandbox_workspace_write"]["network_access"], false);
         assert_eq!(params["config"]["sandbox_workspace_write"]["exclude_slash_tmp"], true);
