@@ -20,18 +20,19 @@ const haggle: MarketTemplate = {
 };
 
 describe("draftFromTemplate", () => {
-  test("maps description, memories, and skills to rules and integrations to one fact", () => {
+  test("maps description and memories to rules, integrations to one fact, and skills to skills", () => {
     const draft = draftFromTemplate(haggle);
     expect(draft.name).toBe("Haggle Bot");
     expect(draft.memory.map((r) => [r.origin, r.kind])).toEqual([
       ["description", "rule"],
       ["memory", "rule"],
-      ["skill", "rule"],
       ["integrations", "fact"],
     ]);
     expect(draft.memory[0].text).toBe("You are Haggle Bot. Finds SaaS savings.");
-    expect(draft.memory[2].text).toBe("When asked to haggle-setup: First-run interview.");
-    expect(draft.memory[3].text).toContain("Ramp, Gmail");
+    expect(draft.memory[2].text).toContain("Ramp, Gmail");
+    expect(draft.skills).toEqual([
+      { id: "s0", name: "haggle-setup", description: "Use when asked to haggle-setup. First-run interview.", body: "First-run interview.", include: true },
+    ]);
   });
 
   test("turns routines into rituals with guessed schedules", () => {
@@ -68,6 +69,7 @@ test("guessSchedule reads common words and falls back to Mondays", () => {
 
 test("permissionLines states access and what isn't connected", () => {
   const lines = permissionLines(haggle, "workspace", "codex");
+  expect(lines.join(" ")).toContain("turned on for this familiar only");
   expect(lines[0]).toContain("sandbox");
   expect(permissionLines(haggle, "workspace", "claude")[0]).toContain("Permissions settings");
   expect(lines.join(" ")).toContain("won't connect: Ramp, Gmail");

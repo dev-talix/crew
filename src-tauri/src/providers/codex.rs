@@ -1,7 +1,7 @@
 use super::{launch, spawn_error, EventTx, IdleTimer, Lane, LaneSession, ModelOption, ProviderEvent, StderrTail};
 use crate::db::{Access, Agent};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,7 +36,11 @@ struct CodexProcess {
     next_id: AtomicU64,
     pending: Pending,
     routes: Mutex<HashMap<String, Route>>,
-    loaded: Mutex<HashSet<String>>,
+    /// Threads this server has open, each with the skills signature it was opened with. None, or a
+    /// different signature, means its settings or skills changed, so it opens again with new config.
+    loaded: Mutex<HashMap<String, Option<String>>>,
+    /// The skill root's signature as last sent with `skills/extraRoots/set`.
+    skill_root: Mutex<Option<String>>,
 }
 
 impl CodexProcess {
@@ -87,6 +91,9 @@ pub struct Codex {
     idle: Arc<IdleTimer>,
     /// The other Mac this app server runs on, for familiars there. None runs it here.
     host: Option<String>,
+    /// Turn starts take turns from working out skills to `turn/start`, so Codex never rescans the
+    /// shared skill root between a thread getting its list of skills to turn off and its turn.
+    turn_gate: tokio::sync::Mutex<()>,
 }
 
 /// "untrusted" makes Codex ask before commands it doesn't know are safe, so Grimoire's rules see them.
@@ -97,7 +104,8 @@ fn approval_policy(key: &str) -> &'static str {
 }
 
 /// `tools_key` is the familiar's id, or its side conversation's lane key, for Grimoire's tool server.
-fn thread_params(agent: &Agent, tools_key: &str) -> Value {
+/// `skills` names the shared skills this familiar doesn't have on, which its thread turns off.
+fn thread_params(agent: &Agent, tools_key: &str, skills: Option<&crate::skills::CodexSkills>) -> Value {
     let mut params = json!({
         "approvalPolicy": approval_policy(tools_key),
         // Approval requests come to Grimoire, not to Codex's own automatic reviewer.
@@ -151,10 +159,31 @@ fn thread_params(agent: &Agent, tools_key: &str) -> Value {
             None => params["config"] = json!({ "sandbox_workspace_write": sandbox }),
         }
     }
+    // Sent even when empty: a resumed thread without it keeps the list it started with.
+    if let Some(skills) = skills.filter(|_| agent.host.is_none()) {
+        let off: Vec<Value> = skills.disabled.iter().map(|path| json!({ "path": path, "enabled": false })).collect();
+        if !params["config"].is_object() {
+            params["config"] = json!({});
+        }
+        params["config"]["skills"] = json!({ "config": off });
+    }
     if let Some(memory) = crate::briefing::session_prompt(agent) {
         params["developerInstructions"] = json!(memory);
     }
     params
+}
+
+/// Points the app server at Grimoire's shared skill root when what it holds changed since the last
+/// time, which also makes Codex scan it again. A failure only costs this turn its skills.
+async fn share_skill_root(process: &CodexProcess, skills: &crate::skills::CodexSkills) {
+    let sent = process.skill_root.lock().ok().and_then(|s| s.clone());
+    if sent.as_deref() == Some(skills.root_signature.as_str()) || (sent.is_none() && skills.root_signature.is_empty()) {
+        return;
+    }
+    match process.request("skills/extraRoots/set", json!({ "extraRoots": [skills.root] })).await {
+        Ok(_) => drop(process.skill_root.lock().map(|mut s| *s = Some(skills.root_signature.clone()))),
+        Err(e) => eprintln!("Codex didn't take Grimoire's skills: {e}"),
+    }
 }
 
 /// A turn's `input`: each image as a `localImage` Codex reads from disk, then the text.
@@ -181,12 +210,21 @@ impl Codex {
         let process = self.ensure_process(&agent.workspace).await?;
         self.idle.cancel();
         let key = lane.map_or(&agent.id, |l| &l.key);
+        let _gate = self.turn_gate.lock().await;
+        // Skills live on this Mac, so only a local app server gets the shared skill root.
+        let skills = match self.host {
+            None => crate::skills::codex(agent).inspect_err(|_| self.arm_idle_if_unused(&process))?,
+            Some(_) => None,
+        };
+        if let Some(skills) = &skills {
+            share_skill_root(&process, skills).await;
+        }
         let known = match lane.map(|l| &l.session) {
             None => agent.session_id.as_deref(),
             Some(LaneSession::Resume(id)) => Some(id.as_str()),
             Some(_) => None,
         };
-        let thread_id = match self.open_thread(&process, agent, key, lane).await {
+        let thread_id = match self.open_thread(&process, agent, key, lane, skills.as_ref()).await {
             Ok((id, model)) => {
                 if let Some(model) = model {
                     let _ = tx.send(ProviderEvent::Model(model));
@@ -269,7 +307,11 @@ impl Codex {
         let process = self.process.lock().await.clone();
         if let Some(process) = process {
             if let Ok(mut loaded) = process.loaded.lock() {
-                loaded.retain(|thread| !threads.contains(thread));
+                for (thread, signature) in loaded.iter_mut() {
+                    if threads.contains(thread) {
+                        *signature = None;
+                    }
+                }
             }
         }
     }
@@ -280,8 +322,10 @@ impl Codex {
         }
     }
 
-    async fn open_thread(&self, process: &Arc<CodexProcess>, agent: &Agent, key: &str, lane: Option<&Lane>) -> Result<(String, Option<String>), String> {
+    async fn open_thread(&self, process: &Arc<CodexProcess>, agent: &Agent, key: &str, lane: Option<&Lane>, skills: Option<&crate::skills::CodexSkills>) -> Result<(String, Option<String>), String> {
         let model_of = |result: &Value| result["model"].as_str().map(str::to_string);
+        let signature = skills.map_or(String::new(), |s| s.signature.clone());
+        let opened = |id: &str| drop(process.loaded.lock().map(|mut l| l.insert(id.to_string(), Some(signature.clone()))));
         let (saved, fork) = match lane.map(|l| &l.session) {
             None => (agent.session_id.as_deref(), None),
             Some(LaneSession::Resume(id)) => (Some(id.as_str()), None),
@@ -289,31 +333,36 @@ impl Codex {
             Some(LaneSession::Fresh) => (None, None),
         };
         if let Some(saved) = saved {
-            if process.loaded.lock().map(|l| l.contains(saved)).unwrap_or(false) {
-                return Ok((saved.to_string(), None));
+            let open_here = process.loaded.lock().map(|l| l.get(saved).cloned()).unwrap_or(None);
+            match open_here {
+                Some(Some(opened_with)) if opened_with == signature => return Ok((saved.to_string(), None)),
+                // Codex keeps a thread's first config across resumes while it's subscribed, so let go
+                // of it first; the resume below subscribes again with the new config.
+                Some(_) => drop(process.request("thread/unsubscribe", json!({ "threadId": saved })).await),
+                None => {}
             }
-            let mut params = thread_params(agent, key);
+            let mut params = thread_params(agent, key, skills);
             params["threadId"] = json!(saved);
             if let Ok(result) = process.request("thread/resume", params).await {
-                process.loaded.lock().ok().map(|mut l| l.insert(saved.to_string()));
+                opened(saved);
                 return Ok((saved.to_string(), model_of(&result)));
             }
         }
         if let Some(main) = fork {
-            let mut params = thread_params(agent, key);
+            let mut params = thread_params(agent, key, skills);
             params["threadId"] = json!(main);
             params["excludeTurns"] = json!(true);
             // A main thread Codex can't copy, say one it lost, starts the side conversation fresh.
             if let Ok(result) = process.request("thread/fork", params).await {
                 if let Some(id) = result["thread"]["id"].as_str() {
-                    process.loaded.lock().ok().map(|mut l| l.insert(id.to_string()));
+                    opened(id);
                     return Ok((id.to_string(), model_of(&result)));
                 }
             }
         }
-        let result = process.request("thread/start", thread_params(agent, key)).await?;
+        let result = process.request("thread/start", thread_params(agent, key, skills)).await?;
         let id = result["thread"]["id"].as_str().ok_or("codex returned no thread id")?.to_string();
-        process.loaded.lock().ok().map(|mut l| l.insert(id.clone()));
+        opened(&id);
         Ok((id, model_of(&result)))
     }
 
@@ -362,7 +411,8 @@ impl Codex {
             next_id: AtomicU64::new(1),
             pending: Mutex::new(HashMap::new()),
             routes: Mutex::new(HashMap::new()),
-            loaded: Mutex::new(HashSet::new()),
+            loaded: Mutex::new(HashMap::new()),
+            skill_root: Mutex::new(None),
         });
 
         let reader = process.clone();
@@ -706,10 +756,10 @@ mod tests {
             created_at: 0,
         };
         db.insert_agent(&agent).unwrap();
-        assert!(thread_params(&agent, "ci")["config"].get("sandbox_workspace_write").is_none(), "an ordinary turn keeps the person's config");
+        assert!(thread_params(&agent, "ci", None)["config"].get("sandbox_workspace_write").is_none(), "an ordinary turn keeps the person's config");
         let (_, chat) = crate::checkins::begin(&db, "ci", "checkin", "Check-in").unwrap();
         let key = crate::side::lane_key("ci", &chat);
-        let params = thread_params(&agent, &key);
+        let params = thread_params(&agent, &key, None);
         assert_eq!(params["approvalPolicy"], "never");
         assert_eq!(params["config"]["sandbox_workspace_write"]["network_access"], false);
         assert_eq!(params["config"]["sandbox_workspace_write"]["exclude_slash_tmp"], true);
@@ -733,20 +783,20 @@ mod tests {
             host: None,
             created_at: 0,
         };
-        let params = thread_params(&agent, &agent.id);
+        let params = thread_params(&agent, &agent.id, None);
         assert_eq!(params["sandbox"], "workspace-write");
         assert_eq!(params["approvalPolicy"], "never");
         assert!(params.get("model").is_none());
         assert!(params.get("developerInstructions").is_none(), "no memory yet");
         assert_eq!(params["cwd"], "/tmp/ada");
         let remote = Agent { host: Some("me@studio.local".into()), workspace: "~/ada".into(), ..agent.clone() };
-        assert!(thread_params(&remote, &remote.id).get("cwd").is_none(), "the remote app server runs in its workspace");
+        assert!(thread_params(&remote, &remote.id, None).get("cwd").is_none(), "the remote app server runs in its workspace");
 
         let agent = Agent { id: "memory-codex".into(), ..agent };
         let dir = crate::memory::test_dir();
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("memory-codex.md"), "Deploys go out on Fridays.").unwrap();
-        let instructions = thread_params(&agent, &agent.id)["developerInstructions"].as_str().unwrap().to_string();
+        let instructions = thread_params(&agent, &agent.id, None)["developerInstructions"].as_str().unwrap().to_string();
         assert!(instructions.contains("Deploys go out on Fridays."));
     }
 }

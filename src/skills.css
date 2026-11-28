@@ -1,0 +1,110 @@
+/* Settings, Skills: the library, adding a skill, and viewing one's files. */
+
+.skills > .settings-detail {
+  margin: 0 0 4px;
+}
+
+.skill-row {
+  flex-wrap: wrap;
+}
+
+.skill-row .list-main {
+  flex-basis: 200px;
+}
+
+.skill-open {
+  align-items: flex-start;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.skill-open .skill-description {
+  white-space: normal;
+  color: var(--text);
+}
+
+.skill-row .list-actions {
+  gap: 6px;
+}
+
+.skill-add {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.skill-add-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.skill-add-form .field {
+  width: 100%;
+}
+
+.skill-add-form textarea {
+  font: 12px/1.5 var(--mono);
+}
+
+.skill-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.skill-preview-description {
+  margin: 0;
+}
+
+.skill-notes {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+.skill-files {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 56vh;
+  overflow-y: auto;
+}
+
+.skill-file-path {
+  margin: 0 0 6px;
+  font: 500 12px/1.4 var(--mono);
+  color: var(--muted);
+}
+
+.skill-file pre {
+  margin: 0;
+  padding: 11px 13px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+  font: 12px/1.5 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Template skills in the import review. */
+.template-skill-name,
+.template-skill-description {
+  width: 100%;
+}
+
+.template-skill-name {
+  font-family: var(--mono);
+}
+
+.template-skill-description {
+  font-weight: 400;
+}

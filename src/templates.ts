@@ -1,6 +1,7 @@
 import type { Access, Provider, Schedule } from "./api";
 import type { Avatar } from "./avatar";
 import { ENTRY_LIMIT, MEMORY_LIMIT, entriesSize, type MemoryKind } from "./memory";
+import { templateSkills, type TemplateSkillRow } from "./skills";
 
 /** A titled line from a marketplace template: a memory, skill, routine, or integration. */
 export interface TemplateItem {
@@ -25,7 +26,7 @@ export interface MarketTemplate {
 }
 
 /** Where a memory row came from in the template, shown beside it in the preview. */
-export type Origin = "description" | "instructions" | "memory" | "skill" | "integrations";
+export type Origin = "description" | "instructions" | "memory" | "integrations";
 
 export interface MemoryRow {
   id: string;
@@ -55,6 +56,10 @@ export interface TemplateDraft {
   avatar: Avatar;
   memory: { kind: MemoryKind; text: string }[];
   rituals: { name: string; prompt: string; schedule: Schedule }[];
+  /** Become skills, on for the new familiar only. */
+  skills: { name: string; description: string; body: string }[];
+  /** The template's marketplace page, recorded as where its skills came from. */
+  sourceUrl: string | null;
 }
 
 /** Pieces no longer than `limit` characters, cut after a sentence or a space when one is near. */
@@ -91,10 +96,11 @@ const clip = (text: string, max: number) => (text.length > max ? text.slice(0, m
 
 /**
  * Maps a template onto a familiar. Grimoire has no persona field: what a familiar is told at the
- * start of a chat is its memory, so the description, instructions, memories, and skills become rules,
- * and the apps it expects become one fact. Routines become rituals. Nothing becomes a tool grant.
+ * start of a chat is its memory, so the description, instructions, and memories become rules, and the
+ * apps it expects become one fact. Its skills become Grimoire skills and its routines rituals.
+ * Nothing becomes a tool grant.
  */
-export function draftFromTemplate(t: MarketTemplate): { name: string; memory: MemoryRow[]; rituals: RitualRow[] } {
+export function draftFromTemplate(t: MarketTemplate): { name: string; memory: MemoryRow[]; rituals: RitualRow[]; skills: TemplateSkillRow[] } {
   const name = clip(t.name.trim() || t.slug, 60);
   let n = 0;
   const rows: MemoryRow[] = [];
@@ -104,10 +110,6 @@ export function draftFromTemplate(t: MarketTemplate): { name: string; memory: Me
   if (t.description.trim()) add("description", "rule", `You are ${name}. ${t.description.trim()}`);
   if (t.instructions.trim()) add("instructions", "rule", t.instructions);
   for (const m of t.memories) if (m.description.trim()) add("memory", "rule", m.description);
-  for (const s of t.skills) {
-    const body = s.description.trim();
-    if (body) add("skill", "rule", s.name ? `When asked to ${s.name}: ${body}` : body);
-  }
   if (t.integrations.length) {
     const apps = t.integrations.map((i) => i.name).filter(Boolean).join(", ");
     add("integrations", "fact", `This familiar's template expected these apps: ${apps}. Grimoire didn't connect any of them, so ask before assuming access.`);
@@ -125,7 +127,7 @@ export function draftFromTemplate(t: MarketTemplate): { name: string; memory: Me
       const { schedule, note } = guessSchedule(`${r.name} ${r.description}`);
       return { id: `r${i}`, name: clip(r.name.trim() || `Ritual ${i + 1}`, 60), prompt: r.description.replace(/^\s*disabled by default\.\s*/i, "").trim() || r.name.trim(), schedule, scheduleNote: note, include: true };
     });
-  return { name, memory: rows, rituals };
+  return { name, memory: rows, rituals, skills: templateSkills(t.skills) };
 }
 
 /** The included memory rows, and whether they fit the familiar's memory. */
@@ -147,10 +149,9 @@ export function permissionLines(t: MarketTemplate, access: Access, provider: Pro
       : "Full access: off. Claude edits files only in its workspace, but shell commands follow your Permissions settings, which allow them unless you set Grimoire to ask.";
   const lines = [
     access === "full" ? "Full access: on. Commands can run anywhere on this Mac without a sandbox." : workspace,
-    connectable.length
-      ? "No tools or skills are installed. Skills come in as written rules only."
-      : "No tools, skills, or connectors are installed. Skills come in as written rules only.",
+    connectable.length ? "No tools are installed." : "No tools or connectors are installed.",
   ];
+  if (t.skills.length) lines.push("Its skills come in as Grimoire skills, turned on for this familiar only. Read each one below.");
   if (connectable.length) lines.push(`Connectors below can link ${connectable.join(", ")} once you sign in.`);
   const rest = t.integrations.map((i) => i.name).filter((name) => !connectable.includes(name));
   if (rest.length) lines.push(`Expects ${rest.length === 1 ? "this app" : "these apps"}, which Grimoire won't connect: ${rest.join(", ")}.`);

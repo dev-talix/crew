@@ -18,7 +18,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 pub const SERVER_NAME: &str = "grimoire";
-const TOOL_NAMES: [&str; 11] = [
+const TOOL_NAMES: [&str; 14] = [
     "list_familiars",
     "list_spells",
     "create_spell",
@@ -30,6 +30,9 @@ const TOOL_NAMES: [&str; 11] = [
     "ask_familiar",
     "message_familiar",
     crate::checkins::SEARCH_TOOL,
+    "list_skills",
+    "create_skill",
+    "update_skill",
 ];
 /// How long the CLIs let one Grimoire tool call run. ask_familiar waits up to 10 minutes for a reply,
 /// plus up to 2 for the person's OK, so this leaves room for both. Their defaults are far shorter.
@@ -182,6 +185,7 @@ pub fn definitions() -> Value {
         list.extend(crate::drafts::definitions());
         list.extend(crate::browser::definitions());
         list.extend(crate::checkins::definitions());
+        list.extend(crate::skills::definitions());
     }
     list
 }
@@ -453,6 +457,7 @@ pub fn call(db: &Db, themes_dir: &Path, caller: &str, tool: &str, arguments: Val
         tool if inbox::TOOL_NAMES.contains(&tool) => (inbox::call_tool(db, caller, tool, &arguments)?, Some(inbox::CHANGED)),
         tool if ledger::TOOL_NAMES.contains(&tool) => (ledger::call_tool(db, caller, tool, &arguments)?, ledger::changed_event(tool)),
         crate::checkins::SEARCH_TOOL => (crate::checkins::search_tool(db, caller, &arguments)?, None),
+        tool if crate::skills::TOOL_NAMES.contains(&tool) => (crate::skills::call_tool(db, caller, tool, &arguments)?, crate::skills::changed_event(tool)),
         _ => return Err(format!("Grimoire has no tool named {tool}.")),
     };
     Ok(Outcome { text, changed })

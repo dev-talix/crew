@@ -284,3 +284,11 @@ export const LinkIcon = () => (
     <path d="M4 7v2.5a1 1 0 0 0 1 1h4.5M12 9V6.5a1 1 0 0 0-1-1H6.5" />
   </Icon>
 );
+
+/** A rolled scroll: a skill, written instructions a familiar follows. */
+export const ScrollIcon = () => (
+  <Icon>
+    <path d="M4.5 2.5h7a1.5 1.5 0 0 1 0 3H11v6.5a1.5 1.5 0 0 1-1.5 1.5h-6a1.5 1.5 0 0 1 0-3H4V4a1.5 1.5 0 0 1 .5-1.5z" />
+    <path d="M6.5 6.5h2.5M6.5 9h2" />
+  </Icon>
+);

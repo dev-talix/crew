@@ -11,6 +11,7 @@ import { ExportButton } from "./ImportExport";
 import TemplateImport from "./TemplateImport";
 import { followUntouched } from "./panel";
 import { toggleId, type Connector } from "./connectors";
+import { skillChanges, type Skill } from "./skills";
 import "./connectors.css";
 import { CheckInsField } from "./CheckInSettings";
 import { sameSettings, settingsOf, type CheckInSettings, type CheckInStatus } from "./checkins";
@@ -150,6 +151,17 @@ export default function AgentForm(props: {
   onMountAsync(async (keep) => keep(await onEvent("checkins_changed", loadCheckins)));
   // The form's copy starts from the saved settings and keeps the person's edits after a reload.
   const checkinValue = () => checkins() ?? (checkinStatus() ? settingsOf(checkinStatus()!) : null);
+  const [skills, setSkills] = createSignal<Skill[]>([]);
+  const [skillsOn, setSkillsOn] = createSignal<string[]>([]);
+  // What was on when the form opened, so saving sends only the switches the person flipped.
+  let skillsAtOpen: string[] = [];
+  onSettled(() => {
+    api.skillLibrary().then((list) => {
+      setSkills(list);
+      const id = props.agent?.id;
+      if (id) setSkillsOn((skillsAtOpen = list.filter((s) => s.agents.includes(id)).map((s) => s.name)));
+    }, () => undefined);
+  });
   // Connectors go through the tool socket on this Mac, so familiars elsewhere can't use them yet.
   const connectorsHere = () => !linkedMac() && !remote() && !props.agent?.host && !props.agent?.home;
   // Mac apps run on this Mac too, and start off for every familiar.
@@ -221,6 +233,13 @@ export default function AgentForm(props: {
       if (connectorsHere() && macApps().length > 0) {
         const apps = api.setAgentMacApps(saved.id, macApps().filter((a) => a.on).map((a) => a.id));
         await (editing ? apps : apps.catch(() => undefined));
+      }
+      // Skill folders live on this Mac too. A familiar can save a skill while this form is open, so
+      // only the flipped switches go back, and the rest stay as they are now.
+      const changed = skillChanges(skillsAtOpen, skillsOn());
+      if (connectorsHere() && (changed.on.length || changed.off.length)) {
+        const assigned = api.changeAgentSkills(saved.id, changed.on, changed.off);
+        await (editing ? assigned : assigned.catch(() => undefined));
       }
       if (!editing && saved.setupPending) {
         setSavedPending(saved);
@@ -455,6 +474,29 @@ export default function AgentForm(props: {
               <p class="hint">macOS asks the first time a familiar uses each app. The tools appear in new chats.</p>
             </Show>
           </div>
+
+          <Show when={connectorsHere()}>
+            <div class="field wide">
+              <span>Skills</span>
+              <Show when={skills().length > 0} fallback={<p class="hint">Add skills in Settings, under Skills, then turn them on here. Familiars can save their own too.</p>}>
+                <div class="list connector-toggles">
+                  <For each={skills()}>
+                    {(s) => (
+                      <div class="list-row">
+                        <div class="list-main">
+                          <span class="list-title">{s.name}</span>
+                          <span class="list-sub" title={s.description}>
+                            {s.description}
+                          </span>
+                        </div>
+                        <Toggle label={`Use ${s.name}`} checked={skillsOn().includes(s.name)} onChange={(on) => setSkillsOn((names) => toggleId(names, s.name, on))} />
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </div>
+          </Show>
 
           <div class="field wide">
             <span>Access</span>

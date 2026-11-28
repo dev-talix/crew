@@ -6,6 +6,7 @@ use crate::budgets::{self, Budget, PlanGuard};
 use crate::memory::{self, Entry, Owner, Scope};
 use crate::db::{now_ms, Access, Agent, Avatar, Db, Provider, Routine, Schedule, Workflow, WorkflowStep};
 use crate::permissions::Permissions;
+use crate::skills::{self, NewSkill, SkillFile};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -49,6 +50,8 @@ pub struct GrimoireFile {
     pub themes: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<SettingsDoc>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillDoc>,
 }
 
 impl GrimoireFile {
@@ -63,6 +66,7 @@ impl GrimoireFile {
             covens: Vec::new(),
             themes: Vec::new(),
             settings: None,
+            skills: Vec::new(),
         }
     }
 }
@@ -140,6 +144,22 @@ pub struct CovenDoc {
     /// Shared memory entries, in backups, as in FamiliarDoc.
     #[serde(default, deserialize_with = "memory::from_doc", skip_serializing_if = "Vec::is_empty")]
     pub memory: Vec<Entry>,
+}
+
+/// A skill's text files, who made it, and which familiars have it on, by name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillDoc {
+    pub name: String,
+    pub files: Vec<SkillFile>,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// The familiar that made it.
+    #[serde(default, rename = "madeBy", skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub familiars: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -293,6 +313,9 @@ pub fn export_backup(db: &Db, themes_dir: &Path, history: bool) -> Result<Grimoi
         file.covens.push(doc);
     }
     file.themes = crate::themes::list(db, themes_dir)?.themes.into_iter().filter(|t| !t.built_in).map(|t| theme_doc(&t.theme)).collect();
+    if let Ok(root) = skills::root() {
+        file.skills = skill_docs(db, root, &names)?;
+    }
     file.settings = Some(SettingsDoc {
         claude_billing: db.setting(crate::CLAUDE_BILLING)?,
         dock_edge: db.setting(crate::DOCK_EDGE)?,
@@ -300,6 +323,24 @@ pub fn export_backup(db: &Db, themes_dir: &Path, history: bool) -> Result<Grimoi
         plan_guard: Some(budgets::plan_guard(db)),
     });
     Ok(file)
+}
+
+/// Every skill in the library, with familiars named instead of given by id.
+fn skill_docs(db: &Db, root: &Path, names: &HashMap<String, String>) -> Result<Vec<SkillDoc>, String> {
+    let links = skills::links(db)?;
+    skills::rows(db)?
+        .into_iter()
+        .map(|r| {
+            Ok(SkillDoc {
+                files: skills::files_of(root, &r.name)?,
+                familiars: links.iter().filter(|(s, _)| *s == r.name).filter_map(|(_, a)| names.get(a).cloned()).collect(),
+                created_by: r.created_by.and_then(|id| names.get(&id).cloned()),
+                name: r.name,
+                source: r.source,
+                origin: r.origin,
+            })
+        })
+        .collect()
 }
 
 pub fn parse(text: &str) -> Result<GrimoireFile, String> {
@@ -315,7 +356,7 @@ pub fn parse(text: &str) -> Result<GrimoireFile, String> {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewItem {
-    /// "familiar", "spell", "ritual", "coven", "theme", or "settings".
+    /// "familiar", "spell", "ritual", "coven", "theme", "skill", or "settings".
     pub what: &'static str,
     /// The name in the file.
     pub name: String,
@@ -356,6 +397,7 @@ pub struct Plan {
     covens: Vec<(String, String, Vec<String>, Vec<Entry>)>,
     themes: Vec<Value>,
     settings: Option<SettingsDoc>,
+    skills: Vec<NewSkill>,
 }
 
 /// `name`, or "name (2)", "name (3)" and so on when `taken` already has it, ignoring case. The pick
@@ -433,6 +475,10 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
     let full_access = file.familiars.iter().any(|f| f.access == Access::Full);
+    // Names this file gives to more than one familiar, which a skill's owner or assignment can't name safely.
+    let mut seen_names = std::collections::HashSet::new();
+    let shared_names: std::collections::HashSet<String> = file.familiars.iter().map(|f| f.name.trim().to_lowercase()).filter(|n| !seen_names.insert(n.clone())).collect();
+    let ambiguous = |name: &str| shared_names.contains(&name.trim().to_lowercase());
     // Familiars first, so everything else can point at them.
     let mut taken: Vec<String> = existing.iter().map(|a| a.name.clone()).collect();
     let mut familiars = Vec::new();
@@ -671,6 +717,67 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
         }
     }
 
+    // A skill is someone's instructions, so it comes in on only for the familiars this file brings.
+    let mut skills = Vec::new();
+    let mut taken = match skills::root() {
+        Ok(root) => skills::taken_names(db, root)?,
+        Err(_) => Vec::new(),
+    };
+    for doc in file.skills {
+        if skills::root().is_err() {
+            items.push(skipped("skill", &doc.name, "Skills aren't set up yet.".into()));
+            continue;
+        }
+        if !matches!(doc.source.as_str(), "you" | "folder" | "url" | "familiar" | "template") {
+            items.push(skipped("skill", &doc.name, format!("Grimoire doesn't know where a skill from \"{}\" comes from.", doc.source)));
+            continue;
+        }
+        let mut files = doc.files;
+        let front = match skills::check_files(&mut files) {
+            Ok(front) => front,
+            Err(why) => {
+                items.push(skipped("skill", &doc.name, why));
+                continue;
+            }
+        };
+        let final_name = skills::unique_name(&front.name, &mut taken);
+        let mut line = item("skill", &doc.name, &front.name, final_name.clone());
+        if line.conflict {
+            line.notes.push(format!("You already have a skill named {}, so this one becomes {final_name}.", front.name));
+            if let Err(why) = skills::rename_main(&mut files, &final_name) {
+                items.push(skipped("skill", &doc.name, why));
+                continue;
+            }
+        }
+        let mut agents = Vec::new();
+        for familiar in &doc.familiars {
+            if ambiguous(familiar) {
+                line.notes.push(format!("Off for every {familiar}: more than one familiar in the file has that name."));
+                continue;
+            }
+            match resolve(familiar) {
+                Some((id, final_familiar, true)) => {
+                    line.notes.push(format!("On for the imported {final_familiar}."));
+                    agents.push(id);
+                }
+                Some((_, final_familiar, false)) => line.notes.push(format!("Off for your {final_familiar}. Turn it on in its settings if you want it.")),
+                None => line.notes.push(format!("Was on for {familiar}, who isn't here.")),
+            }
+        }
+        if agents.is_empty() && doc.familiars.is_empty() {
+            line.notes.push("Comes in turned off for every familiar.".into());
+        }
+        items.push(line);
+        skills.push(NewSkill {
+            name: final_name,
+            files,
+            source: doc.source,
+            origin: doc.origin,
+            created_by: doc.created_by.as_deref().filter(|name| !ambiguous(name)).and_then(&resolve).map(|(id, _, _)| id),
+            agents,
+        });
+    }
+
     let settings = match file.settings {
         Some(settings) => match valid_settings(&settings) {
             Ok(()) => {
@@ -688,7 +795,7 @@ pub fn plan(db: &Db, themes_dir: &Path, file: GrimoireFile, home: &Path, keep_fu
     };
 
     let history = familiars.iter().map(|f| f.history.len()).sum();
-    Ok(Plan { preview: Preview { kind: file.kind, items, history, full_access }, familiars, spells, rituals, covens, themes, settings })
+    Ok(Plan { preview: Preview { kind: file.kind, items, history, full_access }, familiars, spells, rituals, covens, themes, settings, skills })
 }
 
 /// What an import added.
@@ -701,6 +808,7 @@ pub struct Imported {
     pub covens: usize,
     pub themes: usize,
     pub settings: bool,
+    pub skills: usize,
 }
 
 /// Enum columns hold their serde names, like "codex" and "workspace".
@@ -748,6 +856,9 @@ fn write_rows(c: &rusqlite::Connection, plan: &Plan) -> rusqlite::Result<()> {
             params![r.id, r.agent_id, r.workflow_id, r.name, r.prompt, serde_json::to_string(&r.schedule).unwrap_or_default(), r.enabled, r.next_run_at, r.created_at],
         )?;
     }
+    for skill in &plan.skills {
+        skills::insert_rows(c, skill)?;
+    }
     if let Some(s) = &plan.settings {
         let set = |key: &str, value: String| {
             c.execute("INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2", params![key, value]).map(|_| ())
@@ -773,9 +884,11 @@ fn write_rows(c: &rusqlite::Connection, plan: &Plan) -> rusqlite::Result<()> {
 pub fn apply(db: &Db, themes_dir: &Path, plan: &Plan) -> Result<Imported, String> {
     let mut written: Vec<PathBuf> = Vec::new();
     let mut folders: Vec<PathBuf> = Vec::new();
-    let undo = |written: &[PathBuf], folders: &[PathBuf]| {
+    let mut skill_folders: Vec<PathBuf> = Vec::new();
+    let undo = |written: &[PathBuf], folders: &[PathBuf], skill_folders: &[PathBuf]| {
         written.iter().for_each(|p| drop(std::fs::remove_file(p)));
         folders.iter().for_each(|p| drop(std::fs::remove_dir(p)));
+        skill_folders.iter().for_each(|p| drop(std::fs::remove_dir_all(p)));
     };
     let mut prepare = || -> Result<(), String> {
         for theme in &plan.themes {
@@ -788,6 +901,7 @@ pub fn apply(db: &Db, themes_dir: &Path, plan: &Plan) -> Result<Imported, String
                 written.push(memory::write_imported(owner, entries)?);
             }
         }
+        skill_folders = skills::write_imported(&plan.skills)?;
         // A familiar on another Mac makes its workspace there when it first starts.
         for new in plan.familiars.iter().filter(|f| f.agent.host.is_none()) {
             let path = PathBuf::from(&new.agent.workspace);
@@ -806,8 +920,11 @@ pub fn apply(db: &Db, themes_dir: &Path, plan: &Plan) -> Result<Imported, String
         })
     });
     if let Err(e) = result {
-        undo(&written, &folders);
+        undo(&written, &folders, &skill_folders);
         return Err(e);
+    }
+    if !plan.skills.is_empty() {
+        skills::sync(db);
     }
     Ok(Imported {
         familiars: plan.familiars.len(),
@@ -816,6 +933,7 @@ pub fn apply(db: &Db, themes_dir: &Path, plan: &Plan) -> Result<Imported, String
         covens: plan.covens.len(),
         themes: plan.themes.len(),
         settings: plan.settings.is_some(),
+        skills: plan.skills.len(),
     })
 }
 
@@ -897,7 +1015,7 @@ pub(crate) async fn apply_import(app: AppHandle, state: State<'_, crate::AppStat
         state.dock.set_edge(&app, edge.as_deref().and_then(crate::dock::Edge::parse))?;
     }
     state.scheduler.changed();
-    for event in ["agents_changed", "workflows_changed", "covens_changed", "themes_changed", "routines_changed", "budgets_changed", "memory_changed"] {
+    for event in ["agents_changed", "workflows_changed", "covens_changed", "themes_changed", "routines_changed", "budgets_changed", "memory_changed", skills::CHANGED] {
         let _ = app.emit(event, ());
     }
     Ok(done)
@@ -1254,6 +1372,65 @@ mod tests {
         assert_eq!(entries[0].learned_on, "2026-10-01");
         let elders = memory::read(&db, dir, Owner { scope: Scope::Coven, id: old.coven_id.as_deref().unwrap() }).unwrap().entries;
         assert_eq!(elders[0].text, "Cite sources.");
+        std::fs::remove_dir_all(themes).unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn skills_and_who_has_them_survive_a_backup() {
+        let root = skills::test_root();
+        let themes = temp_dir("themes");
+        let home = temp_dir("home");
+        let db = stocked(&themes);
+        skills::create_in(&db, root, "r", "roundtrip-brief", "Short briefs.", "Keep it short.").unwrap();
+        skills::set_for_agent_in(&db, root, "s", &["roundtrip-brief".into()]).unwrap();
+        let file = export_backup(&db, &themes, false).unwrap();
+        let doc = file.skills.iter().find(|d| d.name == "roundtrip-brief").unwrap();
+        assert_eq!((doc.created_by.as_deref(), doc.familiars.clone()), (Some("Researcher"), vec!["Researcher".to_string(), "Scribe".to_string()]));
+        assert!(serde_json::to_string(&file).unwrap().contains("\"madeBy\":\"Researcher\""), "backups name the familiar, not its id");
+
+        // Importing into the same Grimoire renames the skill and points it at the imported familiars.
+        let p = plan(&db, &themes, file, &home, false).unwrap();
+        let line = p.preview.items.iter().find(|i| i.what == "skill" && i.name == "roundtrip-brief").unwrap();
+        assert_eq!(line.final_name, "roundtrip-brief-2");
+        apply(&db, &themes, &p).unwrap();
+        let agents = db.list_agents().unwrap();
+        let id_of = |name: &str| agents.iter().find(|a| a.name == name).unwrap().id.clone();
+        let copy = skills::list_in(&db, root).unwrap().into_iter().find(|s| s.name == "roundtrip-brief-2").unwrap();
+        assert_eq!(copy.created_by, Some(id_of("Researcher (2)")));
+        let mut on = copy.agents.clone();
+        on.sort();
+        let mut want = vec![id_of("Researcher (2)"), id_of("Scribe (2)")];
+        want.sort();
+        assert_eq!(on, want);
+        let text = std::fs::read_to_string(root.join("skills/roundtrip-brief-2/SKILL.md")).unwrap();
+        assert_eq!(skills::parse(&text).unwrap().name, "roundtrip-brief-2");
+
+        // A file that names only your familiars brings its skill in off, and broken skills stay out.
+        let mut shared = GrimoireFile::new(Kind::Backup);
+        let main = |name: &str| SkillFile { path: skills::MAIN_FILE.into(), text: format!("---\nname: {name}\ndescription: d\n---\nBody\n") };
+        shared.skills.push(SkillDoc { name: "lonely-skill".into(), files: vec![main("lonely-skill")], source: "url".into(), origin: None, created_by: None, familiars: vec!["Researcher".into()] });
+        shared.skills.push(SkillDoc { name: "escape".into(), files: vec![main("escape"), SkillFile { path: "../../evil".into(), text: "x".into() }], source: "url".into(), origin: None, created_by: None, familiars: vec![] });
+        shared.skills.push(SkillDoc { name: "forged".into(), files: vec![main("forged")], source: "root".into(), origin: None, created_by: None, familiars: vec![] });
+        let p = plan(&db, &themes, shared, &home, false).unwrap();
+        let lonely = p.preview.items.iter().find(|i| i.name == "lonely-skill").unwrap();
+        assert!(lonely.notes.iter().any(|n| n.contains("Off for your Researcher")), "{:?}", lonely.notes);
+        assert!(p.preview.items.iter().filter(|i| i.name != "lonely-skill").all(|i| i.skipped));
+        apply(&db, &themes, &p).unwrap();
+        assert!(skills::list_in(&db, root).unwrap().iter().find(|s| s.name == "lonely-skill").unwrap().agents.is_empty());
+        assert!(!root.join("evil").exists() && !root.join("skills/escape").exists());
+
+        // Two familiars with one name: the skill can't tell them apart, so it gets no owner and stays off.
+        let mut twins = GrimoireFile::new(Kind::Backup);
+        for _ in 0..2 {
+            twins.familiars.push(familiar_doc(&db, &db.get_agent("r").unwrap().unwrap(), false).unwrap());
+        }
+        twins.skills.push(SkillDoc { name: "twin-skill".into(), files: vec![main("twin-skill")], source: "familiar".into(), origin: None, created_by: Some("Researcher".into()), familiars: vec!["Researcher".into()] });
+        let p = plan(&db, &themes, twins, &home, false).unwrap();
+        assert!(p.preview.items.iter().find(|i| i.name == "twin-skill").unwrap().notes.iter().any(|n| n.contains("more than one familiar")));
+        apply(&db, &themes, &p).unwrap();
+        let twin = skills::list_in(&db, root).unwrap().into_iter().find(|s| s.name == "twin-skill").unwrap();
+        assert!(twin.created_by.is_none() && twin.agents.is_empty());
         std::fs::remove_dir_all(themes).unwrap();
         std::fs::remove_dir_all(home).unwrap();
     }

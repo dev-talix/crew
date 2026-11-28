@@ -562,6 +562,13 @@ impl Runtime {
         match started {
             Ok(()) => {
                 clear_notes(&self.db, &held);
+                // A stop that came while the turn was starting found nothing to interrupt yet.
+                if self.take_stop(agent_id) {
+                    match agent.provider {
+                        Provider::Codex => drop(self.codex_for(&agent).stop(agent_id).await),
+                        Provider::Claude => self.claude.stop(agent_id).await,
+                    }
+                }
                 stream_turn(&mut writer, rx).await
             }
             Err(e) => writer.fail_explained(e).await,

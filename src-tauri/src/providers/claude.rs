@@ -68,8 +68,10 @@ pub struct Claude {
     processes: Arc<Mutex<HashMap<String, Arc<ClaudeProcess>>>>,
 }
 
+/// A familiar's process restarts, resuming its session, when any of this changes: its settings, or
+/// the skills it has on, which Claude loads at start.
 fn config_key(agent: &Agent) -> String {
-    format!("{:?}|{:?}|{:?}|{}|{:?}", agent.model, agent.effort, agent.access, agent.workspace, agent.host)
+    format!("{:?}|{:?}|{:?}|{}|{:?}|{}", agent.model, agent.effort, agent.access, agent.workspace, agent.host, crate::skills::claude_signature(agent))
 }
 
 fn args(agent: &Agent, lane: Option<&Lane>) -> Vec<String> {
@@ -127,6 +129,10 @@ fn args(agent: &Agent, lane: Option<&Lane>) -> Vec<String> {
     }
     if let Some(effort) = agent.effort.as_deref().filter(|e| !e.is_empty()) {
         args.extend(["--effort".into(), effort.into()]);
+    }
+    // The skills it has on, as a plugin folder Grimoire keeps outside the workspace.
+    if let Some(dir) = crate::skills::claude_plugin(agent).filter(|_| agent.host.is_none()) {
+        args.extend(["--plugin-dir".into(), dir.to_string_lossy().into_owned()]);
     }
     if let Some(memory) = crate::briefing::session_prompt(agent) {
         // Claude records the system prompt when a chat starts and reuses it on resume, so a changed
