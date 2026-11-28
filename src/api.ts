@@ -560,6 +560,15 @@ export interface ThemeList {
 
 export type VaultKind = "login" | "api_key" | "card";
 
+/** One of this Mac's apps a familiar can use, as its settings show it. */
+export interface MacApp {
+  id: "calendar" | "reminders" | "contacts" | "mail" | "shortcuts";
+  name: string;
+  description: string;
+  /** Whether the familiar has it turned on. */
+  on: boolean;
+}
+
 export interface VaultItem {
   id: string;
   kind: VaultKind;
@@ -755,6 +764,8 @@ export const api = {
   connectorSetToken: (id: string, token: string) => invoke<Connectors.Connector>("connector_set_token", { id, token }),
   connectorSignOut: (id: string) => invoke<Connectors.Connector>("connector_sign_out", { id }),
   setAgentConnectors: (agentId: string, ids: string[]) => invoke<void>("set_agent_connectors", { agentId, ids }),
+  agentMacApps: (agentId: string | null) => invoke<MacApp[]>("agent_mac_apps", { agentId }),
+  setAgentMacApps: (agentId: string, apps: string[]) => invoke<void>("set_agent_mac_apps", { agentId, apps }),
   listVault: () => invoke<VaultItem[]>("list_vault"),
   vaultSecret: (id: string) => invoke<Record<string, string>>("vault_secret", { id }),
   saveVaultItem: (input: VaultItemInput) => invoke<VaultItem>("save_vault_item", { input }),

@@ -250,7 +250,7 @@ pub struct UsageRow {
     pub at: i64,
 }
 
-const SCHEMA_VERSION: i64 = 30;
+const SCHEMA_VERSION: i64 = 31;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -563,6 +563,9 @@ impl Db {
         }
         if version < 30 {
             crate::checkins::migrate(&conn)?;
+        }
+        if version < 31 {
+            crate::mac_apps::migrate(&conn)?;
         }
         conn.execute(
             "UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'",
@@ -1103,6 +1106,7 @@ mod tests {
                  ALTER TABLE chats DROP COLUMN remote_peer; ALTER TABLE chats DROP COLUMN remote_asker; ALTER TABLE chats DROP COLUMN remote_name;
                  DROP TABLE chat_reviews; DROP TABLE checkin_runs; DROP TABLE checkins;
                  DROP TABLE room_messages; DROP TABLE room_members; DROP TABLE rooms;
+                 DROP TABLE agent_mac_apps;
                  PRAGMA user_version = 21;",
             )
             .unwrap();
@@ -1144,6 +1148,7 @@ mod tests {
                  DROP TABLE handoffs; ALTER TABLE old RENAME TO handoffs; CREATE INDEX handoffs_by_chat ON handoffs(chat_id);
                  DROP TABLE chat_reviews; DROP TABLE checkin_runs; DROP TABLE checkins;
                  DROP TABLE room_messages; DROP TABLE room_members; DROP TABLE rooms;
+                 DROP TABLE agent_mac_apps;
                  PRAGMA user_version = 25;",
             )
             .unwrap();

@@ -43,9 +43,12 @@ strip = true
 [target.'cfg(target_os = "macos")'.dependencies]
 # Already in the build through Tauri; used directly to swap the Dock icon at runtime.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSArray", "NSBundle", "NSData", "NSSet", "NSString"] }
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSBundle", "NSCalendar", "NSData", "NSDate", "NSError", "NSPredicate", "NSSet", "NSString"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder", "NSRunningApplication"] }
 security-framework = "3"
 # Notifications with Allow and Deny buttons, which tauri-plugin-notification only offers on mobile.
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 block2 = "0.6"
+# Calendar, Reminders, and Contacts for familiars that have those Mac apps on. Same family as objc2 above.
+objc2-event-kit = { version = "0.3", default-features = false, features = ["std", "block2", "EKCalendar", "EKCalendarItem", "EKEvent", "EKEventStore", "EKObject", "EKReminder", "EKSource", "EKTypes"] }
+objc2-contacts = { version = "0.3", default-features = false, features = ["std", "block2", "CNContact", "CNContactStore", "CNContact_Predicates", "CNLabeledValue", "CNPhoneNumber"] }

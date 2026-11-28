@@ -2,7 +2,7 @@ import { createEffect, createSignal, For, onCleanup, onSettled, Show } from "sol
 import AvatarStudio from "./AvatarStudio";
 import { Segmented, Toggle } from "./ui";
 import { inkFor, randomAvatar, type Avatar } from "./avatar";
-import { api, createFetch, errorText, onEvent, onMountAsync, PROVIDER_NAMES, shortPath, type Access, type Agent, type Coven, type HostCheck, type Peer, type Provider } from "./api";
+import { api, createFetch, errorText, onEvent, onMountAsync, PROVIDER_NAMES, shortPath, type Access, type Agent, type Coven, type HostCheck, type MacApp, type Peer, type Provider } from "./api";
 import { runsOnOptions } from "./linked";
 import { effortName, modelCatalog, modelName } from "./models";
 import { BudgetField } from "./BudgetControls";
@@ -152,6 +152,11 @@ export default function AgentForm(props: {
   const checkinValue = () => checkins() ?? (checkinStatus() ? settingsOf(checkinStatus()!) : null);
   // Connectors go through the tool socket on this Mac, so familiars elsewhere can't use them yet.
   const connectorsHere = () => !linkedMac() && !remote() && !props.agent?.host && !props.agent?.home;
+  // Mac apps run on this Mac too, and start off for every familiar.
+  const [macApps, setMacApps] = createSignal<MacApp[]>([]);
+  onSettled(() => {
+    api.agentMacApps(props.agent?.id ?? null).then(setMacApps, () => undefined);
+  });
   let confirmTimer: number | undefined;
   onCleanup(() => clearTimeout(confirmTimer));
 
@@ -212,6 +217,10 @@ export default function AgentForm(props: {
       if (editing && edited && status && !sameSettings(edited, settingsOf(status))) {
         setCheckinStatus(await api.saveCheckins(saved.id, edited));
         setCheckins(null);
+      }
+      if (connectorsHere() && macApps().length > 0) {
+        const apps = api.setAgentMacApps(saved.id, macApps().filter((a) => a.on).map((a) => a.id));
+        await (editing ? apps : apps.catch(() => undefined));
       }
       if (!editing && saved.setupPending) {
         setSavedPending(saved);
@@ -426,6 +435,26 @@ export default function AgentForm(props: {
           <Show when={editing && checkinValue()}>
             {(value) => <CheckInsField agent={props.agent!} value={value()} status={checkinStatus()} onChange={setCheckins} />}
           </Show>
+
+          <div class="field wide">
+            <span>Mac apps</span>
+            <Show when={connectorsHere()} fallback={<p class="hint">Mac apps only work for familiars on this Mac.</p>}>
+              <div class="list connector-toggles">
+                <For each={macApps()}>
+                  {(app) => (
+                    <div class="list-row">
+                      <div class="list-main">
+                        <span class="list-title">{app.name}</span>
+                        <span class="list-sub">{app.description}</span>
+                      </div>
+                      <Toggle label={`Use ${app.name}`} checked={app.on} onChange={(on) => setMacApps((list) => list.map((a) => (a.id === app.id ? { ...a, on } : a)))} />
+                    </div>
+                  )}
+                </For>
+              </div>
+              <p class="hint">macOS asks the first time a familiar uses each app. The tools appear in new chats.</p>
+            </Show>
+          </div>
 
           <div class="field wide">
             <span>Access</span>

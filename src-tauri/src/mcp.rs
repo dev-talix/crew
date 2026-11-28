@@ -39,11 +39,11 @@ pub fn main(args: &[String]) -> i32 {
         if message["method"] == "tools/call" {
             let caller = caller.clone();
             std::thread::spawn(move || {
-                if let Some(reply) = respond(&message, |tool, arguments| relay(&caller, tool, arguments)) {
+                if let Some(reply) = respond(&message, || tool_list(&caller), |tool, arguments| relay(&caller, tool, arguments)) {
                     write(reply);
                 }
             });
-        } else if let Some(reply) = respond(&message, |tool, arguments| relay(&caller, tool, arguments)) {
+        } else if let Some(reply) = respond(&message, || tool_list(&caller), |tool, arguments| relay(&caller, tool, arguments)) {
             if !write(reply) {
                 break;
             }
@@ -93,8 +93,8 @@ fn connector_replies(message: &Value, reply: Result<Value, String>) -> Vec<Value
     }
 }
 
-/// Answers one JSON-RPC message. Notifications get no reply.
-pub fn respond(message: &Value, call: impl FnOnce(&str, Value) -> Result<String, String>) -> Option<Value> {
+/// Answers one JSON-RPC message. Notifications get no reply. `tools` lists the familiar's tools.
+pub fn respond(message: &Value, tools: impl FnOnce() -> Value, call: impl FnOnce(&str, Value) -> Result<String, String>) -> Option<Value> {
     let id = message.get("id")?.clone();
     let method = message.get("method")?.as_str()?;
     let params = &message["params"];
@@ -105,7 +105,7 @@ pub fn respond(message: &Value, call: impl FnOnce(&str, Value) -> Result<String,
             "serverInfo": { "name": tools::SERVER_NAME, "title": "Grimoire", "version": env!("CARGO_PKG_VERSION") },
         }),
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": tools::definitions() }),
+        "tools/list" => json!({ "tools": tools() }),
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or_default();
             let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
@@ -138,6 +138,15 @@ fn exchange(caller: &Caller, mut request: Value) -> Result<Value, String> {
     serde_json::from_str(&line).map_err(|_| "Grimoire sent an unreadable reply.".to_string())
 }
 
+/// The tools the app says this familiar has, which depend on its settings. The tools everyone has
+/// when the app can't say.
+fn tool_list(caller: &Caller) -> Value {
+    match exchange(caller, json!({ "list": true })) {
+        Ok(reply) if reply["ok"] == true && reply["tools"].is_array() => reply["tools"].clone(),
+        _ => tools::definitions(),
+    }
+}
+
 fn relay(caller: &Caller, tool: &str, arguments: Value) -> Result<String, String> {
     let reply = exchange(caller, json!({ "tool": tool, "arguments": arguments }))?;
     match reply["ok"].as_bool() {
@@ -156,19 +165,19 @@ mod tests {
 
     #[test]
     fn answers_initialize_and_lists_tools() {
-        let init = respond(&request("initialize", json!({ "protocolVersion": "2025-03-26" })), |_, _| unreachable!()).unwrap();
+        let init = respond(&request("initialize", json!({ "protocolVersion": "2025-03-26" })), || unreachable!(), |_, _| unreachable!()).unwrap();
         assert_eq!(init["id"], 7);
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
         assert!(init["result"]["capabilities"]["tools"].is_object());
 
-        let list = respond(&request("tools/list", json!({})), |_, _| unreachable!()).unwrap();
+        let list = respond(&request("tools/list", json!({})), tools::definitions, |_, _| unreachable!()).unwrap();
         let names: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["list_familiars", "list_spells", "create_spell", "list_themes", "create_theme", "vault_search", "vault_use", "ask_familiar", "message_familiar", "set_theme", "read_memory", "remember", "forget_memory", "ask_person", "read_ledger", "update_ledger", "start_helper", "list_helpers", "stop_helper", "draft_message", "browser_open", "browser_read", "browser_click", "browser_type", "browser_close", "search_chats"]);
     }
 
     #[test]
     fn relays_tool_calls_and_marks_failures() {
-        let ok = respond(&request("tools/call", json!({ "name": "list_familiars", "arguments": { "x": 1 } })), |tool, args| {
+        let ok = respond(&request("tools/call", json!({ "name": "list_familiars", "arguments": { "x": 1 } })), || unreachable!(), |tool, args| {
             assert_eq!((tool, args), ("list_familiars", json!({ "x": 1 })));
             Ok("[]".into())
         })
@@ -176,7 +185,7 @@ mod tests {
         assert_eq!(ok["result"]["content"][0]["text"], "[]");
         assert!(ok["result"].get("isError").is_none());
 
-        let failed = respond(&request("tools/call", json!({ "name": "create_spell" })), |_, args| {
+        let failed = respond(&request("tools/call", json!({ "name": "create_spell" })), || unreachable!(), |_, args| {
             assert_eq!(args, json!({}));
             Err("Add at least one step.".into())
         })
@@ -209,8 +218,8 @@ mod tests {
     #[test]
     fn ignores_notifications_and_rejects_unknown_methods() {
         let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-        assert!(respond(&note, |_, _| unreachable!()).is_none());
-        let unknown = respond(&request("resources/list", json!({})), |_, _| unreachable!()).unwrap();
+        assert!(respond(&note, || unreachable!(), |_, _| unreachable!()).is_none());
+        let unknown = respond(&request("resources/list", json!({})), || unreachable!(), |_, _| unreachable!()).unwrap();
         assert_eq!(unknown["error"]["code"], -32601);
     }
 }

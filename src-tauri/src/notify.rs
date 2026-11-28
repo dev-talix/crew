@@ -149,6 +149,12 @@ pub(crate) fn approval_text(name: &str, request: &Request) -> (String, String) {
             Some(rest) => capitalize(rest),
             None => request.title.clone(),
         },
+        // "Run the Shortcut "Log Water". Input: …", since Allow on the notification answers without the card.
+        "mac" => {
+            let action = request.title.strip_prefix(&format!("{name} wants to ")).map(capitalize).unwrap_or_else(|| request.title.clone());
+            let detail = request.detail.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" · ");
+            clip(&format!("{action}. {detail}"))
+        }
         _ => clip(request.detail.trim()),
     };
     (format!("{name} needs your OK"), body)
@@ -518,6 +524,10 @@ mod tests {
         request.kind = "vault";
         request.title = "Warden wants to use the password for github.com".into();
         assert_eq!(approval_text("Warden", &request).1, "Use the password for github.com");
+        request.kind = "mac";
+        request.title = "Warden wants to run the Shortcut \"Log Water\"".into();
+        request.detail = "Input: 2 glasses\nA Shortcut can send messages.".into();
+        assert_eq!(approval_text("Warden", &request).1, "Run the Shortcut \"Log Water\". Input: 2 glasses · A Shortcut can send messages.");
     }
 
     #[test]
